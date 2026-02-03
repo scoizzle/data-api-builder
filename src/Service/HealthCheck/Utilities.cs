@@ -11,6 +11,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.HealthCheck
 {
@@ -34,6 +35,8 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
                     return "SELECT VALUE 1";
                 case DatabaseType.DWSQL:
                     return "SELECT 1";
+                case DatabaseType.Oracle:
+                    return "SELECT 1 FROM DUAL";
                 default:
                     return string.Empty;
             }
@@ -48,6 +51,8 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
                 case DatabaseType.MSSQL:
                 case DatabaseType.DWSQL:
                     return SqlClientFactory.Instance;
+                case DatabaseType.Oracle:
+                    return OracleClientFactory.Instance;
                 default:
                     throw new NotSupportedException($"Database type '{dbType}' is not supported.");
             }
