@@ -1232,7 +1232,7 @@ namespace Azure.DataApiBuilder.Core.Services
                         GetDatabaseObjectName(entityName),
                         GetStoredProcedureDefinition(entityName));
 
-                    if (GetDatabaseType() == DatabaseType.MSSQL || GetDatabaseType() == DatabaseType.DWSQL)
+                    if (GetDatabaseType() == DatabaseType.MSSQL || GetDatabaseType() == DatabaseType.DWSQL || GetDatabaseType() == DatabaseType.Oracle)
                     {
                         await PopulateResultSetDefinitionsForStoredProcedureAsync(
                             GetSchemaName(entityName),
@@ -1518,8 +1518,8 @@ namespace Azure.DataApiBuilder.Core.Services
                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
             }
 
-            Entities.TryGetValue(entityName, out Entity? entity);
-            if (GetDatabaseType() is DatabaseType.MSSQL && entity is not null && entity.Source.Type is EntitySourceType.Table)
+Entities.TryGetValue(entityName, out Entity? entity);
+            if ((GetDatabaseType() is DatabaseType.MSSQL || GetDatabaseType() is DatabaseType.Oracle) && entity is not null && entity.Source.Type is EntitySourceType.Table)
             {
                 await PopulateTriggerMetadataForTable(entityName, schemaName, tableName, sourceDefinition);
             }
