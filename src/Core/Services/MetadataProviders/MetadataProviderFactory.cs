@@ -56,6 +56,7 @@ namespace Azure.DataApiBuilder.Core.Services.MetadataProviders
                     DatabaseType.DWSQL => new MsSqlMetadataProvider(_runtimeConfigProvider, _runtimeConfigValidator, _queryManagerFactory, _logger, dataSourceName, _isValidateOnly),
                     DatabaseType.PostgreSQL => new PostgreSqlMetadataProvider(_runtimeConfigProvider, _runtimeConfigValidator, _queryManagerFactory, _logger, dataSourceName, _isValidateOnly),
                     DatabaseType.MySQL => new MySqlMetadataProvider(_runtimeConfigProvider, _runtimeConfigValidator, _queryManagerFactory, _logger, dataSourceName, _isValidateOnly),
+                    DatabaseType.Oracle => new OracleMetadataProvider(_runtimeConfigProvider, _runtimeConfigValidator, _queryManagerFactory, _logger, dataSourceName, _isValidateOnly),
                     _ => throw new NotSupportedException(dataSource.DatabaseTypeNotSupportedMessage),
                 };
 
