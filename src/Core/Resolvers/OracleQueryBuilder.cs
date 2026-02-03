@@ -139,15 +139,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Build list of LabelledColumns as:
-        /// "{label1}", "{label2}" ...
-        /// </summary>
-        private string BuildListOfLabels(List<LabelledColumn> labelledColumns)
-        {
-            return Build(labelledColumns.Select(labelledColumn => labelledColumn.Label).ToList());
-        }
-
-        /// <summary>
         /// Build column as
         /// "{tableAlias}"."{ColumnName}"
         /// or if SourceAlias is empty, as
