@@ -37,6 +37,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 using MySqlConnector;
 using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 using ZiggyCreatures.Caching.Fusion;
 using static Azure.DataApiBuilder.Core.AuthenticationHelpers.AppServiceAuthentication;
 
@@ -287,6 +288,11 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     string mySqlDbName = new MySqlConnectionStringBuilder(connectionString).Database;
                     DatabaseName = !string.IsNullOrEmpty(mySqlDbName) ? mySqlDbName : string.Empty;
                     break;
+                case TestCategory.ORACLE:
+                    // use UserID as default name for Oracle, uppercased
+                    OracleConnectionStringBuilder oracleBuilder = new(connectionString);
+                    DatabaseName = !string.IsNullOrEmpty(oracleBuilder.UserID) ? oracleBuilder.UserID.ToUpper() : "SYSTEM";
+                    break;
             }
         }
 
@@ -382,6 +388,26 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                          new MsSqlMetadataProvider(
                              runtimeConfigProvider,
                              runtimeConfigValidator,
+                             _queryManagerFactory.Object,
+                             _sqlMetadataLogger,
+                             dataSourceName);
+                    break;
+                case TestCategory.ORACLE:
+                    Mock<ILogger<OracleQueryExecutor>> oracleQueryExecutorLogger = new();
+                    _queryBuilder = new OracleQueryBuilder();
+                    _defaultSchemaName = "SYSTEM";
+                    _dbExceptionParser = new OracleDbExceptionParser(runtimeConfigProvider);
+                    _queryExecutor = new OracleQueryExecutor(
+                        runtimeConfigProvider,
+                        _dbExceptionParser,
+                        oracleQueryExecutorLogger.Object,
+                        httpContextAccessor.Object);
+                    _queryManagerFactory.Setup(x => x.GetQueryBuilder(It.IsAny<DatabaseType>())).Returns(_queryBuilder);
+                    _queryManagerFactory.Setup(x => x.GetQueryExecutor(It.IsAny<DatabaseType>())).Returns(_queryExecutor);
+
+                    _sqlMetadataProvider =
+                         new OracleMetadataProvider(
+                             runtimeConfigProvider,
                              _queryManagerFactory.Object,
                              _sqlMetadataLogger,
                              dataSourceName);
