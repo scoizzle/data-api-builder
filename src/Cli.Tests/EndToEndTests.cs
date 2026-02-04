@@ -323,7 +323,7 @@ public class EndToEndTests
     /// </param>
     /// <param name="expectedValueForMultipleCreateEnabledFlag"> Expected value for the multiple create enabled flag in the config file.</param>
     [DataTestMethod]
-    [DataRow(CliBool.True, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSql database type")]
+[DataRow(CliBool.True, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSql database type")]
     [DataRow(CliBool.False, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for MsSql database type")]
     [DataRow(CliBool.None, "mssql", DatabaseType.MSSQL, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for MsSql database type")]
     [DataRow(CliBool.True, "mysql", DatabaseType.MySQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MySql database type")]
@@ -332,6 +332,9 @@ public class EndToEndTests
     [DataRow(CliBool.True, "postgresql", DatabaseType.PostgreSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for PostgreSql database type")]
     [DataRow(CliBool.False, "postgresql", DatabaseType.PostgreSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for PostgreSql database type")]
     [DataRow(CliBool.None, "postgresql", DatabaseType.PostgreSQL, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for PostgreSql database type")]
+    [DataRow(CliBool.True, "oracle", DatabaseType.Oracle, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for Oracle database type")]
+    [DataRow(CliBool.False, "oracle", DatabaseType.Oracle, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for Oracle database type")]
+    [DataRow(CliBool.None, "oracle", DatabaseType.Oracle, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for Oracle database type")]
     [DataRow(CliBool.True, "dwsql", DatabaseType.DWSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for dwsql database type")]
     [DataRow(CliBool.False, "dwsql", DatabaseType.DWSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for dwsql database type")]
     [DataRow(CliBool.None, "dwsql", DatabaseType.DWSQL, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for dwsql database type")]
