@@ -270,8 +270,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc/>
         public string BuildQueryToGetReadOnlyColumns(string schemaParamName, string tableParamName)
         {
+            // Oracle uses :param instead of @param for bind parameters
             string query = $"SELECT COLUMN_NAME FROM ALL_TAB_COLS " +
-                $"WHERE OWNER = {schemaParamName} AND TABLE_NAME = {tableParamName} AND VIRTUAL_COLUMN = 'YES'";
+                $"WHERE OWNER = :{schemaParamName.TrimStart('@')} AND TABLE_NAME = :{tableParamName.TrimStart('@')} AND VIRTUAL_COLUMN = 'YES'";
             return query;
         }
 
