@@ -26,7 +26,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public override string QuoteIdentifier(string ident)
         {
-            return _builder.QuoteIdentifier(ident);
+            return _builder.QuoteIdentifier(ident.ToUpperInvariant());
         }
 
         /// <inheritdoc />
@@ -264,7 +264,70 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc/>
         public string BuildStoredProcedureResultDetailsQuery(string databaseObjectName)
         {
-            throw new NotImplementedException();
+            // Oracle 19c implementation for retrieving stored procedure result set metadata
+            // Oracle doesn't have a direct equivalent to SQL Server's dm_exec_describe_first_result_set_for_object
+            // Instead, we query ALL_ARGUMENTS to get OUT and IN/OUT parameters that represent the result
+            // databaseObjectName format: "schema.procedureName" or "procedureName"
+            
+            string query = 
+                $"SELECT " +
+                $"ARGUMENT_NAME AS \"{STOREDPROC_COLUMN_NAME}\", " +
+                $"DATA_TYPE AS \"{STOREDPROC_COLUMN_SYSTEMTYPENAME}\", " +
+                $"'false' AS \"{STOREDPROC_COLUMN_ISNULLABLE}\" " +
+                $"FROM ALL_ARGUMENTS " +
+                $"WHERE (UPPER(OWNER || '.' || OBJECT_NAME) = UPPER('{databaseObjectName}') " +
+                $"OR UPPER(OBJECT_NAME) = UPPER('{databaseObjectName}')) " +
+                $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
+                $"AND ARGUMENT_NAME IS NOT NULL " +
+                $"ORDER BY POSITION";
+            
+            return query;
+        }
+
+        /// <inheritdoc/>
+        public override string BuildForeignKeyInfoQuery(int numberOfParameters)
+        {
+            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
+            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
+            
+            // Oracle uses :param syntax instead of @param
+            string tableSchemaParamsForInClause = string.Join(", :", schemaNameParams);
+            string tableNameParamsForInClause = string.Join(", :", tableNameParams);
+
+            // Oracle uses its data dictionary views instead of INFORMATION_SCHEMA
+            // ALL_CONSTRAINTS contains constraint information (CONSTRAINT_TYPE = 'R' for foreign keys)
+            // ALL_CONS_COLUMNS contains column mappings for constraints
+            // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
+            string foreignKeyQuery = $@"
+SELECT 
+    RefCons.CONSTRAINT_NAME {nameof(ForeignKeyDefinition)},
+    RefCons.OWNER Referencing{nameof(DatabaseObject.SchemaName)},
+    RefCons.TABLE_NAME Referencing{nameof(SourceDefinition)},
+    RefConsCol.COLUMN_NAME {nameof(ForeignKeyDefinition.ReferencingColumns)},
+    RefConsPk.OWNER Referenced{nameof(DatabaseObject.SchemaName)},
+    RefConsPk.TABLE_NAME Referenced{nameof(SourceDefinition)},
+    RefConsPkCol.COLUMN_NAME {nameof(ForeignKeyDefinition.ReferencedColumns)}
+FROM 
+    ALL_CONSTRAINTS RefCons
+    INNER JOIN 
+    ALL_CONS_COLUMNS RefConsCol
+        ON RefCons.OWNER = RefConsCol.OWNER
+        AND RefCons.CONSTRAINT_NAME = RefConsCol.CONSTRAINT_NAME
+    INNER JOIN
+    ALL_CONSTRAINTS RefConsPk
+        ON RefCons.R_OWNER = RefConsPk.OWNER
+        AND RefCons.R_CONSTRAINT_NAME = RefConsPk.CONSTRAINT_NAME
+    INNER JOIN
+    ALL_CONS_COLUMNS RefConsPkCol
+        ON RefConsPk.OWNER = RefConsPkCol.OWNER
+        AND RefConsPk.CONSTRAINT_NAME = RefConsPkCol.CONSTRAINT_NAME
+        AND RefConsCol.POSITION = RefConsPkCol.POSITION
+WHERE
+    RefCons.CONSTRAINT_TYPE = 'R'
+    AND UPPER(RefCons.OWNER) IN (:{tableSchemaParamsForInClause})
+    AND UPPER(RefCons.TABLE_NAME) IN (:{tableNameParamsForInClause})";
+
+            return foreignKeyQuery;
         }
 
         /// <inheritdoc/>

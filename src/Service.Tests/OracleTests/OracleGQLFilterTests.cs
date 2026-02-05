@@ -12,7 +12,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
     [TestClass, TestCategory(TestCategory.ORACLE)]
     public class OracleGQLFilterTests : GraphQLFilterTestBase
     {
-        protected static string DEFAULT_SCHEMA = "dbo";
+        protected static string DEFAULT_SCHEMA = "SYSTEM";
 
         /// <summary>
         /// Set the database engine for the tests.
