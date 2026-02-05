@@ -1354,9 +1354,9 @@ namespace Azure.DataApiBuilder.Core.Services
             // one row in the result set.
             foreach (JsonElement element in sqlResult.RootElement.EnumerateArray())
             {
-                string resultFieldName = element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME).ToString();
-                Type resultFieldType = SqlToCLRType(element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME).ToString());
-                bool isResultFieldNullable = element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_ISNULLABLE).GetBoolean();
+                string resultFieldName = GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME).ToString();
+                Type resultFieldType = SqlToCLRType(GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME).ToString());
+                bool isResultFieldNullable = ConvertJsonElementToBoolean(GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_ISNULLABLE));
 
                 // Validate that the stored procedure returns columns with proper names
                 // This commonly occurs when using aggregate functions or expressions without aliases
@@ -1373,6 +1373,25 @@ namespace Azure.DataApiBuilder.Core.Services
 
                 // Store the dictionary containing result set field with its type as Columns
                 storedProcedureDefinition.Columns.TryAdd(resultFieldName, new(resultFieldType) { IsNullable = isResultFieldNullable });
+            }
+
+            static JsonElement GetPropertyByCaseInsensitiveName(JsonElement element, string name)
+            {
+                return element.EnumerateObject()
+                    .First(property => string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                    .Value;
+            }
+
+            static bool ConvertJsonElementToBoolean(JsonElement element)
+            {
+                return element.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String when bool.TryParse(element.GetString(), out bool boolValue) => boolValue,
+                    JsonValueKind.Number when element.TryGetInt32(out int intValue) => intValue != 0,
+                    _ => throw new InvalidOperationException("Expected a boolean value."),
+                };
             }
         }
 

@@ -4,6 +4,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -191,6 +192,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             await SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
+
+            Debug.WriteLine($"[DEBUG] EXECUTING SQL QUERY ASYNC: {sqltext}");
 
             TResult? result = default(TResult);
 
@@ -474,6 +477,26 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 throw DbExceptionParser.Parse(e);
             }
         }
+
+        static string Dump(DbCommand cmd)
+        {
+            OrderedDictionary<string, string> parameters = new();
+
+            foreach (DbParameter param in cmd.Parameters)
+            {
+                parameters.Add(param.ParameterName, param.Value?.ToString() ?? "NULL");
+            }
+
+            var text = cmd.CommandText;
+
+            foreach (var (key, value) in parameters.Reverse())
+            {
+                text = text.Replace($":{key}", value);
+            }
+
+            return text;
+        }
+
         /// <inheritdoc />
         public async Task<DbResultSet>
             ExtractResultSetFromDbDataReaderAsync(DbDataReader dbDataReader, List<string>? args = null)
