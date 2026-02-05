@@ -271,9 +271,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             
             string query = 
                 $"SELECT " +
-                $"ARGUMENT_NAME AS \"{STOREDPROC_COLUMN_NAME}\", " +
-                $"DATA_TYPE AS \"{STOREDPROC_COLUMN_SYSTEMTYPENAME}\", " +
-                $"'false' AS \"{STOREDPROC_COLUMN_ISNULLABLE}\" " +
+                $"ARGUMENT_NAME AS {STOREDPROC_COLUMN_NAME}, " +
+                $"DATA_TYPE AS {STOREDPROC_COLUMN_SYSTEMTYPENAME}, " +
+                $"'false' AS {STOREDPROC_COLUMN_ISNULLABLE} " +
                 $"FROM ALL_ARGUMENTS " +
                 $"WHERE (UPPER(OWNER || '.' || OBJECT_NAME) = UPPER('{databaseObjectName}') " +
                 $"OR UPPER(OBJECT_NAME) = UPPER('{databaseObjectName}')) " +
@@ -300,13 +300,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
             string foreignKeyQuery = $@"
 SELECT 
-    RefCons.CONSTRAINT_NAME {nameof(ForeignKeyDefinition)},
-    RefCons.OWNER Referencing{nameof(DatabaseObject.SchemaName)},
-    RefCons.TABLE_NAME Referencing{nameof(SourceDefinition)},
-    RefConsCol.COLUMN_NAME {nameof(ForeignKeyDefinition.ReferencingColumns)},
-    RefConsPk.OWNER Referenced{nameof(DatabaseObject.SchemaName)},
-    RefConsPk.TABLE_NAME Referenced{nameof(SourceDefinition)},
-    RefConsPkCol.COLUMN_NAME {nameof(ForeignKeyDefinition.ReferencedColumns)}
+    RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
+    RefCons.OWNER {QuoteIdentifier($"Referencing{nameof(DatabaseObject.SchemaName)}")},
+    RefCons.TABLE_NAME {QuoteIdentifier($"Referencing{nameof(SourceDefinition)}")},
+    RefConsCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencingColumns))},
+    RefConsPk.OWNER {QuoteIdentifier($"Referenced{nameof(DatabaseObject.SchemaName)}")},
+    RefConsPk.TABLE_NAME {QuoteIdentifier($"Referenced{nameof(SourceDefinition)}")},
+    RefConsPkCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencedColumns))}
 FROM 
     ALL_CONSTRAINTS RefCons
     INNER JOIN 
