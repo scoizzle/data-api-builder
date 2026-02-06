@@ -89,7 +89,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Maps an entity name to a DatabaseObject.
         /// </summary>
         public virtual Dictionary<string, DatabaseObject> EntityToDatabaseObject { get; set; } =
-            new(StringComparer.InvariantCulture);
+            new(StringComparer.InvariantCultureIgnoreCase);
 
         protected readonly ILogger<ISqlMetadataProvider> _logger;
 
@@ -1847,13 +1847,13 @@ Entities.TryGetValue(entityName, out Entity? entity);
             if (!string.IsNullOrEmpty(schemaName))
             {
                 // Determine schemaName for prefix.
-                schemaName = queryBuilder.QuoteIdentifier(schemaName);
+                schemaName = queryBuilder.QuoteIdentifier(schemaName.ToUpperInvariant());
                 // Database name is empty we just need the schema name.
                 tablePrefix.Append(schemaName);
             }
 
             string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
-            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName)}";
+            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName.ToUpperInvariant())}";
         }
 
         /// <summary>
