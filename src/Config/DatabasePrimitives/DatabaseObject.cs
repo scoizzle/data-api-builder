@@ -116,7 +116,7 @@ public class StoredProcedureDefinition : SourceDefinition
     /// The list of input parameters
     /// Key: parameter name, Value: ParameterDefinition object
     /// </summary>
-    public Dictionary<string, ParameterDefinition> Parameters { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, ParameterDefinition> Parameters { get; set; } = new(StringComparer.InvariantCultureIgnoreCase);
 
     /// <inheritdoc/>
     public override DbType? GetDbTypeForParam(string paramName)

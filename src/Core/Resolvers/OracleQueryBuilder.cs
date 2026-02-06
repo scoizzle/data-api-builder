@@ -26,13 +26,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public override string QuoteIdentifier(string ident)
         {
-            return _builder.QuoteIdentifier(ident.ToUpperInvariant());
+            return _builder.QuoteIdentifier(ident);
         }
 
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
-            string fromSql = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)} " +
+            string fromSql = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                              $"{QuoteIdentifier(structure.SourceAlias)}{Build(structure.Joins)}";
             fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key)} ON (1=1)"));
 
@@ -77,7 +77,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             SourceDefinition sourceDefinition = structure.GetUnderlyingSourceDefinition();
             bool isInsertDMLTriggerEnabled = sourceDefinition.IsInsertDMLTriggerEnabled;
 
-            string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)}";
+            string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
             string insertQuery = $"INSERT INTO {tableName} ";
             
             if (structure.InsertColumns.Any())
@@ -131,7 +131,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                    structure.GetDbPolicyForOperation(EntityActionOperation.Update),
                                    Build(structure.Predicates));
 
-            return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)} " +
+            return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
                     $"WHERE {predicates} " +
                     $"RETURNING {Build(structure.OutputColumns)} INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}";
@@ -144,7 +144,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                        structure.GetDbPolicyForOperation(EntityActionOperation.Delete),
                        Build(structure.Predicates));
 
-            return $"DELETE FROM {QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)} " +
+            return $"DELETE FROM {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                     $"WHERE {predicates}";
         }
 
@@ -163,7 +163,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             
             if (structure.IsFallbackToUpdate)
             {
-                return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)} " +
+                return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
                     $"WHERE {updatePredicates} " +
                     $"RETURNING {Build(structure.OutputColumns)}, '{UPDATE_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
@@ -171,7 +171,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             else
             {
                 // Build the MERGE statement  
-                string mergeQuery = $"MERGE INTO {QuoteIdentifier(structure.DatabaseObject.SchemaName)}.{QuoteIdentifier(structure.DatabaseObject.Name)} target " +
+                string mergeQuery = $"MERGE INTO {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} target " +
                     $"USING (SELECT {string.Join(", ", structure.Values.Select((v, i) => $"{v} AS {QuoteIdentifier(structure.InsertColumns[i])}"))} FROM DUAL) source " +
                     $"ON ({updatePredicates}) " +
                     $"WHEN MATCHED THEN UPDATE SET {Build(structure.UpdateOperations, ", ")} " +
@@ -192,7 +192,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // If the table alias is not empty, we return [{SourceAlias}].[{Column}]
             if (!string.IsNullOrEmpty(column.TableAlias))
             {
-                return $"{QuoteIdentifier(column.TableAlias)}.{QuoteIdentifier(column.ColumnName)}";
+                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName)}";
             }
             // If there is no table alias we return [{Column}]
             else
@@ -271,9 +271,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             
             string query = 
                 $"SELECT " +
-                $"ARGUMENT_NAME AS {STOREDPROC_COLUMN_NAME}, " +
-                $"DATA_TYPE AS {STOREDPROC_COLUMN_SYSTEMTYPENAME}, " +
-                $"'false' AS {STOREDPROC_COLUMN_ISNULLABLE} " +
+                $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
+                $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
+                $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
                 $"WHERE (UPPER(OWNER || '.' || OBJECT_NAME) = UPPER('{databaseObjectName}') " +
                 $"OR UPPER(OBJECT_NAME) = UPPER('{databaseObjectName}')) " +
@@ -299,33 +299,33 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ALL_CONS_COLUMNS contains column mappings for constraints
             // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
             string foreignKeyQuery = $@"
-SELECT 
-    RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
-    RefCons.OWNER {QuoteIdentifier($"Referencing{nameof(DatabaseObject.SchemaName)}")},
-    RefCons.TABLE_NAME {QuoteIdentifier($"Referencing{nameof(SourceDefinition)}")},
-    RefConsCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencingColumns))},
-    RefConsPk.OWNER {QuoteIdentifier($"Referenced{nameof(DatabaseObject.SchemaName)}")},
-    RefConsPk.TABLE_NAME {QuoteIdentifier($"Referenced{nameof(SourceDefinition)}")},
-    RefConsPkCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencedColumns))}
-FROM 
-    ALL_CONSTRAINTS RefCons
-    INNER JOIN 
-    ALL_CONS_COLUMNS RefConsCol
-        ON RefCons.OWNER = RefConsCol.OWNER
-        AND RefCons.CONSTRAINT_NAME = RefConsCol.CONSTRAINT_NAME
-    INNER JOIN
-    ALL_CONSTRAINTS RefConsPk
-        ON RefCons.R_OWNER = RefConsPk.OWNER
-        AND RefCons.R_CONSTRAINT_NAME = RefConsPk.CONSTRAINT_NAME
-    INNER JOIN
-    ALL_CONS_COLUMNS RefConsPkCol
-        ON RefConsPk.OWNER = RefConsPkCol.OWNER
-        AND RefConsPk.CONSTRAINT_NAME = RefConsPkCol.CONSTRAINT_NAME
-        AND RefConsCol.POSITION = RefConsPkCol.POSITION
-WHERE
-    RefCons.CONSTRAINT_TYPE = 'R'
-    AND UPPER(RefCons.OWNER) IN (:{tableSchemaParamsForInClause})
-    AND UPPER(RefCons.TABLE_NAME) IN (:{tableNameParamsForInClause})";
+                SELECT 
+                    RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
+                    RefCons.OWNER {QuoteIdentifier($"Referencing{nameof(DatabaseObject.SchemaName)}")},
+                    RefCons.TABLE_NAME {QuoteIdentifier($"Referencing{nameof(SourceDefinition)}")},
+                    RefConsCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencingColumns))},
+                    RefConsPk.OWNER {QuoteIdentifier($"Referenced{nameof(DatabaseObject.SchemaName)}")},
+                    RefConsPk.TABLE_NAME {QuoteIdentifier($"Referenced{nameof(SourceDefinition)}")},
+                    RefConsPkCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencedColumns))}
+                FROM 
+                    ALL_CONSTRAINTS RefCons
+                    INNER JOIN 
+                    ALL_CONS_COLUMNS RefConsCol
+                        ON RefCons.OWNER = RefConsCol.OWNER
+                        AND RefCons.CONSTRAINT_NAME = RefConsCol.CONSTRAINT_NAME
+                    INNER JOIN
+                    ALL_CONSTRAINTS RefConsPk
+                        ON RefCons.R_OWNER = RefConsPk.OWNER
+                        AND RefCons.R_CONSTRAINT_NAME = RefConsPk.CONSTRAINT_NAME
+                    INNER JOIN
+                    ALL_CONS_COLUMNS RefConsPkCol
+                        ON RefConsPk.OWNER = RefConsPkCol.OWNER
+                        AND RefConsPk.CONSTRAINT_NAME = RefConsPkCol.CONSTRAINT_NAME
+                        AND RefConsCol.POSITION = RefConsPkCol.POSITION
+                WHERE
+                    RefCons.CONSTRAINT_TYPE = 'R'
+                    AND UPPER(RefCons.OWNER) IN (:{tableSchemaParamsForInClause})
+                    AND UPPER(RefCons.TABLE_NAME) IN (:{tableNameParamsForInClause})";
 
             return foreignKeyQuery;
         }
