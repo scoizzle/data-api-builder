@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Data;
 using System.Data.Common;
+using System.Net;
 using System.Text;
 using Azure.Core;
 using Azure.DataApiBuilder.Auth;
@@ -11,6 +13,7 @@ using Azure.DataApiBuilder.Core.Authorization;
 using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers.Factories;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -108,12 +111,91 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
                 _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder);
-                
-                // Check if Oracle session context (application context) should be enabled
-                // For Oracle, we can enable session context by default as it uses application contexts
-                // which are similar to SQL Server's SESSION_CONTEXT
-                _dataSourceToSessionContextUsage[dataSourceName] = true;
+
+                // Session context (application context) forwarding is not enabled by default for Oracle.
+                //
+                // DAB forwards the caller's claims to the database by prepending the session-context
+                // SQL to the query text in QueryExecutor.PrepareDbCommand. For MSSQL this works because
+                // the generated text is a batch of EXEC statements. Oracle, however, does not accept a
+                // PL/SQL anonymous block (BEGIN ... END;) followed by a separate statement in a single
+                // CommandText - prepending one would generate invalid SQL (ORA-00900) for every request.
+                // Until a proper application-context setup (CREATE CONTEXT + package) is implemented
+                // (see GetSessionParamsQuery), keep this disabled so ordinary queries are not broken.
+                _dataSourceToSessionContextUsage[dataSourceName] = false;
             }
+        }
+
+        /// <summary>
+        /// Prepares an OracleCommand for execution.
+        /// Oracle named bind variables use the ':' prefix (e.g. :param1), whereas DAB's shared
+        /// query structures generate '@'-prefixed parameter names (BaseQueryStructure.PARAM_NAME_PREFIX).
+        /// This override translates both the command text and parameter names to the Oracle syntax so
+        /// that predicates/filters built by <see cref="OracleQueryBuilder"/> execute correctly
+        /// (without this, Oracle raises ORA-00936 "missing expression").
+        /// </summary>
+        /// <inheritdoc />
+        public override DbCommand PrepareDbCommand(
+            OracleConnection conn,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            HttpContext? httpContext,
+            string dataSourceName)
+        {
+            OracleCommand cmd = conn.CreateCommand();
+            cmd.CommandType = CommandType.Text;
+
+            // Add query to send user data from DAB to the underlying database to enable additional
+            // security the user might have configured at the database level.
+            string sessionParamsQuery = GetSessionParamsQuery(httpContext, parameters, dataSourceName);
+            string translatedSql = sessionParamsQuery + TranslateBindParameters(sqltext);
+            cmd.CommandText = translatedSql;
+
+            if (parameters is not null)
+            {
+                // Oracle (unlike SqlClient/Npgsql/MySqlConnector) raises ORA-01006 when a parameter
+                // is bound that does not have a matching bind variable in the statement text. DAB's
+                // shared SqlQueryStructure unconditionally adds "column label" parameters
+                // (ParametrizeColumns) that only MySQL's JSON_OBJECT builder consumes. Skip any
+                // parameter that does not appear as :name in the (translated) command text.
+                foreach (KeyValuePair<string, DbConnectionParam> parameterEntry in parameters)
+                {
+                    string oracleName = parameterEntry.Key.TrimStart('@') ?? string.Empty;
+                    if (string.IsNullOrEmpty(oracleName)
+                        || !translatedSql.Contains($":{oracleName}", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    OracleParameter parameter = cmd.CreateParameter();
+                    // Oracle bind names: strip the '@' DAB prefix and use ':' (i.e. the parameter
+                    // collection name must match the ':name' referenced in the command text).
+                    parameter.ParameterName = oracleName;
+                    parameter.Value = parameterEntry.Value.Value ?? DBNull.Value;
+
+                    PopulateDbTypeForParameter(parameterEntry, parameter);
+                    cmd.Parameters.Add(parameter);
+                }
+            }
+
+            return cmd;
+        }
+
+        /// <summary>
+        /// Rewrites DAB's '@'-prefixed bind references to Oracle's ':'-prefixed syntax.
+        /// Handles both @param0-style names and names embedded in strings; safe because it
+        /// only rewrites tokens that begin with '@' followed by a letter.
+        /// </summary>
+        private static string TranslateBindParameters(string sqltext)
+        {
+            if (string.IsNullOrEmpty(sqltext) || !sqltext.Contains('@'))
+            {
+                return sqltext;
+            }
+
+            return System.Text.RegularExpressions.Regex.Replace(
+                sqltext,
+                "@([A-Za-z_][A-Za-z0-9_]*)",
+                ":$1");
         }
 
         /// <summary>
@@ -245,7 +327,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
             }
 
-            if (httpContext is null || !_dataSourceToSessionContextUsage[dataSourceName])
+            // Session-context forwarding is disabled by default for Oracle (see ConfigureOracleQueryExecutor)
+            // because a PL/SQL anonymous block cannot be prepended to a separate statement in a single
+            // OracleCommand. When support is enabled via a future config option, the application context
+            // must be created in the database first (CREATE CONTEXT dab_context USING dab_context_pkg;)
+            // and this method should set each claim via DBMS_SESSION.SET_CONTEXT.
+            if (httpContext is null
+                || !_dataSourceToSessionContextUsage.TryGetValue(dataSourceName, out bool isSessionContextEnabled)
+                || !isSessionContextEnabled)
             {
                 return string.Empty;
             }
@@ -260,34 +349,157 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             // Oracle uses DBMS_SESSION.SET_CONTEXT to set application context values
             // Note: This requires creating an application context and a procedure to set values
-            // For now, we'll use a simplified approach that sets session-level attributes
             // In production, you'd create: CREATE CONTEXT dab_context USING dab_context_pkg;
             foreach ((string claimType, string claimValue) in sessionParams)
             {
                 string paramName = $"{SESSION_PARAM_NAME}{counter.Next()}";
                 parameters.Add(paramName, new(claimValue));
-                
-                // Oracle uses DBMS_SESSION.SET_CONTEXT but requires a context to be pre-created
-                // Alternative: Use client_identifier or CLIENT_INFO for simpler scenarios
-                // For compatibility, we'll set the CLIENT_IDENTIFIER which can be used in policies
-                // Format: SET CLIENT_IDENTIFIER = <value>
-                // Note: This is a simplified implementation. Full implementation would use application contexts.
-                
-                // Using dynamic SQL to set application context (requires dab_context to exist)
-                // string statementToSetContext = $"BEGIN DBMS_SESSION.SET_CONTEXT('dab_context', '{claimType}', {paramName}); END;";
-                
-                // Simpler approach: Use DBMS_APPLICATION_INFO.SET_CLIENT_INFO (limited to one value)
-                // For multiple claims, we'd need a proper application context setup
-                // For now, we'll document this as a TODO for full implementation
+
+                // Oracle's native approach is DBMS_SESSION.SET_CONTEXT, which requires a pre-created
+                // application context and an associated PL/SQL package:
+                //   CREATE CONTEXT dab_context USING dab_context_pkg;
+                //   CREATE OR REPLACE PACKAGE dab_context_pkg AS PROCEDURE set_ctx(key VARCHAR2, val VARCHAR2); END;
+                //   CREATE OR REPLACE PACKAGE BODY dab_context_pkg AS
+                //     PROCEDURE set_ctx(key VARCHAR2, val VARCHAR2) AS
+                //     BEGIN DBMS_SESSION.SET_CONTEXT('dab_context', key, val); END;
+                //   END;
+                //
+                // NB: the block emitted below is only valid as the ENTIRE command text. Prepending it in
+                // PrepareDbCommand currently generates invalid SQL (ORA-00900), which is why session
+                // context is disabled until a batch-capable mechanism (e.g. a single anonymous block that
+                // wraps both the session setup and the main statement) is implemented.
                 string statementToSetContext = $"BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO({paramName}); END;";
                 sessionMapQuery.Append(statementToSetContext);
-                
+
                 // Only set one value for CLIENT_INFO (Oracle limitation without custom context)
                 // For multiple claims, requires creating application context in Oracle
                 break; // TODO: Implement full application context support for multiple claims
             }
 
             return sessionMapQuery.ToString();
+        }
+
+        /// <summary>
+        /// Interprets the result sets produced by an upsert (PUT/PATCH) query built by
+        /// <see cref="OracleQueryBuilder.Build(SqlUpsertQueryStructure)"/> to determine whether the
+        /// operation resulted in an update or an insert, and to surface database policy failures.
+        /// The upsert query returns:
+        ///   result set #1: the count of rows matching the primary key plus the fallback-to-update flag.
+        ///   result set #2: the output of the UPDATE (non-empty when a row matched the primary key and the update policy).
+        ///   result set #3 (non-fallback only): the output of the INSERT (non-empty only when a record was inserted).
+        /// </summary>
+        /// <param name="dbDataReader">A DbDataReader.</param>
+        /// <param name="args">The arguments to this handler - args[0] = primary key in pretty format, args[1] = entity name.</param>
+        /// <inheritdoc />
+        public override async Task<DbResultSet> GetMultipleResultSetsIfAnyAsync(
+            DbDataReader dbDataReader, List<string>? args = null)
+        {
+            // RS1: COUNT of rows matching PK (no policy) — used to distinguish
+            // "row doesn't exist" from "row exists but policy blocked".
+            DbResultSet resultSetWithCountOfRowsWithGivenPk = await ExtractResultSetFromDbDataReaderAsync(dbDataReader);
+            DbResultSetRow? resultSetRowWithCountOfRowsWithGivenPk = resultSetWithCountOfRowsWithGivenPk.Rows.FirstOrDefault();
+            int numOfRecordsWithGivenPK;
+            bool isFallbackToUpdate;
+
+            if (resultSetRowWithCountOfRowsWithGivenPk is not null &&
+                resultSetRowWithCountOfRowsWithGivenPk.Columns.TryGetValue(OracleQueryBuilder.COUNT_ROWS_WITH_GIVEN_PK,
+                    out object? rowsWithGivenPK) &&
+                resultSetRowWithCountOfRowsWithGivenPk.Columns.TryGetValue(OracleQueryBuilder.IS_FALLBACK_TO_UPDATE,
+                    out object? fallbackToUpdate))
+            {
+                // Oracle COUNT(*) returns a NUMBER which ODP.NET surfaces as decimal/int depending on driver config.
+                numOfRecordsWithGivenPK = Convert.ToInt32(rowsWithGivenPK!);
+                isFallbackToUpdate = Convert.ToInt32(fallbackToUpdate!) == 1;
+            }
+            else
+            {
+                throw new DataApiBuilderException(
+                    message: "Neither insert nor update could be performed.",
+                    statusCode: HttpStatusCode.InternalServerError,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
+            }
+
+            // RS2: UPDATE result, or UPDATE+INSERT results.
+            DbResultSet dbResultSet = await dbDataReader.NextResultAsync()
+                ? await ExtractResultSetFromDbDataReaderAsync(dbDataReader)
+                : throw new DataApiBuilderException(
+                    message: "Neither insert nor update could be performed.",
+                    statusCode: HttpStatusCode.InternalServerError,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
+
+            if (numOfRecordsWithGivenPK == 1) // Row existed — we attempted an UPDATE.
+            {
+                if (dbResultSet.Rows.Count == 0)
+                {
+                    // Row exists but UPDATE returned no rows — update policy blocked it.
+                    throw new DataApiBuilderException(
+                        message: DataApiBuilderException.AUTHORIZATION_FAILURE,
+                        statusCode: HttpStatusCode.Forbidden,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
+                }
+
+                RemoveUpsertIndicator(dbResultSet);
+
+                // Identifies this as the result set of an update operation (used to return HTTP 200
+                // instead of 201 and to omit the location header).
+                dbResultSet.ResultProperties.Add(SqlMutationEngine.IS_UPDATE_RESULT_SET, true);
+                return dbResultSet;
+            }
+
+            // No record existed for the given primary key, so an insert was attempted. The insert output
+            // is in result set #3. For the update-only (fallback) path there is no insert result set.
+            DbResultSet? insertResultSet = await dbDataReader.NextResultAsync()
+                ? await ExtractResultSetFromDbDataReaderAsync(dbDataReader)
+                : null;
+
+            if (insertResultSet is null)
+            {
+                // Update-only path (e.g. autogenerated primary key) and no record was found to update.
+                if (args is not null && args.Count > 1)
+                {
+                    string prettyPrintPk = args[0];
+                    string entityName = args[1];
+
+                    throw new DataApiBuilderException(
+                        message: $"Cannot perform INSERT and could not find {entityName} " +
+                            $"with primary key {prettyPrintPk} to perform UPDATE on.",
+                        statusCode: HttpStatusCode.NotFound,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ItemNotFound);
+                }
+
+                throw new DataApiBuilderException(
+                    message: "Neither insert nor update could be performed.",
+                    statusCode: HttpStatusCode.InternalServerError,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
+            }
+
+            if (insertResultSet.Rows.Count == 0)
+            {
+                // Row didn't exist but the INSERT returned no rows — the create policy blocked it.
+                throw new DataApiBuilderException(
+                    message: DataApiBuilderException.AUTHORIZATION_FAILURE,
+                    statusCode: HttpStatusCode.Forbidden,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
+            }
+
+            RemoveUpsertIndicator(insertResultSet);
+            return insertResultSet;
+        }
+
+        /// <summary>
+        /// Removes the internal <c>___upsert_op___</c> indicator column produced by
+        /// <see cref="OracleQueryBuilder.Build(SqlUpsertQueryStructure)"/> from a result set.
+        /// The mutation engine does not consume this indicator for Oracle (unlike PostgreSQL,
+        /// where the engine calls <see cref="OracleQueryBuilder.IsInsert"/> on the returned row),
+        /// so it must be stripped before the row is returned to the caller to avoid leaking the
+        /// internal marker into the API response.
+        /// </summary>
+        private static void RemoveUpsertIndicator(DbResultSet resultSet)
+        {
+            foreach (DbResultSetRow row in resultSet.Rows)
+            {
+                row.Columns.Remove(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME);
+            }
         }
     }
 }

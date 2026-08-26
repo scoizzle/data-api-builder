@@ -96,8 +96,8 @@ namespace Azure.DataApiBuilder.Core.Services
 
         /// <summary>
         /// Oracle-specific implementation to populate column definition with HasDefault and DbType.
-        /// Oracle's schema metadata may not include default value information via GetSchema,
-        /// so we skip the default value population for now.
+        /// ODP.NET's GetSchema("Columns") exposes the default expression in the DATA_DEFAULT
+        /// column (matching ALL_TAB_COLUMNS.DATA_DEFAULT).
         /// </summary>
         protected override void PopulateColumnDefinitionWithHasDefaultAndDbType(
             SourceDefinition sourceDefinition,
@@ -105,17 +105,38 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             foreach (DataRow columnInfo in allColumnsInTable.Rows)
             {
-                string columnName = (string)columnInfo["COLUMN_NAME"];
-                
+                // Normalize to the same casing used for sourceDefinition.Columns keys
+                // (lowercase via GetPhysicalDatabaseColumnName).
+                string columnName = GetPhysicalDatabaseColumnName((string)columnInfo["COLUMN_NAME"]);
+
                 if (sourceDefinition.Columns.TryGetValue(columnName, out ColumnDefinition? columnDefinition))
                 {
-                    // For Oracle, we'll assume no defaults for now since GetSchema doesn't provide
-                    // default value information reliably. This can be enhanced later with direct
-                    // queries to ALL_TAB_COLUMNS if needed.
-                    columnDefinition.HasDefault = false;
+                    bool hasDefault =
+                        allColumnsInTable.Columns.Contains("DATA_DEFAULT")
+                        && columnInfo["DATA_DEFAULT"] is not DBNull
+                        && !string.IsNullOrEmpty(columnInfo["DATA_DEFAULT"] as string);
+
+                    columnDefinition.HasDefault = hasDefault;
+
+                    if (hasDefault)
+                    {
+                        columnDefinition.DefaultValue = columnInfo["DATA_DEFAULT"];
+                    }
+
                     columnDefinition.DbType = TypeHelper.GetDbTypeFromSystemType(columnDefinition.SystemType);
                 }
             }
+        }
+
+        /// <summary>
+        /// Oracle stores unquoted identifiers in uppercase. DAB exposes these as-is which makes
+        /// REST/GraphQL field names UPPERCASE, inconsistent with the other SQL providers
+        /// (MsSql/PostgreSQL/MySQL surface lowercase field names). Lowercase the physical column
+        /// name so the exposed schema matches the other providers.
+        /// </summary>
+        protected override string GetPhysicalDatabaseColumnName(string columnName)
+        {
+            return columnName.ToLowerInvariant();
         }
 
         /// <summary>
