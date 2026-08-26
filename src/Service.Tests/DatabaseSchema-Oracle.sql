@@ -1966,9 +1966,9 @@ begin
         bytearray_types)
     VALUES (3, 0, -32768, -2147483648, -9223372036854775808, 'null', 'null',
         -3.4E30, -1.7E100, 0.000000001, 1,
-        TO_DATE('0001-01-01', 'YYYY-MM-DD'), TO_TIMESTAMP('1753-01-01 00:00:00.000', 'YYYY-MM-DD HH24:MI:SS.FF3'),
-        TO_TIMESTAMP('0001-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('0001-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_DATE('1900-01-01', 'YYYY-MM-DD'), TO_TIMESTAMP('1900-01-01 00:00:00.000', 'YYYY-MM-DD HH24:MI:SS.FF3'),
+        TO_TIMESTAMP('1900-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP('1900-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
         TO_TIMESTAMP('1900-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS'),
         HEXTORAW('00000000') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,
@@ -1978,8 +1978,8 @@ begin
     VALUES (4, 255, 32767, 2147483647, 9223372036854775807, 'null', 'null',
         3.4E30, 1.7E100, 99999999.999999, 1,
         TO_DATE('9999-12-31', 'YYYY-MM-DD'), TO_TIMESTAMP('9999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS'),
-        TO_TIMESTAMP('9999-12-31 23:59:59.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('9999-12-31 23:59:59.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP('9999-12-31 23:59:59.9999990', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP('9999-12-31 23:59:59.9999990', 'YYYY-MM-DD HH24:MI:SS.FF7'),
         TO_TIMESTAMP('2079-06-06 00:00:00', 'YYYY-MM-DD HH24:MI:SS'),
         HEXTORAW('FFFFFFFF') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,

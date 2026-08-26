@@ -17,9 +17,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     /// </summary>
     public class OracleQueryBuilder : BaseSqlQueryBuilder, IQueryBuilder
     {
-        private const string UPSERT_IDENTIFIER_COLUMN_NAME = "___upsert_op___";
+        public const string UPSERT_IDENTIFIER_COLUMN_NAME = "___upsert_op___";
         private const string INSERT_UPSERT = "inserted";
         private const string UPDATE_UPSERT = "updated";
+        public const string COUNT_ROWS_WITH_GIVEN_PK = "cnt_rows_to_update";
+        public const string IS_FALLBACK_TO_UPDATE = "is_fallback_to_update";
 
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
@@ -32,9 +34,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
+            // All Oracle identifiers are case-insensitive by default and are stored in
+            // uppercase when created unquoted. DAB builds columns via Build(Column) which
+            // emits the table alias uppercased (e.g. "SYSTEM_BOOKS"), so the FROM-clause
+            // alias must be uppercased too or the column references will not resolve
+            // (ORA-00904: invalid identifier).
             string fromSql = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
-                             $"{QuoteIdentifier(structure.SourceAlias)}{Build(structure.Joins)}";
-            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key)} ON (1=1)"));
+                             $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)}";
+            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key.ToUpperInvariant())} ON (1=1)"));
 
             string predicates = JoinPredicateStrings(
                                     structure.GetDbPolicyForOperation(EntityActionOperation.Read),
@@ -158,26 +165,55 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         public string Build(SqlUpsertQueryStructure structure)
         {
-            // Oracle uses MERGE statement for upsert operations
-            string updatePredicates = JoinPredicateStrings(Build(structure.Predicates), structure.GetDbPolicyForOperation(EntityActionOperation.Update));
-            
+            // Oracle upserts are built on the Postgres model: a leading COUNT
+            // statement that reports how many rows match the primary key (so the
+            // executor can distinguish update from insert, and surface database
+            // policy failures), followed by the data-modifying statements.
+            //
+            // Oracle's MERGE statement was considered but rejected because:
+            //  1. The predicates built by BaseSqlQueryBuilder reference the source
+            //     table alias (e.g. table0.col = :param), which does not exist in a
+            //     MERGE's ON clause (only target/source aliases are in scope).
+            //  2. MERGE cannot return per-branch data with a literal indicator
+            //     (RETURNING only supports a single expression list).
+            string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
+            string pkPredicates = Build(structure.Predicates);
+            string isFallbackToUpdateSqlLiteral = structure.IsFallbackToUpdate ? "1" : "0";
+
+            // RS1: COUNT of rows matching PK (no policy) — used to distinguish
+            // "row doesn't exist" from "row exists but policy blocked" and to know
+            // whether the upsert resolved to an INSERT or an UPDATE.
+            string countQuery = $"SELECT COUNT(*) AS {COUNT_ROWS_WITH_GIVEN_PK}, " +
+                $"{isFallbackToUpdateSqlLiteral} AS {IS_FALLBACK_TO_UPDATE} " +
+                $"FROM {tableName} WHERE {pkPredicates}";
+
+            string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
+            string updateQuery = $"UPDATE {tableName} " +
+                $"SET {Build(structure.UpdateOperations, ", ")} " +
+                $"WHERE {updatePredicates} " +
+                $"RETURNING {Build(structure.OutputColumns)}, '{UPDATE_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} " +
+                $"INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
+
             if (structure.IsFallbackToUpdate)
             {
-                return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
-                    $"SET {Build(structure.UpdateOperations, ", ")} " +
-                    $"WHERE {updatePredicates} " +
-                    $"RETURNING {Build(structure.OutputColumns)}, '{UPDATE_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
+                // RS2: UPDATE only — no INSERT branch for autogen PK or missing required columns.
+                return $"{countQuery}; {updateQuery};";
             }
             else
             {
-                // Build the MERGE statement  
-                string mergeQuery = $"MERGE INTO {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} target " +
-                    $"USING (SELECT {string.Join(", ", structure.Values.Select((v, i) => $"{v} AS {QuoteIdentifier(structure.InsertColumns[i])}"))} FROM DUAL) source " +
-                    $"ON ({updatePredicates}) " +
-                    $"WHEN MATCHED THEN UPDATE SET {Build(structure.UpdateOperations, ", ")} " +
-                    $"WHEN NOT MATCHED THEN INSERT ({Build(structure.InsertColumns)}) VALUES ({string.Join(", ", structure.Values)})";
+                // INSERT only runs when the row doesn't exist (pkPredicates match nothing)
+                // AND the create policy (if any) is satisfied.
+                string insertPredicates = JoinPredicateStrings(
+                    $"NOT EXISTS (SELECT 1 FROM {tableName} WHERE {pkPredicates})",
+                    structure.GetDbPolicyForOperation(EntityActionOperation.Create));
 
-                return mergeQuery;
+                string insertQuery = $"INSERT INTO {tableName} ({Build(structure.InsertColumns)}) " +
+                    $"SELECT {Build(structure.InsertColumns)} FROM (SELECT {string.Join(", ", structure.Values.Select((v, i) => $"{v} AS {QuoteIdentifier(structure.InsertColumns[i])}"))} FROM DUAL) " +
+                    $"WHERE {insertPredicates} " +
+                    $"RETURNING {Build(structure.OutputColumns)}, '{INSERT_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} " +
+                    $"INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
+
+                return $"{countQuery}; {updateQuery}; {insertQuery};";
             }
         }
 
@@ -189,15 +225,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         protected override string Build(Column column)
         {
-            // If the table alias is not empty, we return [{SourceAlias}].[{Column}]
+            // Oracle stores unquoted identifiers in uppercase. Column names are exposed
+            // lowercase (see OracleMetadataProvider.GetPhysicalDatabaseColumnName) but must
+            // be emitted UPPERCASE (and unquoted, or quoted-uppercase) so they resolve against
+            // the physical column. If the table alias is not empty, we return [{SourceAlias}].[{Column}]
             if (!string.IsNullOrEmpty(column.TableAlias))
             {
-                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName)}";
+                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
             }
             // If there is no table alias we return [{Column}]
             else
             {
-                return $"{QuoteIdentifier(column.ColumnName)}";
+                return $"{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
             }
         }
 
@@ -254,7 +293,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
                 else
                 {
-                    builtColumns.Add(Build(column));
+                    builtColumns.Add(Build(column as LabelledColumn));
                 }
             }
 
