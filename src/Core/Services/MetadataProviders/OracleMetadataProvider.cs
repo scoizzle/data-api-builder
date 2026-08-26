@@ -97,7 +97,13 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <summary>
         /// Oracle-specific implementation to populate column definition with HasDefault and DbType.
         /// ODP.NET's GetSchema("Columns") exposes the default expression in the DATA_DEFAULT
-        /// column (matching ALL_TAB_COLUMNS.DATA_DEFAULT).
+        /// column (matching ALL_TAB_COLUMNS.DATA_DEFAULT) and the physical type in DATA_TYPE.
+        ///
+        /// RAW/BLOB columns are also refined here: ODP.NET's FillSchema/GetSchemaTable path reports
+        /// them as System.String (hex-encoded) with ProviderType=DBNull, but DAB's REST/GraphQL
+        /// contract treats byte columns as byte[] (base64-serialized via HotChocolate's ByteArray
+        /// scalar). Setting SystemType to byte[] here makes the Oracle query builder emit its
+        /// base64 conversion (UTL_ENCODE.BASE64_ENCODE) so values round-trip like varbinary on MsSql.
         /// </summary>
         protected override void PopulateColumnDefinitionWithHasDefaultAndDbType(
             SourceDefinition sourceDefinition,
@@ -123,6 +129,29 @@ namespace Azure.DataApiBuilder.Core.Services
                         columnDefinition.DefaultValue = columnInfo["DATA_DEFAULT"];
                     }
 
+                    // Refine RAW/BLOB to byte[] (base64 contract). ODP.NET's Columns schema reports the
+                    // physical type either as "DATA_TYPE" (some drivers) or "DATATYPE" (ODP.NET
+                    // managed), with values "RAW"/"BLOB" - compare ordinal-insensitively and
+                    // handle both column spellings so detection does not depend on driver version.
+                    string? physicalType = null;
+                    if (allColumnsInTable.Columns.Contains("DATA_TYPE"))
+                    {
+                        physicalType = columnInfo["DATA_TYPE"] as string;
+                    }
+                    else if (allColumnsInTable.Columns.Contains("DATATYPE"))
+                    {
+                        physicalType = columnInfo["DATATYPE"] as string;
+                    }
+
+                    if (physicalType is not null
+                        && (physicalType.Equals("RAW", StringComparison.OrdinalIgnoreCase)
+                            || physicalType.Equals("BLOB", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        columnDefinition.SystemType = typeof(byte[]);
+                        columnDefinition.DbType = DbType.Binary;
+                        continue;
+                    }
+
                     columnDefinition.DbType = TypeHelper.GetDbTypeFromSystemType(columnDefinition.SystemType);
                 }
             }
@@ -137,6 +166,30 @@ namespace Azure.DataApiBuilder.Core.Services
         protected override string GetPhysicalDatabaseColumnName(string columnName)
         {
             return columnName.ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// ODP.NET reports Oracle RAW/BLOB columns as hex-encoded System.String in the schema table,
+        /// but DAB's REST/GraphQL contract treats byte columns as byte[] (base64-serialized via
+        /// HotChocolate's ByteArray scalar). Refine those columns to typeof(byte[]) so the Oracle
+        /// query builder applies its base64 conversion (UTL_ENCODE.BASE64_ENCODE) and the exposed
+        /// values round-trip like varbinary on MsSql.
+        /// ProviderType values: 126 = RAW, 113 = BLOB.
+        /// NB: the DAB base metadata path (FillSchema + DataTableReader) reports ProviderType as
+        /// DBNull, so this is a safety net for paths that surface the int; the authoritative
+        /// RAW/BLOB detection for DAB runs in PopulateColumnDefinitionWithHasDefaultAndDbType
+        /// via the ODP.NET Columns DATATYPE column.
+        /// </summary>
+        protected override Type GetSystemTypeFromSchemaTable(DataRow columnInfoFromAdapter, Type driverType)
+        {
+            if (columnInfoFromAdapter.Table.Columns.Contains("ProviderType")
+                && columnInfoFromAdapter["ProviderType"] is int providerType
+                && (providerType == 126 || providerType == 113))
+            {
+                return typeof(byte[]);
+            }
+
+            return base.GetSystemTypeFromSchemaTable(columnInfoFromAdapter, driverType);
         }
 
         /// <summary>

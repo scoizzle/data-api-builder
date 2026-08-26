@@ -407,8 +407,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     structure.GetColumnSystemType(column.ColumnName) == typeof(byte[]))
                 {
                     // Oracle RAW/BLOB is not stored as base64 so a conversion is made before
-                    // producing the json result since HotChocolate handles ByteArray as base64
-                    builtColumns.Add($"UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({Build(column as Column)})) AS {QuoteIdentifier(column.Label)}");
+                    // producing the json result since HotChocolate handles ByteArray as base64.
+                    // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261 "bad argument", so NULL byte
+                    // columns must pass through unmodified (CASE WHEN ... IS NULL THEN NULL).
+                    string refColumn = Build(column as Column);
+                    builtColumns.Add(
+                        $"CASE WHEN {refColumn} IS NULL THEN NULL " +
+                        $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({refColumn})) END " +
+                        $"AS {QuoteIdentifier(column.Label)}");
                 }
                 else
                 {

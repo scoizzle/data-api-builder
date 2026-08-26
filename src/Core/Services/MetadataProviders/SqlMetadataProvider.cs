@@ -1570,6 +1570,12 @@ Entities.TryGetValue(entityName, out Entity? entity);
 
                 Type systemType = (Type)columnInfoFromAdapter["DataType"];
 
+                // Allow a provider to refine the driver-reported system type. Oracle, for example,
+                // surfaces RAW/BLOB columns as System.String (hex-encoded) even though DAB's
+                // REST/GraphQL contract treats byte columns as byte[] (base64-serialized), so the
+                // Oracle provider overrides this hook to return typeof(byte[]) for RAW/BLOB columns.
+                systemType = GetSystemTypeFromSchemaTable(columnInfoFromAdapter, systemType);
+
                 // Detect array types: concrete array types (e.g., int[]) have IsArray=true,
                 // while Npgsql reports abstract System.Array for PostgreSQL array columns.
                 // byte[] is excluded since it maps to the bytea/ByteArray scalar type.
@@ -1875,6 +1881,20 @@ Entities.TryGetValue(entityName, out Entity? entity);
         protected virtual string GetPhysicalDatabaseColumnName(string columnName)
         {
             return columnName;
+        }
+
+        /// <summary>
+        /// Returns the System.Type a column should use, given the type the database driver reported
+        /// in the schema table. Providers may refine driver-reported types to match DAB's REST/GraphQL
+        /// contract (e.g. Oracle reports RAW/BLOB as hex-encoded System.String but DAB expects byte[],
+        /// base64-serialized). The default returns the driver-reported type unchanged.
+        /// </summary>
+        /// <param name="columnInfoFromAdapter">The schema-table row for the column.</param>
+        /// <param name="driverType">The type reported by the driver's schema table ("DataType").</param>
+        /// <returns>The System.Type to store on the column definition.</returns>
+        protected virtual Type GetSystemTypeFromSchemaTable(DataRow columnInfoFromAdapter, Type driverType)
+        {
+            return driverType;
         }
 
         /// <summary>
