@@ -17,17 +17,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public OracleDbExceptionParser(RuntimeConfigProvider configProvider) : base(configProvider)
         {
             // HashSet of Oracle error codes to be considered as bad requests.
+            // NOTE: constraint/duplicate-key violations (ORA-00001, ORA-02290-2294) are NOT listed
+            // here - they represent conflicts (the resource already exists / referential integrity)
+            // and are mapped to HTTP 409 via ConflictExceptionCodes, matching MsSql's handling of
+            // its duplicate-key (2627) and FK (547) errors. Only genuine client-input errors
+            // (bad literals, NULL into NOT NULL, value-too-large, privileges) are 400.
             BadRequestExceptionCodes.UnionWith(new List<string>
             {
-                // Constraint violation codes
-                "1",        // ORA-00001: unique constraint violated
-                "2290",     // ORA-02290: check constraint violated
-                "2291",     // ORA-02291: integrity constraint (foreign key) violated - parent key not found
-                "2292",     // ORA-02292: integrity constraint violated - child record found
-                "2293",     // ORA-02293: cannot validate - check constraint violated
-                "2294",     // ORA-02294: duplicate key value
-                "2443",     // ORA-02443: invalid trigger name
-
                 // NULL handling codes
                 "1400",     // ORA-01400: cannot insert NULL into column
                 "1407",     // ORA-01407: cannot update NULL into column
@@ -56,7 +52,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2003",     // ORA-02003: invalid column specification
                 "2004",     // ORA-02004: invalid column specification
                 "2005",     // ORA-02005: invalid column specification
-                "1031",     // ORA-01031: insufficient privileges
                 "1018",     // ORA-01018: open cursor forced to close
                 "1019",     // ORA-01019: cannot allocate memory in the user side
                 "1035"      // ORA-01035: ORACLE only available to users with RESTRICTED SESSION
@@ -114,6 +109,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2291",     // ORA-02291: integrity constraint violated
                 "2292",     // ORA-02292: integrity constraint violated
                 "2293",     // ORA-02293: cannot validate - check constraint violated
+                "2294",     // ORA-02294: duplicate key value
                 "2443",     // ORA-02443: invalid trigger name
 
                 // Lock conflicts
