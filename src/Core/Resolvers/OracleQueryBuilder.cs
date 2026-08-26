@@ -229,26 +229,44 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Builds an Oracle-compatible stored procedure execution query.
-        /// Oracle uses the EXEC keyword or a PL/SQL BEGIN-END block to invoke SPs.
-        /// Output parameters are returned through RETURNING INTO or as command parameters.
+        /// "EXEC" is SQL*Plus client syntax and is invalid for ODP.NET CommandType.Text
+        /// (ORA-00900), so the procedure is invoked from within a PL/SQL anonymous block.
+        /// Oracle procedures return result sets through a SYS_REFCURSOR OUT parameter (e.g.
+        /// "PROCEDURE get_books(cursor OUT SYS_REFCURSOR)"), which ODP.NET does NOT surface in
+        /// the DbDataReader on its own. We therefore pass a trailing ":dab_result" OUT bind
+        /// (registered as a RefCursor by <see cref="OracleBindRegistrar"/>) whose rows ODP.NET
+        /// exposes as the reader result set - the same mechanism the DML paths rely on.
         /// </summary>
         public string Build(SqlExecuteStructure structure)
         {
             string spName = structure.DatabaseObject.Name.ToUpperInvariant();
             string schemaName = structure.DatabaseObject.SchemaName.ToUpperInvariant();
 
-            // Build the list of bind parameters with ':' prefix for Oracle syntax.
-            // ProcedureParameters maps DAB parameter names (without '@') to their values.
-            string bindParams = string.Join(", ",
-                structure.ProcedureParameters
-                    .Select(kvp => $":{kvp.Key.TrimStart('@')}"));
+            // ProcedureParameters maps each SP argument NAME (no prefix, e.g. "id") to the
+            // engine-generated bind reference (e.g. "@param0"). The actual bindable values live in
+            // structure.Parameters keyed by those "@paramN" names, so the call must reference the
+            // VALUES (not the keys). Emitting the keys (":id") would produce binds with no matching
+            // DbConnectionParam, causing PrepareDbCommand to silently drop the real parameters and
+            // Oracle to raise ORA-01008 (not all variables bound).
+            List<string> callArgs = structure.ProcedureParameters.Values
+                .Select(v => $":{v.ToString()!.TrimStart('@')}")
+                .ToList();
 
-            // Oracle stored procedure execution using EXEC keyword:
-            //   EXEC schema.procedure_name(:param1, :param2, ...);
-            // If schema is built-in (e.g. SCOTT), we can qualify it.
-            string sql = $"EXEC {schemaName}.{spName} ({bindParams});";
+            // StoredProcedureDefinition.Columns holds the result-set definition, populated from the
+            // procedure's OUT/IN_OUT arguments (see BuildStoredProcedureResultDetailsQuery). A
+            // non-empty Columns dictionary therefore signals that the procedure opens a
+            // SYS_REFCURSOR we must capture by appending the shared RefCursor OUT bind.
+            bool returnsResultSet = structure.GetUnderlyingSourceDefinition().Columns.Count > 0;
+            if (returnsResultSet)
+            {
+                callArgs.Add($":{RESULT_CURSOR_PARAM_NAME}");
+            }
 
-            return sql;
+            // Procedures with no arguments are invoked without parentheses:
+            //   BEGIN schema.proc; END;
+            string args = callArgs.Count > 0 ? $"({string.Join(", ", callArgs)})" : string.Empty;
+
+            return $"BEGIN {QuoteIdentifier(schemaName)}.{QuoteIdentifier(spName)}{args}; END;";
         }
 
         public string Build(SqlUpsertQueryStructure structure)
