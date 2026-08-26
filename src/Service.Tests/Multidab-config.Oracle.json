@@ -2,7 +2,7 @@
   "$schema": "https://github.com/Azure/data-api-builder/releases/download/vmajor.minor.patch/dab.draft.schema.json",
   "data-source": {
     "database-type": "oracle",
-    "connection-string": "Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=172.17.0.3)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=test)));User Id=system;Password=awesome;",
+    "connection-string": "Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=172.17.0.3)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=test)));User Id=system;Password=REPLACEME;",
   },
   "runtime": {
     "rest": {

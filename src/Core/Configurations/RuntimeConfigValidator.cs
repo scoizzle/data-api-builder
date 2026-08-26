@@ -48,7 +48,8 @@ public class RuntimeConfigValidator : IConfigValidator
     [
         DatabaseType.MSSQL,
         DatabaseType.DWSQL,
-        DatabaseType.PostgreSQL
+        DatabaseType.PostgreSQL,
+        DatabaseType.Oracle
     ];
 
     // Error messages for user-delegated authentication configuration.

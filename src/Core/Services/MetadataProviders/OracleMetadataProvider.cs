@@ -259,6 +259,7 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             return sqlType.ToUpperInvariant() switch
             {
+                "BOOLEAN" => typeof(bool),
                 "NUMBER" => typeof(decimal),
                 "FLOAT" => typeof(double),
                 "BINARY_FLOAT" => typeof(float),
@@ -279,6 +280,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 "LONG RAW" => typeof(byte[]),
                 "ROWID" => typeof(string),
                 "UROWID" => typeof(string),
+                "CURSOR" or "REF CURSOR" => typeof(IDataReader), // Oracle cursors can be mapped to object or a specific data reader type
                 _ => typeof(object)
             };
         }

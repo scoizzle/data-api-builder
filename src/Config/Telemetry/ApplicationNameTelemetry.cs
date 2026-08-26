@@ -274,6 +274,7 @@ public static class ApplicationNameTelemetry
         DatabaseType.MySQL => 'M',
         DatabaseType.CosmosDB_NoSQL => 'C',
         DatabaseType.CosmosDB_PostgreSQL => 'C',
+        DatabaseType.Oracle => 'O',
         _ => NOT_APPLICABLE,
     };
 
@@ -395,6 +396,7 @@ public static class ApplicationNameTelemetry
         'P' => "PostgreSQL",
         'M' => "MySQL",
         'C' => "CosmosDB",
+        'O' => "Oracle",
         NOT_APPLICABLE => "not applicable",
         _ => "unrecognized",
     };
