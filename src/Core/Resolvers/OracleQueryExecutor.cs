@@ -132,6 +132,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// This override translates both the command text and parameter names to the Oracle syntax so
         /// that predicates/filters built by <see cref="OracleQueryBuilder"/> execute correctly
         /// (without this, Oracle raises ORA-00936 "missing expression").
+        /// For data-modifying statements the builder produces a single PL/SQL block of the form
+        ///   BEGIN <DML> RETURNING <cols> INTO :o1, :o2, ...; OPEN :dab_result FOR SELECT ...; END;
+        /// whose RETURNING output binds and REF CURSOR result must be registered as OUTPUT parameters.
         /// </summary>
         /// <inheritdoc />
         public override DbCommand PrepareDbCommand(
@@ -143,6 +146,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             OracleCommand cmd = conn.CreateCommand();
             cmd.CommandType = CommandType.Text;
+
+            // ODP.NET binds by POSITION by default, which mismatches DAB's named binds and causes
+            // PL/SQL blocks that mix input binds, RETURNING output binds, and a REF CURSOR output
+            // to fail (e.g. 'item DAB_RESULT is not a cursor', wrong values for the WRONG bind).
+            // Named binding matches each :name in the command text to the parameter of the same name.
+            cmd.BindByName = true;
 
             // Add query to send user data from DAB to the underlying database to enable additional
             // security the user might have configured at the database level.
@@ -176,6 +185,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     cmd.Parameters.Add(parameter);
                 }
             }
+
+            // Register the PL/SQL-block output binds: every ':name' appearing in the RETURNING INTO
+            // list must be an OUTPUT parameter (ODP.NET requires Size to be set for variable-length
+            // string outputs), and the ':dab_result' REF CURSOR must be an OUTPUT RefCursor parameter.
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(cmd, translatedSql);
 
             return cmd;
         }
@@ -394,96 +408,54 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public override async Task<DbResultSet> GetMultipleResultSetsIfAnyAsync(
             DbDataReader dbDataReader, List<string>? args = null)
         {
-            // RS1: COUNT of rows matching PK (no policy) — used to distinguish
-            // "row doesn't exist" from "row exists but policy blocked".
-            DbResultSet resultSetWithCountOfRowsWithGivenPk = await ExtractResultSetFromDbDataReaderAsync(dbDataReader);
-            DbResultSetRow? resultSetRowWithCountOfRowsWithGivenPk = resultSetWithCountOfRowsWithGivenPk.Rows.FirstOrDefault();
-            int numOfRecordsWithGivenPK;
-            bool isFallbackToUpdate;
+            // The upsert is a single PL/SQL block: BEGIN UPDATE ... RETURNING INTO :o...;
+            // IF SQL%ROWCOUNT > 0 THEN OPEN :dab_result FOR SELECT <cols>, 'updated' AS ___upsert_op___
+            // FROM DUAL; ELSE INSERT ... RETURNING INTO :o...; OPEN :dab_result FOR SELECT <cols>,
+            // 'inserted' AS ___upsert_op___ FROM DUAL; END IF; END;
+            //
+            // ODP.NET executes the block and surfaces ONLY the REF CURSOR (:dab_result) as a reader
+            // result set (RETURNING INTO values go to output parameters, not the reader). So there is
+            // exactly one result set whose rows carry the resulting columns plus the ___upsert_op___
+            // indicator that tells us whether the branch that ran was an UPDATE or an INSERT.
+            DbResultSet upsertResultSet = await ExtractResultSetFromDbDataReaderAsync(dbDataReader);
+            DbResultSetRow? upsertResultSetRow = upsertResultSet.Rows.FirstOrDefault();
 
-            if (resultSetRowWithCountOfRowsWithGivenPk is not null &&
-                resultSetRowWithCountOfRowsWithGivenPk.Columns.TryGetValue(OracleQueryBuilder.COUNT_ROWS_WITH_GIVEN_PK,
-                    out object? rowsWithGivenPK) &&
-                resultSetRowWithCountOfRowsWithGivenPk.Columns.TryGetValue(OracleQueryBuilder.IS_FALLBACK_TO_UPDATE,
-                    out object? fallbackToUpdate))
+            if (upsertResultSetRow is null || upsertResultSetRow.Columns.Count == 0)
             {
-                // Oracle COUNT(*) returns a NUMBER which ODP.NET surfaces as decimal/int depending on driver config.
-                numOfRecordsWithGivenPK = Convert.ToInt32(rowsWithGivenPK!);
-                isFallbackToUpdate = Convert.ToInt32(fallbackToUpdate!) == 1;
-            }
-            else
-            {
-                throw new DataApiBuilderException(
-                    message: "Neither insert nor update could be performed.",
-                    statusCode: HttpStatusCode.InternalServerError,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
-            }
-
-            // RS2: UPDATE result, or UPDATE+INSERT results.
-            DbResultSet dbResultSet = await dbDataReader.NextResultAsync()
-                ? await ExtractResultSetFromDbDataReaderAsync(dbDataReader)
-                : throw new DataApiBuilderException(
-                    message: "Neither insert nor update could be performed.",
-                    statusCode: HttpStatusCode.InternalServerError,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
-
-            if (numOfRecordsWithGivenPK == 1) // Row existed — we attempted an UPDATE.
-            {
-                if (dbResultSet.Rows.Count == 0)
-                {
-                    // Row exists but UPDATE returned no rows — update policy blocked it.
-                    throw new DataApiBuilderException(
-                        message: DataApiBuilderException.AUTHORIZATION_FAILURE,
-                        statusCode: HttpStatusCode.Forbidden,
-                        subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
-                }
-
-                RemoveUpsertIndicator(dbResultSet);
-
-                // Identifies this as the result set of an update operation (used to return HTTP 200
-                // instead of 201 and to omit the location header).
-                dbResultSet.ResultProperties.Add(SqlMutationEngine.IS_UPDATE_RESULT_SET, true);
-                return dbResultSet;
-            }
-
-            // No record existed for the given primary key, so an insert was attempted. The insert output
-            // is in result set #3. For the update-only (fallback) path there is no insert result set.
-            DbResultSet? insertResultSet = await dbDataReader.NextResultAsync()
-                ? await ExtractResultSetFromDbDataReaderAsync(dbDataReader)
-                : null;
-
-            if (insertResultSet is null)
-            {
-                // Update-only path (e.g. autogenerated primary key) and no record was found to update.
-                if (args is not null && args.Count > 1)
-                {
-                    string prettyPrintPk = args[0];
-                    string entityName = args[1];
-
-                    throw new DataApiBuilderException(
-                        message: $"Cannot perform INSERT and could not find {entityName} " +
-                            $"with primary key {prettyPrintPk} to perform UPDATE on.",
-                        statusCode: HttpStatusCode.NotFound,
-                        subStatusCode: DataApiBuilderException.SubStatusCodes.ItemNotFound);
-                }
-
-                throw new DataApiBuilderException(
-                    message: "Neither insert nor update could be performed.",
-                    statusCode: HttpStatusCode.InternalServerError,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
-            }
-
-            if (insertResultSet.Rows.Count == 0)
-            {
-                // Row didn't exist but the INSERT returned no rows — the create policy blocked it.
+                // Neither UPDATE nor INSERT produced a row:
+                //  - non-fallback: the row existed but the update policy blocked it, OR the row was
+                //    absent but the create policy blocked the insert -> 403 policy failure (and we
+                //    deliberately avoid distinguishing "row existed" vs "didn't" so row existence is
+                //    not leaked to unauthorized callers).
+                //  - fallback (autogen PK): no row matched the PK + update policy, and no INSERT is
+                //    attempted -> 403 is the safe, non-leaky response (the caller learns only that the
+                //    upsert could not modify the target row, not whether it exists).
                 throw new DataApiBuilderException(
                     message: DataApiBuilderException.AUTHORIZATION_FAILURE,
                     statusCode: HttpStatusCode.Forbidden,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
             }
 
-            RemoveUpsertIndicator(insertResultSet);
-            return insertResultSet;
+            // The UPDATE branch yields 'updated', the INSERT branch 'inserted'. Fallback-to-update
+            // always yields 'updated' (its cursor SELECT emits the UPDATE_UPSERT literal).
+            bool isUpdate =
+                upsertResultSetRow.Columns.TryGetValue(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, out object? op)
+                && string.Equals(op?.ToString(), "updated", StringComparison.OrdinalIgnoreCase);
+
+            // Strip the internal indicator before returning the row to the caller (the mutation
+            // engine does not consume it for Oracle - unlike PostgreSQL where the engine calls
+            // OracleQueryBuilder.IsInsert on the returned row - so leaving it would leak the marker
+            // into the API response).
+            upsertResultSetRow.Columns.Remove(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME);
+
+            if (isUpdate)
+            {
+                // Identifies this as the result set of an update operation (used to return HTTP 200
+                // instead of 201 and to omit the location header).
+                upsertResultSet.ResultProperties.Add(SqlMutationEngine.IS_UPDATE_RESULT_SET, true);
+            }
+
+            return upsertResultSet;
         }
 
         /// <summary>
@@ -500,6 +472,94 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 row.Columns.Remove(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME);
             }
+        }
+    }
+
+    /// <summary>
+    /// Registers the output bind variables that OracleQueryBuilder's PL/SQL-block DML statements
+    /// rely on:
+    ///   BEGIN &lt;DML&gt; RETURNING &lt;cols&gt; INTO :o1, :o2, ...; OPEN :dab_result FOR SELECT ...; END;
+    /// ODP.NET delivers RETURNING INTO values through OUTPUT parameters and the DbDataReader is
+    /// empty, so the executor must (a) turn each ':name' in the RETURNING INTO list into an OUTPUT
+    /// parameter (with a size large enough for variable-length string outputs) and (b) turn the
+    /// ':dab_result' REF CURSOR into an OUTPUT RefCursor parameter.
+    /// </summary>
+    internal static class OracleBindRegistrar
+    {
+        internal const string RESULT_CURSOR_PARAM_NAME = OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME;
+
+        /// <summary>
+        /// Scans the (already ':'-translated) command text for a "RETURNING ... INTO :a, :b;"
+        /// clause and for the ":dab_result" REF CURSOR, and registers matching output parameters
+        /// that the input-parameter loop above did not already add.
+        /// </summary>
+        public static void RegisterPlSqlOutputBinds(OracleCommand cmd, string translatedSql)
+        {
+            HashSet<string> existing = new(StringComparer.OrdinalIgnoreCase);
+            foreach (OracleParameter p in cmd.Parameters)
+            {
+                existing.Add(p.ParameterName);
+            }
+
+            // 1. The REF CURSOR result parameter (present in "OPEN :dab_result FOR ...").
+            if (translatedSql.Contains($":{RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal)
+                && !existing.Contains(RESULT_CURSOR_PARAM_NAME))
+            {
+                cmd.Parameters.Add(new OracleParameter(RESULT_CURSOR_PARAM_NAME, OracleDbType.RefCursor)
+                {
+                    Direction = ParameterDirection.Output
+                });
+                existing.Add(RESULT_CURSOR_PARAM_NAME);
+            }
+
+            // 2. Every bind name in the "RETURNING ... INTO :name1, :name2, ...;" list.
+            foreach (string bindName in ExtractReturningIntoBindNames(translatedSql))
+            {
+                if (existing.Contains(bindName))
+                {
+                    continue;
+                }
+
+                // Variable-length string outputs need an explicit size or ODP.NET returns empty values.
+                OracleParameter output = new(bindName, OracleDbType.Varchar2)
+                {
+                    Direction = ParameterDirection.Output,
+                    Size = 4000
+                };
+                cmd.Parameters.Add(output);
+                existing.Add(bindName);
+            }
+        }
+
+        /// <summary>
+        /// Extracts bind variable names from the RETURNING INTO clause of a PL/SQL block/statement,
+        /// e.g. "RETURNING "ID", "TITLE" INTO :id, :title" -> [id, title].
+        /// </summary>
+        public static IEnumerable<string> ExtractReturningIntoBindNames(string sqlText)
+        {
+            // "RETURNING <expr list> INTO :name1, :name2, :name3;" - capture up to the trailing ';'
+            // (or end of string) so the match is not confounded by a later OPEN ... FOR SELECT.
+            System.Text.RegularExpressions.Match match =
+                System.Text.RegularExpressions.Regex.Match(
+                    sqlText,
+                    @"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+            if (!match.Success)
+            {
+                return Enumerable.Empty<string>();
+            }
+
+            List<string> names = new();
+            string intoList = match.Groups[1].Value;
+            foreach (System.Text.RegularExpressions.Match bindMatch in System.Text.RegularExpressions.Regex.Matches(
+                intoList,
+                @":([A-Za-z_][A-Za-z0-9_]*)"))
+            {
+                names.Add(bindMatch.Groups[1].Value);
+            }
+
+            return names;
         }
     }
 }

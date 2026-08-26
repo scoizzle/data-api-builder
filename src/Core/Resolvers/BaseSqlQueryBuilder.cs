@@ -34,6 +34,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         public abstract string QuoteIdentifier(string ident);
 
+        /// <summary>
+        /// Quotes a PHYSICAL column name for use in raw SQL fragments (e.g. OData filter/predicate
+        /// operands that bypass the typed Column builder). Databases are case-sensitive when an
+        /// identifier is double-quoted, so providers that store identifiers in a particular case
+        /// (Oracle uppercases unquoted identifiers) must emit the physical casing here. The default
+        /// returns the identifier quoted as-is.
+        /// </summary>
+        /// <param name="columnName">The (logical/metadata) backing column name.</param>
+        /// <returns>The column name quoted for direct use in SQL.</returns>
+        public virtual string QuotePhysicalColumn(string columnName)
+        {
+            return QuoteIdentifier(columnName);
+        }
+
         /// <inheritdoc />
         public virtual string Build(BaseSqlQueryStructure structure)
         {
