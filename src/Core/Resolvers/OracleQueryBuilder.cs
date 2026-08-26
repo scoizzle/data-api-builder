@@ -228,11 +228,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// TODO; tracked here: https://github.com/Azure/hawaii-engine/issues/630
+        /// Builds an Oracle-compatible stored procedure execution query.
+        /// Oracle uses the EXEC keyword or a PL/SQL BEGIN-END block to invoke SPs.
+        /// Output parameters are returned through RETURNING INTO or as command parameters.
         /// </summary>
         public string Build(SqlExecuteStructure structure)
         {
-            throw new NotImplementedException();
+            string spName = structure.DatabaseObject.Name.ToUpperInvariant();
+            string schemaName = structure.DatabaseObject.SchemaName.ToUpperInvariant();
+
+            // Build the list of bind parameters with ':' prefix for Oracle syntax.
+            // ProcedureParameters maps DAB parameter names (without '@') to their values.
+            string bindParams = string.Join(", ",
+                structure.ProcedureParameters
+                    .Select(kvp => $":{kvp.Key.TrimStart('@')}"));
+
+            // Oracle stored procedure execution using EXEC keyword:
+            //   EXEC schema.procedure_name(:param1, :param2, ...);
+            // If schema is built-in (e.g. SCOTT), we can qualify it.
+            string sql = $"EXEC {schemaName}.{spName} ({bindParams});";
+
+            return sql;
         }
 
         public string Build(SqlUpsertQueryStructure structure)
