@@ -77,7 +77,7 @@ namespace Azure.DataApiBuilder.Core.Parsers
                 _struct.FieldsReferencedInDbPolicyForCreateAction.Add(backingColumnName!);
             }
 
-            return _metadataProvider.GetQueryBuilder().QuoteIdentifier(backingColumnName!);
+            return _metadataProvider.GetQueryBuilder().QuotePhysicalColumn(backingColumnName!);
         }
 
         /// <summary>

@@ -1527,7 +1527,14 @@ namespace Azure.DataApiBuilder.Core.Services
             SourceDefinition sourceDefinition,
             List<string> pkFields)
         {
-            sourceDefinition.PrimaryKey = [.. pkFields];
+            // Normalize primary-key column names through GetPhysicalDatabaseColumnName so they are
+            // consistent with the sourceDefinition.Columns keys (e.g. Oracle lowercases both).
+            // Without this, a driver that reports PK names in a different case than the column
+            // metadata (Oracle reports unquoted identifiers in UPPERCASE) leaves
+            // sourceDefinition.PrimaryKey inconsistent with the exposed-to-backing map, which breaks
+            // REST by-PK routes ("primary keys: id requested were not found in the entity
+            // definition") and RequestValidator's PK checks.
+            sourceDefinition.PrimaryKey = [.. pkFields.Select(GetPhysicalDatabaseColumnName)];
 
             if (sourceDefinition.PrimaryKey.Count == 0)
             {

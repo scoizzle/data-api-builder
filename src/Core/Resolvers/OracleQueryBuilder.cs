@@ -23,12 +23,39 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string COUNT_ROWS_WITH_GIVEN_PK = "cnt_rows_to_update";
         public const string IS_FALLBACK_TO_UPDATE = "is_fallback_to_update";
 
+        // Oracle DML statements (INSERT/UPDATE/DELETE + RETURNING) deliver their result via output
+        // bind variables, NOT via the DbDataReader. ODP.NET surfaces RETURNING INTO values only in
+        // the command's output parameters and the reader is empty. To keep DAB's DbDataReader-based
+        // result contract intact, data-modifying statements are wrapped in a single PL/SQL anonymous
+        // block:
+        //   BEGIN
+        //     <DML> RETURNING <cols> INTO :o1, :o2, ...;
+        //     OPEN :dab_result FOR SELECT <cols> FROM DUAL;
+        //   END;
+        // The :dab_result REF CURSOR then yields one row that ExtractResultSetFromDbDataReaderAsync
+        // can consume. (A literal can NOT appear in Oracle's RETURNING list - only column expressions
+        // are allowed - which is why the upsert branch indicator is emitted via the SELECT clause of
+        // the REF CURSOR instead.)
+        internal const string RESULT_CURSOR_PARAM_NAME = "dab_result";
+
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
         /// <inheritdoc />
         public override string QuoteIdentifier(string ident)
         {
             return _builder.QuoteIdentifier(ident);
+        }
+
+        /// <summary>
+        /// Oracle stores unquoted identifiers in UPPERCASE. A double-quoted lowercase column
+        /// reference (e.g. "piecesavailable") resolves to a non-existent lowercase object
+        /// (ORA-00904), so physical column references in raw SQL fragments (OData filters,
+        /// predicate operands) must be emitted UPPERCASE and quoted.
+        /// </summary>
+        /// <inheritdoc />
+        public override string QuotePhysicalColumn(string columnName)
+        {
+            return QuoteIdentifier(columnName.ToUpperInvariant());
         }
 
         /// <inheritdoc />
@@ -89,19 +116,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             
             if (structure.InsertColumns.Any())
             {
-                string insertColumns = Build(structure.InsertColumns);
+                string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
                 insertQuery += $"({insertColumns}) ";
                 
-                // POST-CONDITION: Apply database policy to VALUES clause
+                // POST-CONDITION: Apply database policy to VALUES clause.
+                // Oracle does NOT support RETURNING with INSERT ... SELECT (ORA-03049), so the
+                // create policy is enforced by wrapping each value in a guarded scalar subselect
+                // (SELECT <value> FROM DUAL WHERE <policy>) inside a VALUES list.
                 if (dbPolicyPredicates.Equals(BASE_PREDICATE))
                 {
                     insertQuery += $"VALUES ({string.Join(", ", structure.Values)}) ";
                 }
                 else
                 {
-                    // If policies exist, use SELECT form to apply WHERE clause for row-level security
-                    string valueSelects = string.Join(", ", structure.Values.Select((v, i) => $"{v} AS {QuoteIdentifier(structure.InsertColumns[i])}"));
-                    insertQuery += $"SELECT {insertColumns} FROM (SELECT {valueSelects} FROM DUAL) WHERE {dbPolicyPredicates} ";
+                    string guardedValues = string.Join(", ", structure.Values.Select(
+                        v => $"(SELECT {v} FROM DUAL WHERE {dbPolicyPredicates})"));
+                    insertQuery += $"VALUES ({guardedValues}) ";
                 }
             }
             else
@@ -127,8 +157,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // TODO: Implement full DML trigger-aware INSERT logic for Oracle
             }
 
-            // POST-CONDITION: Return inserted data using RETURNING INTO clause
-            return $"{insertQuery} RETURNING {Build(structure.OutputColumns)} INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}";
+            // POST-CONDITION: Return inserted data. Oracle's RETURNING INTO delivers values through
+            // output bind variables (the DbDataReader is empty), so wrap the statement in a PL/SQL
+            // block and expose the returned columns as a REF CURSOR result set that DAB's reader can
+            // consume:
+            //   BEGIN
+            //     INSERT INTO ... RETURNING "ID", "TITLE" INTO :id, :title;
+            //     OPEN :dab_result FOR SELECT :id AS "id", :title AS "title" FROM DUAL;
+            //   END;
+            //
+            // NOTE: Oracle's RETURNING clause rejects aliases (ORA-00925 "missing INTO keyword"
+            // when an AS alias appears before INTO), so the output column list is the bare,
+            // UPPERCASE physical column name (unquoted-lowercase input resolves case-insensitively).
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
+            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
+
+            return $"BEGIN {insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; END;";
         }
 
         /// <inheritdoc />
@@ -138,10 +184,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                    structure.GetDbPolicyForOperation(EntityActionOperation.Update),
                                    Build(structure.Predicates));
 
-            return $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
+            // Wrap in a PL/SQL block and surface the returned columns as a REF CURSOR result set
+            // (see Build(SqlInsertStructure) for why output binds + cursor are required in Oracle).
+            // The RETURNING column list must be bare/UPPERCASE (no aliases - ORA-00925).
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
+            string updateQuery = $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
                     $"WHERE {predicates} " +
-                    $"RETURNING {Build(structure.OutputColumns)} INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}";
+                    $"RETURNING {returningColumns} INTO {bindNames}";
+
+            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
+
+            return $"BEGIN {updateQuery}; OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; END;";
         }
 
         /// <inheritdoc />
@@ -165,55 +220,109 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         public string Build(SqlUpsertQueryStructure structure)
         {
-            // Oracle upserts are built on the Postgres model: a leading COUNT
-            // statement that reports how many rows match the primary key (so the
-            // executor can distinguish update from insert, and surface database
-            // policy failures), followed by the data-modifying statements.
+            // Oracle upserts are built as a SINGLE PL/SQL anonymous block because:
+            //  1. ODP.NET does not accept multiple ';'-separated statements in one command
+            //     (ORA-03405), so the Postgres-style "COUNT; UPDATE; INSERT;" batch is impossible.
+            //  2. MERGE cannot return per-branch data (RETURNING only supports a single column
+            //     expression list and cannot include literals).
+            //  3. UPDATE/INSERT ... RETURNING delivers values through output binds, not the reader.
             //
-            // Oracle's MERGE statement was considered but rejected because:
-            //  1. The predicates built by BaseSqlQueryBuilder reference the source
-            //     table alias (e.g. table0.col = :param), which does not exist in a
-            //     MERGE's ON clause (only target/source aliases are in scope).
-            //  2. MERGE cannot return per-branch data with a literal indicator
-            //     (RETURNING only supports a single expression list).
+            // The block performs the UPDATE first; if it matched no rows (SQL%ROWCOUNT = 0) it
+            // performs a guarded INSERT. Each branch emits the resulting columns - plus an
+            // ___upsert_op___ indicator literal - through a REF CURSOR result set that the executor
+            // reads to distinguish update (200) from insert (201) and to surface policy failures.
             string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
             string pkPredicates = Build(structure.Predicates);
-            string isFallbackToUpdateSqlLiteral = structure.IsFallbackToUpdate ? "1" : "0";
-
-            // RS1: COUNT of rows matching PK (no policy) — used to distinguish
-            // "row doesn't exist" from "row exists but policy blocked" and to know
-            // whether the upsert resolved to an INSERT or an UPDATE.
-            string countQuery = $"SELECT COUNT(*) AS {COUNT_ROWS_WITH_GIVEN_PK}, " +
-                $"{isFallbackToUpdateSqlLiteral} AS {IS_FALLBACK_TO_UPDATE} " +
-                $"FROM {tableName} WHERE {pkPredicates}";
 
             string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
+            // RETURNING column list must be bare/UPPERCASE (no aliases - ORA-00925).
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string updateQuery = $"UPDATE {tableName} " +
                 $"SET {Build(structure.UpdateOperations, ", ")} " +
                 $"WHERE {updatePredicates} " +
-                $"RETURNING {Build(structure.OutputColumns)}, '{UPDATE_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} " +
-                $"INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
+                $"RETURNING {returningColumns} " +
+                $"INTO {bindNames}";
+
+            // The REF CURSOR SELECT reads the output binds (populated by whichever branch ran).
+            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
 
             if (structure.IsFallbackToUpdate)
             {
-                // RS2: UPDATE only — no INSERT branch for autogen PK or missing required columns.
-                return $"{countQuery}; {updateQuery};";
+                // Update-only flow (e.g. autogenerated PK): no INSERT branch. When no row matched the
+                // primary key + update policy, no branch ran - open an EMPTY cursor so the executor
+                // reports 404 (or a policy failure) exactly like the other database engines.
+                string fallbackIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+                return $"BEGIN {updateQuery}; " +
+                    $"IF SQL%ROWCOUNT > 0 THEN " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {fallbackIndicator} FROM DUAL; " +
+                    $"ELSE " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {fallbackIndicator} FROM DUAL WHERE 1 = 0; " +
+                    $"END IF; " +
+                    $"END;";
             }
             else
             {
-                // INSERT only runs when the row doesn't exist (pkPredicates match nothing)
-                // AND the create policy (if any) is satisfied.
-                string insertPredicates = JoinPredicateStrings(
-                    $"NOT EXISTS (SELECT 1 FROM {tableName} WHERE {pkPredicates})",
-                    structure.GetDbPolicyForOperation(EntityActionOperation.Create));
+                // INSERT only runs when the UPDATE matched no row (row absent). The create database
+                // policy, when defined, is applied by selecting the VALUES through a DUAL subquery
+                // that filters on the policy. NOTE: Oracle does NOT support RETURNING with
+                // INSERT ... SELECT (ORA-03049), and the create-policy predicate must live in the
+                // SELECT ... FROM DUAL WHERE clause, so the value list is emitted as a
+                // scalar subquery per column when a policy is present.
+                //
+                // Race safety: concurrent upserts for the same missing PK serialize on the primary
+                // key; the loser hits ORA-00001 (unique constraint) which the exception parser maps
+                // to HTTP 409, matching the behavior of the other engines' non-atomic upserts.
+                List<string> insertWhere = new();
+                string? createPolicy = structure.GetDbPolicyForOperation(EntityActionOperation.Create);
+                if (!string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE))
+                {
+                    insertWhere.Add(createPolicy);
+                }
 
-                string insertQuery = $"INSERT INTO {tableName} ({Build(structure.InsertColumns)}) " +
-                    $"SELECT {Build(structure.InsertColumns)} FROM (SELECT {string.Join(", ", structure.Values.Select((v, i) => $"{v} AS {QuoteIdentifier(structure.InsertColumns[i])}"))} FROM DUAL) " +
-                    $"WHERE {insertPredicates} " +
-                    $"RETURNING {Build(structure.OutputColumns)}, '{INSERT_UPSERT}' AS {UPSERT_IDENTIFIER_COLUMN_NAME} " +
-                    $"INTO {string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label))}, :{UPSERT_IDENTIFIER_COLUMN_NAME}";
+                // Build INSERT ... VALUES form (RETURNING is only valid with VALUES, not SELECT).
+                string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
+                string insertQuery;
+                if (insertWhere.Count == 0)
+                {
+                    insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
+                        $"VALUES ({string.Join(", ", structure.Values)}) " +
+                        $"RETURNING {returningColumns} " +
+                        $"INTO {bindNames}";
+                }
+                else
+                {
+                    // With a create policy, wrap each value in a guarded scalar subselect
+                    // (SELECT value FROM DUAL WHERE <policy>) so the policy filters the insert.
+                    string whereSql = string.Join(" AND ", insertWhere);
+                    string guardedValues = string.Join(", ", structure.Values.Select(
+                        v => $"(SELECT {v} FROM DUAL WHERE {whereSql})"));
+                    insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
+                        $"VALUES ({guardedValues}) " +
+                        $"RETURNING {returningColumns} " +
+                        $"INTO {bindNames}";
+                }
 
-                return $"{countQuery}; {updateQuery}; {insertQuery};";
+                string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+                string updateIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+
+                return $"BEGIN " +
+                    $"{updateQuery}; " +
+                    $"IF SQL%ROWCOUNT > 0 THEN " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL; " +
+                    $"ELSE " +
+                    $"{insertQuery}; " +
+                    $"IF SQL%ROWCOUNT > 0 THEN " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; " +
+                    $"ELSE " +
+                    // Neither UPDATE (row existed but policy-blocked) nor INSERT (create-policy
+                    // blocked -> the guarded VALUES yielded NULLs and the NOT NULL PK failed, or
+                    // the guarded subquery returned no row) ran. Open an EMPTY cursor so the
+                    // executor reports 403 rather than fabricating a row of NULLs.
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL WHERE 1 = 0; " +
+                    $"END IF; " +
+                    $"END IF; " +
+                    $"END;";
             }
         }
 
@@ -238,6 +347,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 return $"{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
             }
+        }
+
+        /// <summary>
+        /// Builds a comma-separated, UPPERCASE, individually-quoted column list for INSERT column
+        /// lists. Oracle stores unquoted identifiers uppercase, so a quoted-lowercase column
+        /// reference (e.g. "title") resolves to a non-existent object (ORA-00904) unless uppercased.
+        /// </summary>
+        private string BuildUppercaseColumns(IEnumerable<string> columnNames)
+        {
+            return string.Join(", ", columnNames.Select(c => QuoteIdentifier(c.ToUpperInvariant())));
         }
 
         /// <summary>
