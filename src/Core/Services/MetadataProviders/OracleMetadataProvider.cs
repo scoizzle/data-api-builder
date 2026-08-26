@@ -91,7 +91,47 @@ namespace Azure.DataApiBuilder.Core.Services
             columnRestrictions[2] = null; // Column name (null means all columns)
 
             DataTable columnsInTable = await conn.GetSchemaAsync("Columns", columnRestrictions);
+            await AddColumnDefaultsAsync(conn, columnsInTable, schemaName, tableName);
             return columnsInTable;
+        }
+
+        private static async Task AddColumnDefaultsAsync(
+            OracleConnection connection,
+            DataTable columns,
+            string schemaName,
+            string tableName)
+        {
+            if (!columns.Columns.Contains("DATA_DEFAULT"))
+            {
+                columns.Columns.Add("DATA_DEFAULT", typeof(string));
+            }
+
+            using OracleCommand command = connection.CreateCommand();
+            command.BindByName = true;
+            // ALL_TAB_COLUMNS.DATA_DEFAULT is an Oracle LONG. ODP.NET returns an empty string
+            // unless the LONG fetch size is explicitly enabled.
+            command.InitialLONGFetchSize = -1;
+            command.CommandText = "SELECT COLUMN_NAME, DATA_DEFAULT " +
+                "FROM ALL_TAB_COLUMNS " +
+                "WHERE OWNER = :owner AND TABLE_NAME = :table_name";
+            command.Parameters.Add(new OracleParameter("owner", schemaName.ToUpperInvariant()));
+            command.Parameters.Add(new OracleParameter("table_name", tableName.ToUpperInvariant()));
+
+            using OracleDataReader reader = await command.ExecuteReaderAsync();
+            Dictionary<string, object?> defaults = new(StringComparer.OrdinalIgnoreCase);
+            while (await reader.ReadAsync())
+            {
+                defaults[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetValue(1);
+            }
+
+            foreach (DataRow column in columns.Rows)
+            {
+                string columnName = column["COLUMN_NAME"].ToString()!;
+                if (defaults.TryGetValue(columnName, out object? value))
+                {
+                    column["DATA_DEFAULT"] = value is null ? DBNull.Value : value.ToString();
+                }
+            }
         }
 
         /// <summary>

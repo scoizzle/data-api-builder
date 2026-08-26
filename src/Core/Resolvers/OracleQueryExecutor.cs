@@ -5,6 +5,7 @@ using System.Data;
 using System.Data.Common;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using Azure.Core;
 using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config;
@@ -496,6 +497,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public static void RegisterPlSqlOutputBinds(OracleCommand cmd, string translatedSql)
         {
             HashSet<string> existing = new(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, OracleDbType> outputTypes = ExtractOutputTypeHints(translatedSql);
             foreach (OracleParameter p in cmd.Parameters)
             {
                 existing.Add(p.ParameterName);
@@ -520,15 +522,48 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     continue;
                 }
 
-                // Variable-length string outputs need an explicit size or ODP.NET returns empty values.
-                OracleParameter output = new(bindName, OracleDbType.Varchar2)
+                OracleDbType outputType = outputTypes.TryGetValue(bindName, out OracleDbType hintedType)
+                    ? hintedType
+                    : OracleDbType.Varchar2;
+                OracleParameter output = new(bindName, outputType)
                 {
                     Direction = ParameterDirection.Output,
-                    Size = 4000
                 };
+
+                // Variable-length outputs need an explicit size or ODP.NET can return an empty value.
+                if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char)
+                {
+                    output.Size = 4000;
+                }
+
                 cmd.Parameters.Add(output);
                 existing.Add(bindName);
             }
+        }
+
+        private static Dictionary<string, OracleDbType> ExtractOutputTypeHints(string sqlText)
+        {
+            Dictionary<string, OracleDbType> result = new(StringComparer.OrdinalIgnoreCase);
+            Match match = System.Text.RegularExpressions.Regex.Match(
+                sqlText,
+                @"DAB_ORACLE_OUTPUT_TYPES:(?<types>[^*]+)\*/",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (!match.Success)
+            {
+                return result;
+            }
+
+            foreach (string hint in match.Groups["types"].Value.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string[] parts = hint.Split('=', 2, StringSplitOptions.TrimEntries);
+                if (parts.Length == 2 && Enum.TryParse(parts[1], ignoreCase: true, out OracleDbType oracleType))
+                {
+                    result[parts[0]] = oracleType;
+                }
+            }
+
+            return result;
         }
 
         /// <summary>

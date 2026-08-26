@@ -16,6 +16,7 @@ using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Microsoft.AspNetCore.Http;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -69,7 +70,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string query = builder.Build(structure);
 
             // Assert
-            Assert.IsTrue(query.StartsWith("BEGIN", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
+            Assert.IsTrue(query.Contains("BEGIN UPDATE", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
             Assert.IsTrue(query.EndsWith("END;", StringComparison.Ordinal), $"Expected the block to close with END;. Query: {query}");
             Assert.IsTrue(query.Contains("UPDATE", StringComparison.Ordinal), $"Expected an UPDATE statement. Query: {query}");
 
@@ -95,6 +96,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(
                 query.Contains($"OPEN :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME} FOR SELECT", StringComparison.Ordinal),
                 $"The upsert MUST surface the result through the REF CURSOR. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("DAB_ORACLE_OUTPUT_TYPES:", StringComparison.Ordinal),
+                $"The upsert MUST emit output-bind type hints for ODP.NET. Query: {query}");
             Assert.IsTrue(
                 query.Contains(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, StringComparison.Ordinal),
                 $"The upsert MUST carry the {OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME} indicator. Query: {query}");
@@ -168,6 +172,29 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
                 $"Fallback-to-update MUST open an EMPTY cursor when no row matched. Query: {query}");
+        }
+
+        /// <summary>
+        /// Verifies that PL/SQL RETURNING binds use the type hints emitted by the builder and
+        /// that the REF CURSOR result bind is registered with the correct Oracle type.
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleOutputBindRegistrarUsesTypedOutputParameters()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:id=Decimal,title=Varchar2 */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"ID\", \"TITLE\" INTO :id, :title; " +
+                "OPEN :dab_result FOR SELECT :id AS \"id\", :title AS \"title\" FROM DUAL; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(OracleDbType.RefCursor, command.Parameters["dab_result"].OracleDbType);
+            Assert.AreEqual(ParameterDirection.Output, command.Parameters["dab_result"].Direction);
+            Assert.AreEqual(OracleDbType.Decimal, command.Parameters["id"].OracleDbType);
+            Assert.AreEqual(OracleDbType.Varchar2, command.Parameters["title"].OracleDbType);
+            Assert.AreEqual(4000, command.Parameters["title"].Size);
         }
 
         /// <summary>
