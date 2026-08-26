@@ -4,6 +4,7 @@
 using System.Data.Common;
 using System.Net;
 using Azure.DataApiBuilder.Core.Configurations;
+using Azure.DataApiBuilder.Service.Exceptions;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
 {
@@ -152,6 +153,33 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             return HttpStatusCode.InternalServerError;
+        }
+
+        /// <summary>
+        /// Maps Oracle errors that are caused by invalid client-provided input (bad literals,
+        /// format mismatches, value-too-large, missing parameters to stored procedures) to the
+        /// DatabaseInputError substatus so callers can distinguish client input errors from
+        /// generic database operation failures. Mirrors the MSSQL mapping for error 201.
+        /// </summary>
+        /// <inheritdoc />
+        public override DataApiBuilderException.SubStatusCodes GetResultSubStatusCodeForException(DbException e)
+        {
+            string errorCode = GetOracleErrorCode(e);
+
+            // ORA-01858: a non-numeric character was found where a numeric was expected
+            // ORA-01861: literal does not match format string
+            // ORA-01843: not a valid month
+            // ORA-12899: value too large for column
+            // ORA-01400: cannot insert NULL into column
+            // ORA-01438: value larger than specified precision
+            // ORA-06550 / ORA-00933: PL/SQL / SQL statement errors (e.g. wrong number or types of
+            //   arguments when invoking a stored procedure)
+            if (errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438" or "6550" or "933")
+            {
+                return DataApiBuilderException.SubStatusCodes.DatabaseInputError;
+            }
+
+            return DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed;
         }
 
         /// <summary>

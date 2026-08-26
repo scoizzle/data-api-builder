@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Immutable;
+using System.Data;
 using System.Net;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -562,6 +563,13 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
             {
                 // Npgsql may report abstract System.Array for unresolved PostgreSQL array columns.
                 // Default to String if the element type hasn't been resolved yet.
+                return STRING_TYPE;
+            }
+            else if (type == typeof(IDataReader))
+            {
+                // Oracle REF CURSOR columns (returned by stored procedures) surface as IDataReader.
+                // DAB treats the procedure's result set as the response; default to String for
+                // schema-generation purposes.
                 return STRING_TYPE;
             }
 

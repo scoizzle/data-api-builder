@@ -1549,7 +1549,7 @@ Entities.TryGetValue(entityName, out Entity? entity);
             RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
             foreach (DataRow columnInfoFromAdapter in schemaTable.Rows)
             {
-                string columnName = columnInfoFromAdapter["ColumnName"].ToString()!;
+                string columnName = GetPhysicalDatabaseColumnName(columnInfoFromAdapter["ColumnName"].ToString()!);
 
                 if (runtimeConfig.IsGraphQLEnabled
                     && entity is not null
@@ -1854,6 +1854,20 @@ Entities.TryGetValue(entityName, out Entity? entity);
 
             string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
             return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName.ToUpperInvariant())}";
+        }
+
+        /// <summary>
+        /// Returns the physical column name as surfaced by the driver's schema table.
+        /// Databases store identifiers in different cases (e.g. Oracle stores unquoted
+        /// identifiers in uppercase; PostgreSQL stores them in lowercase). Overriding this
+        /// method lets a provider normalize the name (e.g. Oracle lowercases it) so that the
+        /// exposed REST/GraphQL field names are consistent with the other SQL providers.
+        /// </summary>
+        /// <param name="columnName">The column name reported by the database driver.</param>
+        /// <returns>The column name to use for the exposed schema.</returns>
+        protected virtual string GetPhysicalDatabaseColumnName(string columnName)
+        {
+            return columnName;
         }
 
         /// <summary>
