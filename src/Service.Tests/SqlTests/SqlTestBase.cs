@@ -408,6 +408,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     _sqlMetadataProvider =
                          new OracleMetadataProvider(
                              runtimeConfigProvider,
+                             runtimeConfigValidator,
                              _queryManagerFactory.Object,
                              _sqlMetadataLogger,
                              dataSourceName);
