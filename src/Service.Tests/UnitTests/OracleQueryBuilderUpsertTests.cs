@@ -47,8 +47,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         };
 
         /// <summary>
-        /// Verifies that the Oracle upsert builder produces the count-first structure with
-        /// an UPDATE branch scoped by the primary key and the update database policy.
+        /// Verifies that the Oracle upsert builder produces a single PL/SQL block: a BEGIN-wrapped
+        /// UPDATE (scoped by the primary key and the update database policy) whose output binds feed a
+        /// REF CURSOR result set carrying the ___upsert_op___ indicator.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -68,18 +69,14 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string query = builder.Build(structure);
 
             // Assert
+            Assert.IsTrue(query.StartsWith("BEGIN", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
+            Assert.IsTrue(query.EndsWith("END;", StringComparison.Ordinal), $"Expected the block to close with END;. Query: {query}");
             Assert.IsTrue(query.Contains("UPDATE", StringComparison.Ordinal), $"Expected an UPDATE statement. Query: {query}");
-            Assert.IsTrue(
-                query.Contains(OracleQueryBuilder.COUNT_ROWS_WITH_GIVEN_PK, StringComparison.Ordinal),
-                $"Expected a COUNT query with {OracleQueryBuilder.COUNT_ROWS_WITH_GIVEN_PK}. Query: {query}");
-            Assert.IsTrue(
-                query.Contains(OracleQueryBuilder.IS_FALLBACK_TO_UPDATE, StringComparison.Ordinal),
-                $"Expected the fallback-to-update flag in the COUNT query. Query: {query}");
 
             // Isolate the UPDATE statement so the assertion targets the UPDATE, not the INSERT.
             int updateIndex = query.IndexOf("UPDATE", StringComparison.Ordinal);
-            int insertIndex = query.IndexOf("INSERT", StringComparison.Ordinal);
-            int endIndex = insertIndex > updateIndex ? insertIndex : query.Length;
+            int ifIndex = query.IndexOf("IF SQL%ROWCOUNT", StringComparison.Ordinal);
+            int endIndex = ifIndex > updateIndex ? ifIndex : query.Length;
             string updateBranch = query.Substring(updateIndex, endIndex - updateIndex);
 
             Assert.IsTrue(
@@ -87,21 +84,29 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 $"The Oracle upsert UPDATE MUST include a WHERE clause to scope the update. Query: {query}");
 
             Assert.IsTrue(
-                updateBranch.Contains("\"id\"", StringComparison.Ordinal),
-                $"The Oracle upsert UPDATE WHERE clause MUST scope by the primary key column. Query: {query}");
-
-            Assert.IsTrue(
                 updateBranch.Contains(updateDbPolicy, StringComparison.Ordinal),
                 $"The Oracle upsert UPDATE WHERE clause MUST include the update database policy. Query: {query}");
 
             Assert.IsTrue(
-                updateBranch.Contains("RETURNING", StringComparison.OrdinalIgnoreCase),
-                $"The Oracle upsert UPDATE MUST use RETURNING to fetch the updated row. Query: {query}");
+                updateBranch.Contains("RETURNING", StringComparison.OrdinalIgnoreCase)
+                && updateBranch.Contains("INTO", StringComparison.OrdinalIgnoreCase),
+                $"The Oracle upsert UPDATE MUST use RETURNING ... INTO to fetch the updated row. Query: {query}");
+
+            Assert.IsTrue(
+                query.Contains($"OPEN :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME} FOR SELECT", StringComparison.Ordinal),
+                $"The upsert MUST surface the result through the REF CURSOR. Query: {query}");
+            Assert.IsTrue(
+                query.Contains(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, StringComparison.Ordinal),
+                $"The upsert MUST carry the {OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME} indicator. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
+                $"The both-blocked branch MUST open an EMPTY cursor (WHERE 1 = 0). Query: {query}");
         }
 
         /// <summary>
-        /// Verifies that the Oracle upsert builder includes an INSERT branch (with a NOT EXISTS
-        /// guard and the create database policy) when the upsert is not fallback-to-update.
+        /// Verifies that the Oracle upsert builder includes an INSERT ... VALUES branch (the only
+        /// form Oracle supports with RETURNING - ORA-03049 forbids RETURNING with INSERT ... SELECT)
+        /// and that a create database policy guards the VALUES via a DUAL filter.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -122,21 +127,24 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             // Assert
             Assert.IsFalse(structure.IsFallbackToUpdate, "The test entity should allow INSERT (non-fallback).");
-            Assert.IsTrue(query.Contains("INSERT", StringComparison.Ordinal), $"Expected an INSERT statement. Query: {query}");
+            Assert.IsTrue(query.Contains("INSERT INTO", StringComparison.Ordinal), $"Expected an INSERT statement. Query: {query}");
             Assert.IsTrue(
-                query.Contains("NOT EXISTS", StringComparison.Ordinal),
-                $"The Oracle upsert INSERT MUST be guarded by NOT EXISTS to avoid overwriting. Query: {query}");
+                query.Contains("VALUES", StringComparison.Ordinal),
+                $"The Oracle upsert INSERT MUST use the VALUES form (RETURNING is not valid with INSERT ... SELECT). Query: {query}");
             Assert.IsTrue(
                 query.Contains(createDbPolicy, StringComparison.Ordinal),
                 $"The Oracle upsert INSERT MUST include the create database policy. Query: {query}");
             Assert.IsTrue(
                 query.Contains(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, StringComparison.Ordinal),
                 $"The Oracle upsert MUST carry the {OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME} indicator. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("'inserted'", StringComparison.Ordinal),
+                $"The INSERT branch MUST emit the 'inserted' indicator. Query: {query}");
         }
 
         /// <summary>
         /// Verifies that fallback-to-update (e.g. autogenerated primary key) produces no INSERT
-        /// branch and no COUNT flag mismatch.
+        /// branch and always emits the 'updated' indicator.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -155,8 +163,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(structure.IsFallbackToUpdate, "Expected the structure to be fallback-to-update.");
             Assert.IsFalse(query.Contains("INSERT", StringComparison.Ordinal), $"Fallback-to-update MUST not contain an INSERT. Query: {query}");
             Assert.IsTrue(
-                query.Contains("1 AS " + OracleQueryBuilder.IS_FALLBACK_TO_UPDATE, StringComparison.Ordinal),
-                $"Fallback-to-update MUST flag {OracleQueryBuilder.IS_FALLBACK_TO_UPDATE}=1. Query: {query}");
+                query.Contains("'updated'", StringComparison.Ordinal),
+                $"Fallback-to-update MUST emit the 'updated' indicator. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
+                $"Fallback-to-update MUST open an EMPTY cursor when no row matched. Query: {query}");
         }
 
         /// <summary>
