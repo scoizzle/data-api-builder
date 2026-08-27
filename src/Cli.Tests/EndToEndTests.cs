@@ -323,7 +323,7 @@ public class EndToEndTests
     /// </param>
     /// <param name="expectedValueForMultipleCreateEnabledFlag"> Expected value for the multiple create enabled flag in the config file.</param>
     [DataTestMethod]
-[DataRow(CliBool.True, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSql database type")]
+    [DataRow(CliBool.True, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSql database type")]
     [DataRow(CliBool.False, "mssql", DatabaseType.MSSQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for MsSql database type")]
     [DataRow(CliBool.None, "mssql", DatabaseType.MSSQL, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for MsSql database type")]
     [DataRow(CliBool.True, "mysql", DatabaseType.MySQL, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MySql database type")]
