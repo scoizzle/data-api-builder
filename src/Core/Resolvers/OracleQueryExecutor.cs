@@ -434,10 +434,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Interprets the result sets produced by an upsert (PUT/PATCH) query built by
         /// <see cref="OracleQueryBuilder.Build(SqlUpsertQueryStructure)"/> to determine whether the
         /// operation resulted in an update or an insert, and to surface database policy failures.
-        /// The upsert query returns:
-        ///   result set #1: the count of rows matching the primary key plus the fallback-to-update flag.
-        ///   result set #2: the output of the UPDATE (non-empty when a row matched the primary key and the update policy).
-        ///   result set #3 (non-fallback only): the output of the INSERT (non-empty only when a record was inserted).
+        /// The upsert query is a single PL/SQL block that produces exactly ONE REF CURSOR result
+        /// set (:dab_result) carrying the resulting columns plus the ___upsert_op___ indicator:
+        ///   - 'updated': the UPDATE branch ran (row matched the primary key and the update policy).
+        ///   - 'inserted': the INSERT branch ran (row was absent and the create policy allowed it).
+        ///   - empty: neither branch produced a row (policy-blocked).
         /// </summary>
         /// <param name="dbDataReader">A DbDataReader.</param>
         /// <param name="args">The arguments to this handler - args[0] = primary key in pretty format, args[1] = entity name.</param>
@@ -481,7 +482,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             // Strip the internal indicator from ALL rows before returning the result set (the
             // mutation engine does not consume it for Oracle - unlike PostgreSQL where the engine
-            // calls OracleQueryBuilder.IsInsert on the returned row - so leaving it would leak
+            // calls PostgresQueryBuilder.IsInsert on the returned row - so leaving it would leak
             // the marker into the API response).
             RemoveUpsertIndicator(upsertResultSet);
 
@@ -499,7 +500,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Removes the internal <c>___upsert_op___</c> indicator column produced by
         /// <see cref="OracleQueryBuilder.Build(SqlUpsertQueryStructure)"/> from a result set.
         /// The mutation engine does not consume this indicator for Oracle (unlike PostgreSQL,
-        /// where the engine calls <see cref="OracleQueryBuilder.IsInsert"/> on the returned row),
+        /// where the engine calls <see cref="PostgresQueryBuilder.IsInsert"/> on the returned row),
         /// so it must be stripped before the row is returned to the caller to avoid leaking the
         /// internal marker into the API response.
         /// </summary>

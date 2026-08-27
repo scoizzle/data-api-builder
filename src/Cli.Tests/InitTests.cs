@@ -437,7 +437,7 @@ namespace Cli.Tests
         ///
         /// </summary>
         [DataTestMethod]
-[DataRow(DatabaseType.MSSQL, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSQL database type")]
+        [DataRow(DatabaseType.MSSQL, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MsSQL database type")]
         [DataRow(DatabaseType.MSSQL, CliBool.False, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for MsSQL database type")]
         [DataRow(DatabaseType.MSSQL, CliBool.None, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for MsSQL database type")]
         [DataRow(DatabaseType.PostgreSQL, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for PostgreSQL database type")]

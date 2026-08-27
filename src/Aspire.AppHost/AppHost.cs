@@ -105,7 +105,7 @@ switch (aspireDB)
             .WithEndpoint(endpointName: "https", (e) => e.Port = 1234)
             .WithEndpoint(endpointName: "http", (e) => e.Port = 2345)
             .WithEnvironment("db-type", "oracle")
-            .WithEnvironment("ConnectionStrings__Database", databaseConnectionString)
+            .WithEnvironment("DAB_CONNSTRING", databaseConnectionString)
             .WithUrls((e) =>
             {
                 e.Urls.Clear();
