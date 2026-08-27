@@ -166,12 +166,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // is bound that does not have a matching bind variable in the statement text. DAB's
                 // shared SqlQueryStructure unconditionally adds "column label" parameters
                 // (ParametrizeColumns) that only MySQL's JSON_OBJECT builder consumes. Skip any
-                // parameter that does not appear as :name in the (translated) command text.
+                // parameter that does not appear as a distinct :name in the (translated) command
+                // text. A whole-word match is required so that :param1 does not match inside
+                // :param10/:param11, which would bind an unused parameter and raise ORA-01006.
                 foreach (KeyValuePair<string, DbConnectionParam> parameterEntry in parameters)
                 {
                     string oracleName = parameterEntry.Key.TrimStart('@') ?? string.Empty;
                     if (string.IsNullOrEmpty(oracleName)
-                        || !translatedSql.Contains($":{oracleName}", StringComparison.Ordinal))
+                        || !Regex.IsMatch(translatedSql, $":{Regex.Escape(oracleName)}(?![A-Za-z0-9_])"))
                     {
                         continue;
                     }
@@ -197,8 +199,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Rewrites DAB's '@'-prefixed bind references to Oracle's ':'-prefixed syntax.
-        /// Handles both @param0-style names and names embedded in strings; safe because it
-        /// only rewrites tokens that begin with '@' followed by a letter.
+        /// Only tokens that match DAB's parameter naming convention (@param{N}, see
+        /// <see cref="BaseQueryStructure.GetEncodedParamName"/>) are rewritten. This avoids
+        /// corrupting '@' characters that appear inside string literals authored in database
+        /// policies (e.g. 'admin@contoso.com') which must pass through unmodified.
         /// </summary>
         private static string TranslateBindParameters(string sqltext)
         {
@@ -207,10 +211,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return sqltext;
             }
 
-            return System.Text.RegularExpressions.Regex.Replace(
-                sqltext,
-                "@([A-Za-z_][A-Za-z0-9_]*)",
-                ":$1");
+            // All DAB bind parameters use the @param{N} naming convention (BaseQueryStructure.GetEncodedParamName),
+            // so a simple prefix replacement is equivalent to a regex match but avoids regex overhead entirely.
+            return sqltext.Replace("@param", ":param");
         }
 
         /// <summary>
@@ -485,7 +488,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     /// parameter (with a size large enough for variable-length string outputs) and (b) turn the
     /// ':dab_result' REF CURSOR into an OUTPUT RefCursor parameter.
     /// </summary>
-    internal static class OracleBindRegistrar
+    internal static partial class OracleBindRegistrar
     {
         internal const string RESULT_CURSOR_PARAM_NAME = OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME;
 
@@ -541,20 +544,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
         }
 
+        [GeneratedRegex(@"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+        private static partial Regex ReturnIntoRegex();
+
         private static Dictionary<string, OracleDbType> ExtractOutputTypeHints(string sqlText)
         {
             Dictionary<string, OracleDbType> result = new(StringComparer.OrdinalIgnoreCase);
-            Match match = System.Text.RegularExpressions.Regex.Match(
-                sqlText,
-                @"DAB_ORACLE_OUTPUT_TYPES:(?<types>[^*]+)\*/",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            if (!match.Success)
+            const string marker = "DAB_ORACLE_OUTPUT_TYPES:";
+            int start = sqlText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (start < 0)
             {
                 return result;
             }
 
-            foreach (string hint in match.Groups["types"].Value.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            start += marker.Length;
+            int end = sqlText.IndexOf("*/", start, StringComparison.Ordinal);
+            if (end < 0)
+            {
+                return result;
+            }
+
+            foreach (string hint in sqlText[start..end].Split(',', StringSplitOptions.RemoveEmptyEntries))
             {
                 string[] parts = hint.Split('=', 2, StringSplitOptions.TrimEntries);
                 if (parts.Length == 2 && Enum.TryParse(parts[1], ignoreCase: true, out OracleDbType oracleType))
@@ -574,24 +584,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             // "RETURNING <expr list> INTO :name1, :name2, :name3;" - capture up to the trailing ';'
             // (or end of string) so the match is not confounded by a later OPEN ... FOR SELECT.
-            System.Text.RegularExpressions.Match match =
-                System.Text.RegularExpressions.Regex.Match(
-                    sqlText,
-                    @"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+            Match match = ReturnIntoRegex().Match(sqlText);
 
             if (!match.Success)
             {
                 return Enumerable.Empty<string>();
             }
 
+            // Split the comma-separated ":name1, :name2" list without regex.
             List<string> names = new();
-            string intoList = match.Groups[1].Value;
-            foreach (System.Text.RegularExpressions.Match bindMatch in System.Text.RegularExpressions.Regex.Matches(
-                intoList,
-                @":([A-Za-z_][A-Za-z0-9_]*)"))
+            foreach (string token in match.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
-                names.Add(bindMatch.Groups[1].Value);
+                string trimmed = token.Trim();
+                if (trimmed.Length > 1 && trimmed[0] == ':')
+                {
+                    names.Add(trimmed[1..]);
+                }
             }
 
             return names;
