@@ -136,8 +136,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 query.Contains(createDbPolicy, StringComparison.Ordinal),
                 $"The Oracle upsert INSERT MUST include the create database policy. Query: {query}");
             Assert.IsTrue(
-                query.Contains("SELECT COUNT(*) FROM DUAL WHERE", StringComparison.Ordinal),
-                $"The create-policy INSERT MUST be gated by an IF (SELECT COUNT(*) FROM DUAL WHERE ...) pre-check. Query: {query}");
+                query.Contains("SELECT COUNT(*) FROM (SELECT", StringComparison.Ordinal),
+                $"The create-policy INSERT MUST be gated by an IF (SELECT COUNT(*) FROM (SELECT <named values> FROM DUAL) WHERE ...) pre-check so column-referencing policies resolve. Query: {query}");
+            Assert.IsTrue(
+                query.Contains($"SELECT COUNT(*) FROM \"SYSTEM\".\"BOOKS\" WHERE \"ID\" =", StringComparison.Ordinal),
+                $"The upsert MUST distinguish a policy-blocked existing row from a missing row via a PK existence check. Query: {query}");
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
                 $"The policy-blocked INSERT path MUST open an empty cursor (WHERE 1 = 0) to surface 403. Query: {query}");
@@ -151,7 +154,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         /// <summary>
         /// Verifies that a standalone INSERT with a create database policy gates the INSERT on
-        /// the policy via IF (SELECT COUNT(*) FROM DUAL WHERE policy), and opens an empty cursor
+        /// the policy via IF (SELECT COUNT(*) FROM (SELECT <named values> FROM DUAL) WHERE policy), and opens an empty cursor
         /// when the policy blocks — surfacing 403 rather than ORA-01400 (400).
         /// </summary>
         [TestMethod]
@@ -245,8 +248,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(query.Contains("BEGIN", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
             Assert.IsTrue(query.Contains("INSERT INTO", StringComparison.Ordinal), $"Expected an INSERT statement. Query: {query}");
             Assert.IsTrue(
-                query.Contains("SELECT COUNT(*) FROM DUAL WHERE", StringComparison.Ordinal),
-                $"The INSERT MUST be gated by an IF (SELECT COUNT(*) FROM DUAL WHERE ...) pre-check. Query: {query}");
+                query.Contains("SELECT COUNT(*) FROM (SELECT", StringComparison.Ordinal),
+                $"The INSERT MUST be gated by an IF (SELECT COUNT(*) FROM (SELECT <named values> FROM DUAL) WHERE ...) pre-check so column-referencing policies resolve. Query: {query}");
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
                 $"The policy-blocked path MUST open an empty cursor (WHERE 1 = 0) to surface 403. Query: {query}");
