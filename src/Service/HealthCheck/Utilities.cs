@@ -113,6 +113,8 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
                     case DatabaseType.MSSQL:
                     case DatabaseType.DWSQL:
                         return new SqlConnectionStringBuilder(connectionString).ToString();
+                    case DatabaseType.Oracle:
+                        return new OracleConnectionStringBuilder(connectionString).ToString();
                     default:
                         return connectionString;
                 }
