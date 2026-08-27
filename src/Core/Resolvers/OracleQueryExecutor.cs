@@ -297,7 +297,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             catch (Exception ex)
             {
                 string messagePrefix = "{correlationId} No password detected in the connection string. Attempt to retrieve a managed identity access token using DefaultAzureCredential failed due to:\n{errorMessage}";
-                string messageSuffix = (firstAttemptAtDefaultAccessToken ? $"If authentication with DefaultAzureCrendential is not intended, this warning can be safely ignored." : string.Empty);
+                string messageSuffix = (firstAttemptAtDefaultAccessToken ? $"If authentication with DefaultAzureCredential is not intended, this warning can be safely ignored." : string.Empty);
                 string message = messagePrefix + messageSuffix;
                 QueryExecutorLogger.LogWarning(
                     exception: ex,
@@ -308,7 +308,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // the config doesn't contain an identity token
                 // and a default identity token cannot be obtained
                 // so the application should not attempt to set the token
-                // for future conntions
+                // for future connections
                 // note though that if a default access token has been previously
                 // obtained successfully (firstAttemptAtDefaultAccessToken == false)
                 // this might be a transitory failure don't disable attempts to set
@@ -443,11 +443,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 upsertResultSetRow.Columns.TryGetValue(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, out object? op)
                 && string.Equals(op?.ToString(), "updated", StringComparison.OrdinalIgnoreCase);
 
-            // Strip the internal indicator before returning the row to the caller (the mutation
-            // engine does not consume it for Oracle - unlike PostgreSQL where the engine calls
-            // OracleQueryBuilder.IsInsert on the returned row - so leaving it would leak the marker
-            // into the API response).
-            upsertResultSetRow.Columns.Remove(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME);
+            // Strip the internal indicator from ALL rows before returning the result set (the
+            // mutation engine does not consume it for Oracle - unlike PostgreSQL where the engine
+            // calls OracleQueryBuilder.IsInsert on the returned row - so leaving it would leak
+            // the marker into the API response).
+            RemoveUpsertIndicator(upsertResultSet);
 
             if (isUpdate)
             {

@@ -659,6 +659,8 @@ begin
     -- Create schemas (users in Oracle) for multi-schema testing
     -- Note: In Oracle, schemas are tied to users. Creating separate users 'foo' and 'bar'
     -- to simulate SQL Server's schema concept.
+    -- SECURITY NOTE: These are test-only credentials for ephemeral Docker containers.
+    -- Do not reuse these credentials outside of isolated test environments.
 
    begin
       execute immediate q'[CREATE USER foo IDENTIFIED BY "TempPass123!" DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS]';
