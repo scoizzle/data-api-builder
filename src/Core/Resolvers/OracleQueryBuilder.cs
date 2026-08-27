@@ -184,8 +184,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // Gate the INSERT on the create policy: when blocked, open an empty cursor
                 // (WHERE 1 = 0) so the executor surfaces 403 rather than ORA-01400 (400).
+                // The policy may reference column names (e.g. "OWNERID" = :paramN via
+                // QuotePhysicalColumn), so alias each value with its physical column name in a
+                // DUAL subquery to make those columns resolvable - otherwise ORA-00904.
+                string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
+                    (col, val) => $"{val} AS {QuoteIdentifier(col.ToUpperInvariant())}"));
                 return $"{outputTypeHints}BEGIN " +
-                    $"IF (SELECT COUNT(*) FROM DUAL WHERE {dbPolicyPredicates}) > 0 THEN " +
+                    $"IF (SELECT COUNT(*) FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}) > 0 THEN " +
                     $"{insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
                     $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
                     $"ELSE " +
@@ -376,12 +381,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
             else
             {
-                // INSERT only runs when the UPDATE matched no row (row absent).
-                // When a create policy is present, the INSERT is gated by an IF-guard that checks
-                // the policy via (SELECT COUNT(*) FROM DUAL WHERE <policy>). When the policy blocks,
-                // the INSERT is skipped entirely and an empty cursor is opened, surfacing 403
-                // (matching the Postgres/MSSQL behavior for a policy-blocked write).
-                // When no policy exists, plain INSERT ... VALUES is used.
+                // INSERT only runs when the UPDATE matched no row. Two cases:
+                //   1. The row EXISTS but the update policy blocked it → return 403 via an empty
+                //      cursor, without leaking whether the row exists (matches Postgres/MSSQL).
+                //   2. The row is ABSENT → attempt INSERT, gated by the create policy.
+                // When the create policy blocks the insert, an empty cursor surfaces 403.
                 //
                 // Race safety: concurrent upserts for the same missing PK serialize on the primary
                 // key; the loser hits ORA-00001 (unique constraint) which the exception parser maps
@@ -395,6 +399,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     $"RETURNING {returningColumns} " +
                     $"INTO {bindNames}";
 
+                // Alias each value with its physical column name in a DUAL subquery so a create
+                // policy that references column names (e.g. "OWNERID" = :paramN, emitted via
+                // QuotePhysicalColumn) can resolve them - otherwise ORA-00904 invalid identifier.
+                string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
+                    (col, val) => $"{val} AS {QuoteIdentifier(col.ToUpperInvariant())}"));
+
                 string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
                 string updateIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
 
@@ -404,11 +414,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 block.Append($"IF SQL%ROWCOUNT > 0 THEN ");
                 block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL; ");
                 block.Append($"ELSE ");
+                // Distinguish "row exists but update policy blocked" (403) from "row absent" (insert).
+                block.Append($"IF (SELECT COUNT(*) FROM {tableName} WHERE {pkPredicates}) > 0 THEN ");
+                block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL WHERE 1 = 0; ");
+                block.Append($"ELSE ");
                 if (hasCreatePolicy)
                 {
                     // Gate the INSERT on the create policy: when blocked, open an empty cursor
                     // so the executor surfaces 403 rather than ORA-01400 (400).
-                    block.Append($"IF (SELECT COUNT(*) FROM DUAL WHERE {createPolicy}) > 0 THEN ");
+                    block.Append($"IF (SELECT COUNT(*) FROM (SELECT {namedValues} FROM DUAL) WHERE {createPolicy}) > 0 THEN ");
                     block.Append($"{insertQuery}; ");
                     block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
                     block.Append($"ELSE ");
@@ -420,6 +434,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     block.Append($"{insertQuery}; ");
                     block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
                 }
+                block.Append($"END IF; ");
                 block.Append($"END IF; ");
                 block.Append($"END;");
                 return block.ToString();
