@@ -77,9 +77,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                     Build(structure.Predicates),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
 
-            string query = $"SELECT {MakeSelectColumns(structure)}"
+            string aggregations = BuildAggregationColumns(structure);
+
+            string query = $"SELECT {MakeSelectColumns(structure)}{aggregations}"
                 + $" FROM {fromSql}"
                 + $" WHERE {predicates}"
+                + BuildGroupBy(structure)
+                + BuildHaving(structure)
                 + $" ORDER BY {Build(structure.OrderByColumns)}"
                 + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
 
@@ -487,6 +491,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 return $"{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
             }
+        }
+
+        /// <summary>
+        /// Builds an aggregation column (e.g. MAX([SourceAlias].[Column])) for the SELECT list and
+        /// HAVING clauses. Oracle stores unquoted identifiers uppercase, so the table alias and
+        /// column name must be emitted UPPERCASE just like <see cref="Build(Column)"/> to avoid
+        /// ORA-00904. Aggregation functions (COUNT/SUM/AVG/MIN/MAX) are case-insensitive.
+        /// </summary>
+        protected override string Build(AggregationColumn column, bool useAlias = false)
+        {
+            string columnName = Build(column as Column);
+            columnName = column.IsDistinct ? $"DISTINCT ({columnName})" : columnName;
+            string appendAlias = useAlias ? $" AS {QuoteIdentifier(column.OperationAlias)}" : string.Empty;
+            return $"{column.Type.ToString().ToUpperInvariant()}({columnName}) {appendAlias}";
         }
 
         /// <summary>
