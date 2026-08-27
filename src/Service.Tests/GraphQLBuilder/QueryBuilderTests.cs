@@ -585,6 +585,7 @@ type Table @model(name: ""table"") {
         [DataRow(DatabaseType.DWSQL, true, DisplayName = "DWSQL: groupBy field present when aggregation enabled")]
         [DataRow(DatabaseType.PostgreSQL, true, DisplayName = "PostgreSQL: groupBy field present when aggregation enabled")]
         [DataRow(DatabaseType.MySQL, false, DisplayName = "MySQL: groupBy field absent (not in AggregationEnabledDatabaseTypes)")]
+        [DataRow(DatabaseType.Oracle, false, DisplayName = "Oracle: groupBy field absent (OracleQueryBuilder does not emit aggregation SQL)")]
         [TestCategory("Query Builder - Aggregation")]
         public void Build_WithAggregationEnabled_GroupByPresenceMatchesDatabaseSupport(
             DatabaseType dbType,
