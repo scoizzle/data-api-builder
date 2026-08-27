@@ -230,19 +230,38 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Builds an Oracle-compatible stored procedure execution query.
         /// "EXEC" is SQL*Plus client syntax and is invalid for ODP.NET CommandType.Text
-        /// (ORA-00900), so the procedure is invoked from within a PL/SQL anonymous block.
-        /// Oracle procedures return result sets through a SYS_REFCURSOR OUT parameter (e.g.
-        /// "PROCEDURE get_books(cursor OUT SYS_REFCURSOR)"), which ODP.NET does NOT surface in
-        /// the DbDataReader on its own. We therefore pass a trailing ":dab_result" OUT bind
+        /// (ORA-00900), so the subprogram is invoked from within a PL/SQL anonymous block.
+        /// Oracle subprograms return result sets through a SYS_REFCURSOR (a procedure's OUT
+        /// parameter, or a function's RETURN value), which ODP.NET does NOT surface in the
+        /// DbDataReader on its own. We therefore pass a trailing ":dab_result" OUT bind
         /// (registered as a RefCursor by <see cref="OracleBindRegistrar"/>) whose rows ODP.NET
         /// exposes as the reader result set - the same mechanism the DML paths rely on.
+        ///
+        /// This also supports subprograms that live inside a package (source "schema.package.sub")
+        /// and standalone or packaged FUNCTIONS:
+        ///  - Package procedure:  BEGIN "S"."P"."SUB"(:p0, :dab_result); END;
+        ///  - Package function returning a cursor:
+        ///      BEGIN :dab_result := "S"."P"."SUB"(:p0); END;
+        ///  - Scalar function (no cursor): invoked through SELECT ... FROM DUAL and read as a row.
         /// </summary>
         public string Build(SqlExecuteStructure structure)
         {
-            string spName = structure.DatabaseObject.Name.ToUpperInvariant();
-            string schemaName = structure.DatabaseObject.SchemaName.ToUpperInvariant();
+            DatabaseStoredProcedure sp = (DatabaseStoredProcedure)structure.DatabaseObject;
 
-            // ProcedureParameters maps each SP argument NAME (no prefix, e.g. "id") to the
+            // NOTE: sp.IsFunction is NOT parsed from config; it is populated during metadata
+            // discovery (OracleMetadataProvider.FillSchemaForStoredProcedureAsync detects the
+            // ALL_ARGUMENTS POSITION 0 row that marks a function's RETURN value). This Build method
+            // therefore relies on that discovery having completed first - an ordering invariant of
+            // the startup pipeline. If it were ever skipped, IsFunction would remain false and a
+            // function would be emitted as a bare `BEGIN schema.func(:p0); END;` statement, which
+            // is invalid PL/SQL for a function.
+            string schemaName = QuoteIdentifier(sp.SchemaName.ToUpperInvariant());
+            string subprogramName = QuoteIdentifier(sp.Name.ToUpperInvariant());
+            string qualifiedName = string.IsNullOrEmpty(sp.PackageName)
+                ? $"{schemaName}.{subprogramName}"
+                : $"{schemaName}.{QuoteIdentifier(sp.PackageName.ToUpperInvariant())}.{subprogramName}";
+
+            // ProcedureParameters maps each subprogram argument NAME (no prefix, e.g. "id") to the
             // engine-generated bind reference (e.g. "@param0"). The actual bindable values live in
             // structure.Parameters keyed by those "@paramN" names, so the call must reference the
             // VALUES (not the keys). Emitting the keys (":id") would produce binds with no matching
@@ -253,11 +272,30 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 .ToList();
 
             // StoredProcedureDefinition.Columns holds the result-set definition, populated from the
-            // procedure's OUT/IN_OUT arguments (see BuildStoredProcedureResultDetailsQuery). A
-            // non-empty Columns dictionary therefore signals that the procedure opens a
-            // SYS_REFCURSOR we must capture by appending the shared RefCursor OUT bind.
-            bool returnsResultSet = structure.GetUnderlyingSourceDefinition().Columns.Count > 0;
-            if (returnsResultSet)
+            // subprogram's OUT/IN_OUT arguments / RETURN value (see BuildStoredProcedureResultDetailsQuery).
+            // A non-empty Columns dictionary signals that the subprogram yields a REF CURSOR result
+            // set we must capture by appending/assigning the shared RefCursor OUT bind.
+            bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Count > 0;
+
+            if (sp.IsFunction)
+            {
+                // A function's result (even if it is a REF CURSOR) is expressed as its RETURN
+                // value, so it cannot be called as a bare statement. Assign the RETURN into either
+                // the REF CURSOR output bind (result-set function) or a scalar bind (scalar function).
+                if (returnsCursor)
+                {
+                    // BEGIN :dab_result := "S"."P"."SUB"(:p0); END;
+                    return $"BEGIN :{RESULT_CURSOR_PARAM_NAME} := {qualifiedName}({JoinArgs(callArgs)}); END;";
+                }
+
+                // Scalar function - select its value from DUAL so the reader yields one row:
+                // SELECT "S"."P"."SUB"(:p0) AS VALUE FROM DUAL;
+                string select = $"SELECT {qualifiedName}({JoinArgs(callArgs)}) AS {QuoteIdentifier("value")} FROM DUAL";
+                return select;
+            }
+
+            // Stored procedure (standalone or packaged).
+            if (returnsCursor)
             {
                 callArgs.Add($":{RESULT_CURSOR_PARAM_NAME}");
             }
@@ -266,7 +304,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             //   BEGIN schema.proc; END;
             string args = callArgs.Count > 0 ? $"({string.Join(", ", callArgs)})" : string.Empty;
 
-            return $"BEGIN {QuoteIdentifier(schemaName)}.{QuoteIdentifier(spName)}{args}; END;";
+            return $"BEGIN {qualifiedName}{args}; END;";
+        }
+
+        private static string JoinArgs(List<string> callArgs)
+        {
+            return callArgs.Count > 0 ? string.Join(", ", callArgs) : string.Empty;
         }
 
         public string Build(SqlUpsertQueryStructure structure)
@@ -522,27 +565,101 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return string.Join(", ", builtColumns);
         }
 
+        /// <summary>
+        /// Builds the metadata query for a STANDALONE Oracle subprogram only. The name must be at
+        /// most two parts ("schema.subprogram" or "subprogram"). A three-part name
+        /// ("schema.package.subprogram") must route through the package-aware overload instead;
+        /// <see cref="SchemaNameFrom"/> / <see cref="NameFrom"/> would otherwise silently drop the
+        /// middle package token and resolve against the wrong object.
+        /// </summary>
         /// <inheritdoc/>
         public string BuildStoredProcedureResultDetailsQuery(string databaseObjectName)
         {
-            // Oracle 19c implementation for retrieving stored procedure result set metadata
-            // Oracle doesn't have a direct equivalent to SQL Server's dm_exec_describe_first_result_set_for_object
-            // Instead, we query ALL_ARGUMENTS to get OUT and IN/OUT parameters that represent the result
-            // databaseObjectName format: "schema.procedureName" or "procedureName"
-            
-            string query = 
+            // Oracle 19c implementation for retrieving stored procedure result set metadata.
+            // Oracle doesn't have a direct equivalent to SQL Server's
+            // dm_exec_describe_first_result_set_for_object. Instead we query ALL_ARGUMENTS to get
+            // OUT / IN OUT arguments that represent the result.
+            // databaseObjectName format: "schema.procedureName" or "procedureName".
+            string query =
                 $"SELECT " +
                 $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
                 $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
                 $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
-                $"WHERE (UPPER(OWNER || '.' || OBJECT_NAME) = UPPER('{databaseObjectName}') " +
-                $"OR UPPER(OBJECT_NAME) = UPPER('{databaseObjectName}')) " +
+                $"WHERE UPPER(OWNER) = UPPER('{SchemaNameFrom(databaseObjectName).Replace("'", "''")}') " +
+                $"AND UPPER(OBJECT_NAME) = UPPER('{NameFrom(databaseObjectName).Replace("'", "''")}') " +
                 $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
                 $"AND ARGUMENT_NAME IS NOT NULL " +
                 $"ORDER BY POSITION";
-            
+
             return query;
+        }
+
+        /// <summary>
+        /// Builds an Oracle query that retrieves result set metadata for a subprogram that lives
+        /// inside a package. Unlike standalone subprograms (whose arguments appear in ALL_ARGUMENTS
+        /// with an empty PACKAGE_NAME column), packaged subprogram arguments are keyed by the
+        /// PACKAGE_NAME column and the bare subprogram name in OBJECT_NAME.
+        /// </summary>
+        /// <param name="schemaName">Owning schema, e.g. "SYSTEM".</param>
+        /// <param name="packageName">Package name, e.g. "PKG_TEST".</param>
+        /// <param name="subprogramName">Bare subprogram name within the package, e.g. "GET_BOOKS".</param>
+        /// <param name="isFunction">True when the subprogram is a function. A function's result set
+        /// is its RETURN value, which appears in ALL_ARGUMENTS as an OUT argument at POSITION 0 with
+        /// a NULL ARGUMENT_NAME.</param>
+        public string BuildStoredProcedureResultDetailsQuery(
+            string schemaName,
+            string? packageName,
+            string subprogramName,
+            bool isFunction)
+        {
+            // ALL_ARGUMENTS keys a standalone subprogram by PACKAGE_NAME IS NULL and a packaged one
+            // by PACKAGE_NAME = <package>. (In Oracle an empty string IS NULL, so a plain equality
+            // against an empty package name would match nothing.)
+            string packageClause = string.IsNullOrEmpty(packageName)
+                ? "PACKAGE_NAME IS NULL"
+                : $"UPPER(PACKAGE_NAME) = UPPER('{packageName.Replace("'", "''")}')";
+
+            string query =
+                $"SELECT " +
+                $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
+                $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
+                $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
+                $"FROM ALL_ARGUMENTS " +
+                $"WHERE UPPER(OWNER) = UPPER('{schemaName.Replace("'", "''")}') " +
+                $"AND {packageClause} " +
+                $"AND UPPER(OBJECT_NAME) = UPPER('{subprogramName.Replace("'", "''")}') " +
+                (isFunction
+                    // A function's result set is its RETURN value (POSITION 0, ARGUMENT_NAME null).
+                    ? $"AND POSITION = 0 "
+                    // A procedure's result set is its cursor OUT parameter(s).
+                    : $"AND IN_OUT IN ('OUT', 'IN/OUT') AND ARGUMENT_NAME IS NOT NULL ") +
+                $"ORDER BY POSITION";
+
+            return query;
+        }
+
+        /// <summary>
+        /// Extracts the schema (the first token) from a standalone subprogram name. Callers must
+        /// ensure the name has at most two dot-separated tokens: for "a.b.c" this returns "a" and
+        /// silently ignores the middle token, which is only correct when the caller has already
+        /// routed package-qualified names elsewhere.
+        /// </summary>
+        private static string SchemaNameFrom(string databaseObjectName)
+        {
+            int dot = databaseObjectName.IndexOf('.');
+            return dot < 0 ? databaseObjectName : databaseObjectName[..dot];
+        }
+
+        /// <summary>
+        /// Extracts the object name (the last token) from a standalone subprogram name. Callers must
+        /// ensure the name has at most two dot-separated tokens: for "a.b.c" this returns "c" and
+        /// silently ignores the middle token.
+        /// </summary>
+        private static string NameFrom(string databaseObjectName)
+        {
+            int dot = databaseObjectName.LastIndexOf('.');
+            return dot < 0 ? databaseObjectName : databaseObjectName[(dot + 1)..];
         }
 
         /// <inheritdoc/>

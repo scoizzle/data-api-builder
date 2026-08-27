@@ -4,6 +4,8 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -236,6 +238,10 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Oracle-specific implementation to populate stored procedure schema information.
         /// Oracle only supports 2 restrictions (Owner, Name) for the Procedures collection,
         /// unlike SQL Server which supports 4 (Database, Schema, Table, Column).
+        /// For a subprogram inside a package (source "schema.package.subprogram"), the underlying
+        /// <see cref="DatabaseStoredProcedure"/> carries the PackageName and whether the subprogram
+        /// is a function, which the ODP.NET schema collections have no direct representation for,
+        /// so those are resolved against ALL_ARGUMENTS/ALL_PROCEDURES below.
         /// </summary>
         protected override async Task FillSchemaForStoredProcedureAsync(
             Azure.DataApiBuilder.Config.ObjectModel.Entity procedureEntity,
@@ -244,85 +250,97 @@ namespace Azure.DataApiBuilder.Core.Services
             string storedProcedureSourceName,
             StoredProcedureDefinition storedProcedureDefinition)
         {
+            // The database object already carries the Oracle package/function metadata parsed from
+            // the config source in PopulateDatabaseObjectForEntity. Surface it here so downstream
+            // discovery branches on it.
+            DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
+
             using OracleConnection conn = new();
             conn.ConnectionString = ConnectionString;
-            DataTable procedureMetadata;
-            string?[] procedureRestrictions = new string?[2];
+            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, _dataSourceName);
+            await conn.OpenAsync();
 
-            try
+            string schemaFilter = string.IsNullOrEmpty(schemaName) ? GetDefaultSchemaName() : schemaName.ToUpperInvariant();
+            string objectFilter = storedProcedureSourceName.ToUpperInvariant();
+
+            // ALL_ARGUMENTS keys a standalone subprogram by (OWNER, OBJECT_NAME) with PACKAGE_NAME IS
+            // NULL, and a packaged subprogram by (OWNER, PACKAGE_NAME, OBJECT_NAME). A function
+            // additionally exposes its RETURN value as a POSITION 0 row with a NULL ARGUMENT_NAME.
+            string packageClause = dbSp.PackageName is null
+                ? "PACKAGE_NAME IS NULL"
+                : "PACKAGE_NAME = :package_name";
+            string argumentsQuery =
+                "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION " +
+                "FROM ALL_ARGUMENTS " +
+                "WHERE OWNER = :owner " +
+                "AND OBJECT_NAME = :object_name " +
+                $"AND {packageClause} " +
+                "ORDER BY POSITION";
+
+            bool isFunction = false;
+            using (OracleCommand command = conn.CreateCommand())
             {
-                await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, _dataSourceName);
-                await conn.OpenAsync();
-
-                // Oracle only supports 2 restrictions for Procedures schema:
-                // [0] = Owner (schema) - Oracle stores identifiers in uppercase when unquoted
-                // [1] = Name (procedure name)
-                procedureRestrictions[0] = string.IsNullOrEmpty(schemaName) ? null : schemaName.ToUpperInvariant();
-                procedureRestrictions[1] = storedProcedureSourceName.ToUpperInvariant();
-
-                procedureMetadata = await conn.GetSchemaAsync(collectionName: "Procedures", restrictionValues: procedureRestrictions);
-            }
-            catch (Exception ex)
-            {
-                string message = $"Cannot obtain Schema for entity {entityName} " +
-                            $"with underlying database object source: {schemaName}.{storedProcedureSourceName} " +
-                            $"due to: {ex.Message}";
-
-                var exception = new DataApiBuilderException(
-                    message: message,
-                    innerException: ex,
-                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
-
-                if (_isValidateOnly)
+                command.BindByName = true;
+                command.CommandText = argumentsQuery;
+                command.Parameters.Add(new OracleParameter("owner", schemaFilter));
+                command.Parameters.Add(new OracleParameter("object_name", objectFilter));
+                if (dbSp.PackageName is not null)
                 {
-                    SqlMetadataExceptions.Add(exception);
-                    return;
+                    command.Parameters.Add(new OracleParameter("package_name", dbSp.PackageName.ToUpperInvariant()));
                 }
-                else
+
+                using OracleDataReader reader = await command.ExecuteReaderAsync();
+                if (reader.HasRows)
                 {
-                    throw exception;
+                    while (await reader.ReadAsync())
+                    {
+                        int position = Convert.ToInt32(reader.GetValue(3));
+                        if (position == 0)
+                        {
+                            // POSITION 0 is a function's RETURN value, not an input argument.
+                            isFunction = true;
+                            continue;
+                        }
+
+                        if (reader.IsDBNull(0))
+                        {
+                            continue;
+                        }
+
+                        string argumentName = reader.GetString(0);
+                        string dataType = reader.GetString(1);
+                        Type systemType = SqlToCLRType(dataType);
+                        storedProcedureDefinition.Parameters.TryAdd(
+                            argumentName.TrimStart('@', ':'),
+                            new ParameterDefinition
+                            {
+                                SystemType = systemType,
+                                DbType = TypeHelper.GetDbTypeFromSystemType(systemType)
+                            });
+                    }
+                }
+                else if (!await OracleSubprogramExistsAsync(conn, schemaFilter, dbSp, objectFilter))
+                {
+                    // No ALL_ARGUMENTS rows: either a parameterless subprogram (valid) or a
+                    // non-existent object (error). Distinguish via ALL_PROCEDURES.
+                    var notFoundException = new DataApiBuilderException(
+                        message: $"No stored procedure definition found for the given database object {schemaFilter}.{objectFilter}",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+
+                    if (_isValidateOnly)
+                    {
+                        SqlMetadataExceptions.Add(notFoundException);
+                        return;
+                    }
+                    else
+                    {
+                        throw notFoundException;
+                    }
                 }
             }
 
-            // Stored procedure does not exist in DB schema
-            if (procedureMetadata.Rows.Count == 0)
-            {
-                var exception = new DataApiBuilderException(
-                    message: $"No stored procedure definition found for the given database object {storedProcedureSourceName}",
-                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
-
-                if (_isValidateOnly)
-                {
-                    SqlMetadataExceptions.Add(exception);
-                    return;
-                }
-                else
-                {
-                    throw exception;
-                }
-            }
-
-            // Each row in the procedureParams DataTable corresponds to a single parameter
-            DataTable parameterMetadata = await conn.GetSchemaAsync(collectionName: "ProcedureParameters", restrictionValues: procedureRestrictions);
-
-            // For each row/parameter, add an entry to StoredProcedureDefinition.Parameters dictionary
-            foreach (DataRow row in parameterMetadata.Rows)
-            {
-                // row["DATA_TYPE"] has value type string so a direct cast to System.Type is not supported.
-                string sqlType = (string)row["DATA_TYPE"];
-                Type systemType = SqlToCLRType(sqlType);
-                ParameterDefinition paramDefinition = new()
-                {
-                    SystemType = systemType,
-                    DbType = TypeHelper.GetDbTypeFromSystemType(systemType)
-                };
-
-                // Add to parameters dictionary without the leading @ or : sign
-                string paramName = ((string)row["ARGUMENT_NAME"]).TrimStart('@', ':');
-                storedProcedureDefinition.Parameters.TryAdd(paramName, paramDefinition);
-            }
+            dbSp.IsFunction = isFunction;
 
             // Loop through parameters specified in config, throw error if not found in schema
             // else set runtime config defined default values.
@@ -363,6 +381,160 @@ namespace Azure.DataApiBuilder.Core.Services
 
             // Generating exposed stored-procedure query/mutation name and adding to the dictionary mapping it to its entity name.
             GraphQLStoredProcedureExposedNameToEntityNameMap.TryAdd(GenerateStoredProcedureGraphQLFieldName(entityName, procedureEntity), entityName);
+        }
+
+        /// <summary>
+        /// Confirms the configured Oracle subprogram exists when ALL_ARGUMENTS returned no rows
+        /// (a parameterless subprogram has no argument metadata). Standalone subprograms are keyed by
+        /// OBJECT_NAME with a NULL PROCEDURE_NAME; packaged subprograms are keyed by OBJECT_NAME =
+        /// package name and PROCEDURE_NAME = subprogram name.
+        /// </summary>
+        private static async Task<bool> OracleSubprogramExistsAsync(
+            OracleConnection conn,
+            string schema,
+            DatabaseStoredProcedure dbSp,
+            string objectFilter)
+        {
+            string query = dbSp.PackageName is null
+                ? "SELECT 1 FROM ALL_PROCEDURES " +
+                  "WHERE OWNER = :owner AND OBJECT_NAME = :object_name " +
+                  "AND PROCEDURE_NAME IS NULL AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') " +
+                  "FETCH FIRST 1 ROWS ONLY"
+                : "SELECT 1 FROM ALL_PROCEDURES " +
+                  "WHERE OWNER = :owner AND OBJECT_NAME = :package_name AND PROCEDURE_NAME = :object_name " +
+                  "FETCH FIRST 1 ROWS ONLY";
+
+            using OracleCommand command = conn.CreateCommand();
+            command.BindByName = true;
+            command.CommandText = query;
+            command.Parameters.Add(new OracleParameter("owner", schema));
+            command.Parameters.Add(new OracleParameter("object_name", objectFilter));
+            if (dbSp.PackageName is not null)
+            {
+                command.Parameters.Add(new OracleParameter("package_name", dbSp.PackageName.ToUpperInvariant()));
+            }
+
+            using OracleDataReader reader = await command.ExecuteReaderAsync();
+            return await reader.ReadAsync();
+        }
+
+        /// <summary>
+        /// Overrides the base stored-procedure result-set discovery to be Oracle package/function
+        /// aware. The base implementation builds the ALL_ARGUMENTS query from only the
+        /// schema.subprogram name, which is insufficient for a subprogram inside a package (whose
+        /// arguments are keyed by PACKAGE_NAME plus the bare subprogram name) or for a function
+        /// (whose result set is its RETURN value at POSITION 0). For those, the package-aware
+        /// OracleQueryBuilder query is used so the result set definition is populated correctly.
+        /// </summary>
+        protected override async Task PopulateResultSetDefinitionsForStoredProcedureAsync(
+            string schemaName,
+            string storedProcedureName,
+            SourceDefinition sourceDefinition,
+            string entityName)
+        {
+            StoredProcedureDefinition storedProcedureDefinition = (StoredProcedureDefinition)sourceDefinition;
+            DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
+
+            string resultQuery;
+            if (dbSp.IsFunction)
+            {
+                // A function's result set is its RETURN value (ALL_ARGUMENTS POSITION 0), regardless
+                // of it being standalone (package name null) or packaged.
+                resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
+                    schemaName: schemaName,
+                    packageName: dbSp.PackageName,
+                    subprogramName: storedProcedureName,
+                    isFunction: true);
+            }
+            else if (string.IsNullOrEmpty(dbSp.PackageName))
+            {
+                // Standalone procedure - use the shared query built from schema.subprogram.
+                resultQuery = SqlQueryBuilder.BuildStoredProcedureResultDetailsQuery($"{schemaName}.{storedProcedureName}");
+            }
+            else
+            {
+                // Packaged procedure - its OUT cursor parameter(s) define the result set.
+                resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
+                    schemaName: schemaName,
+                    packageName: dbSp.PackageName,
+                    subprogramName: storedProcedureName,
+                    isFunction: false);
+            }
+
+            JsonArray? resultArray = await QueryExecutor.ExecuteQueryAsync(
+                sqltext: resultQuery,
+                parameters: null!,
+                dataReaderHandler: QueryExecutor.GetJsonArrayAsync,
+                dataSourceName: _dataSourceName);
+
+            using JsonDocument sqlResult = JsonDocument.Parse(resultArray!.ToJsonString());
+
+            foreach (JsonElement element in sqlResult.RootElement.EnumerateArray())
+            {
+                if (!TryGetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME, out JsonElement nameElement))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Unexpected stored procedure metadata shape for '{schemaName}.{storedProcedureName}': " +
+                                $"missing column '{BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME}'.",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                }
+
+                if (!TryGetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME, out JsonElement typeElement))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Unexpected stored procedure metadata shape for '{schemaName}.{storedProcedureName}': " +
+                                $"missing column '{BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME}'.",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                }
+
+                string resultFieldName = nameElement.ToString();
+                Type resultFieldType = SqlToCLRType(typeElement.ToString());
+
+                // A function's RETURN value is reported under a NULL ARGUMENT_NAME. Only a function
+                // that returns a REF CURSOR declares a result set (captured through the :dab_result
+                // bind); a scalar function has no result-set definition and is invoked by
+                // OracleQueryBuilder as SELECT ... FROM DUAL, so skip it here.
+                if (dbSp.IsFunction && resultFieldType != typeof(IDataReader))
+                {
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(resultFieldName))
+                {
+                    // Name a function's cursor result after the subprogram so it is addressable.
+                    resultFieldName = dbSp.IsFunction ? storedProcedureName : resultFieldName;
+                }
+
+                if (string.IsNullOrWhiteSpace(resultFieldName))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"The stored procedure '{schemaName}.{storedProcedureName}' returns a column without a name. " +
+                                "This typically happens when using aggregate functions (like MAX, MIN, COUNT) or expressions " +
+                                "without providing an alias. Please add column aliases to your SELECT statement. " +
+                                "For example: 'SELECT MAX(id) AS MaxId' instead of 'SELECT MAX(id)'.",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                }
+
+                storedProcedureDefinition.Columns.TryAdd(resultFieldName, new(resultFieldType) { IsNullable = true });
+            }
+
+            static bool TryGetPropertyByCaseInsensitiveName(JsonElement element, string name, out JsonElement value)
+            {
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = property.Value;
+                        return true;
+                    }
+                }
+
+                value = default;
+                return false;
+            }
         }
 
         /// <summary>
