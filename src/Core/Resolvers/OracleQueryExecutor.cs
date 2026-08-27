@@ -211,9 +211,42 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return sqltext;
             }
 
-            // All DAB bind parameters use the @param{N} naming convention (BaseQueryStructure.GetEncodedParamName),
-            // so a simple prefix replacement is equivalent to a regex match but avoids regex overhead entirely.
-            return sqltext.Replace("@param", ":param");
+            // Rewrite only outside SQL string literals. Policies may contain values such as
+            // 'user@param1.example', which must not be changed into 'user:param1.example'.
+            StringBuilder translated = new(sqltext.Length);
+            for (int i = 0; i < sqltext.Length; i++)
+            {
+                char current = sqltext[i];
+                translated.Append(current);
+
+                if (current == '\'')
+                {
+                    // Copy a complete Oracle string literal, including escaped single quotes.
+                    while (++i < sqltext.Length)
+                    {
+                        translated.Append(sqltext[i]);
+                        if (sqltext[i] == '\'')
+                        {
+                            if (i + 1 < sqltext.Length && sqltext[i + 1] == '\'')
+                            {
+                                translated.Append(sqltext[++i]);
+                                continue;
+                            }
+
+                            break;
+                        }
+                    }
+                }
+                else if (current == '@'
+                    && sqltext.AsSpan(i).StartsWith("@param", StringComparison.Ordinal)
+                    && i + "@param".Length < sqltext.Length
+                    && char.IsAsciiDigit(sqltext[i + "@param".Length]))
+                {
+                    translated[translated.Length - 1] = ':';
+                }
+            }
+
+            return translated.ToString();
         }
 
         /// <summary>
