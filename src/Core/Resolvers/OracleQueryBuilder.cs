@@ -291,7 +291,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // subprogram's OUT/IN_OUT arguments / RETURN value (see BuildStoredProcedureResultDetailsQuery).
             // A non-empty Columns dictionary signals that the subprogram yields a REF CURSOR result
             // set we must capture by appending/assigning the shared RefCursor OUT bind.
-            bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Count > 0;
+            bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Values
+                .Any(column => column.SystemType == typeof(IDataReader));
 
             if (sp.IsFunction)
             {
@@ -380,6 +381,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // INSERT ... SELECT (ORA-03049), and the create-policy predicate must live in the
                 // SELECT ... FROM DUAL WHERE clause, so the value list is emitted as a
                 // scalar subquery per column when a policy is present.
+                //
+                // KNOWN LIMITATION: when the create policy blocks the write, each guarded scalar
+                // subquery returns NULL. Inserting NULL into a NOT NULL column (e.g. the primary
+                // key) raises ORA-01400, which the exception parser maps to HTTP 400 - not the
+                // HTTP 403 the other engines produce for a policy-blocked write. The empty-cursor
+                // branch below (WHERE 1 = 0) is therefore unreachable for the INSERT path because
+                // Oracle INSERT ... VALUES always inserts exactly one row or raises. Resolving
+                // this parity gap requires a policy pre-check (e.g. SELECT COUNT(*) FROM DUAL
+                // WHERE <policy>) before issuing the INSERT, which is a future improvement.
                 //
                 // Race safety: concurrent upserts for the same missing PK serialize on the primary
                 // key; the loser hits ORA-00001 (unique constraint) which the exception parser maps
@@ -749,9 +759,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         public string QuoteTableNameAsDBConnectionParam(string param)
         {
-            // Oracle uses same quoting for table name as DB Connection Param
-            // as when used directly in SQL text.
-            return QuoteIdentifier(param);
+            // This value is bound as a DbConnectionParam (e.g. against ALL_TAB_COLS.TABLE_NAME),
+            // NOT embedded directly in SQL text. Oracle stores unquoted identifiers in uppercase
+            // and ALL_TAB_COLS.TABLE_NAME stores the bare (unquoted, uppercased) name, so the
+            // bind value must be bare and uppercased - quoting it here would never match.
+            return param.ToUpperInvariant();
         }
     }
 }
