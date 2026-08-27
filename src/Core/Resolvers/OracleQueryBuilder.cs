@@ -217,7 +217,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
             string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
 
-            return $"{outputTypeHints}BEGIN {updateQuery}; OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; END;";
+            // When the UPDATE matches no row (record absent, or the update database policy blocks it),
+            // RETURNING INTO never fires and the output binds stay NULL. Opening the cursor
+            // unconditionally would fabricate a row of all-NULL columns, which the mutation engine
+            // treats as a successful update. Mirror the upsert builder: open an EMPTY cursor when
+            // SQL%ROWCOUNT is 0 so a no-match update surfaces as "item not found" (or a policy
+            // failure), matching the behavior of the other database engines.
+            return $"{outputTypeHints}BEGIN {updateQuery}; " +
+                $"IF SQL%ROWCOUNT > 0 THEN " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
+                $"ELSE " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL WHERE 1 = 0; " +
+                $"END IF; " +
+                $"END;";
         }
 
         /// <inheritdoc />

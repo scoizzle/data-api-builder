@@ -175,6 +175,121 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// Verifies that the plain UPDATE builder (GraphQL update mutation) opens an EMPTY REF
+        /// CURSOR when the UPDATE matches no row. If the cursor were opened unconditionally, a
+        /// no-match update (record absent, or the update database policy blocks it) would surface
+        /// a fabricated row of all-NULL columns instead of "item not found", deviating from the
+        /// behavior of the other database engines.
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleUpdateOpensEmptyCursorWhenNoRowMatched()
+        {
+            // Arrange
+            OracleQueryBuilder builder = new();
+            SqlUpdateStructure structure = CreateUpdateStructure();
+
+            // Act
+            string query = builder.Build(structure);
+
+            // Assert
+            Assert.IsTrue(query.Contains("BEGIN UPDATE", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
+            Assert.IsTrue(query.EndsWith("END;", StringComparison.Ordinal), $"Expected the block to close with END;. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("IF SQL%ROWCOUNT > 0", StringComparison.Ordinal),
+                $"The UPDATE MUST gate the cursor on SQL%ROWCOUNT so a no-match update returns no row. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
+                $"The no-match branch MUST open an EMPTY cursor (WHERE 1 = 0). Query: {query}");
+            Assert.IsTrue(
+                query.Contains($"OPEN :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME} FOR SELECT", StringComparison.Ordinal),
+                $"The UPDATE MUST surface the result through the REF CURSOR. Query: {query}");
+        }
+
+        /// <summary>
+        /// Builds a minimal <see cref="SqlUpdateStructure"/> for the test entity using the
+        /// non-GraphQL constructor so no live database or GraphQL context is required.
+        /// </summary>
+        private static SqlUpdateStructure CreateUpdateStructure()
+        {
+            SourceDefinition sourceDefinition = new()
+            {
+                PrimaryKey = new() { "id" }
+            };
+            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            {
+                SystemType = typeof(int),
+                DbType = DbType.Int32
+            });
+            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            {
+                SystemType = typeof(string),
+                DbType = DbType.String,
+                IsNullable = true
+            });
+            sourceDefinition.Columns.Add("publisher_id", new ColumnDefinition
+            {
+                SystemType = typeof(int),
+                DbType = DbType.Int32
+            });
+
+            DatabaseTable dbTable = new(SCHEMA_NAME, TABLE_NAME)
+            {
+                TableDefinition = sourceDefinition,
+                SourceType = EntitySourceType.Table
+            };
+
+            Mock<ISqlMetadataProvider> metadataProvider = new();
+            metadataProvider.Setup(x => x.EntityToDatabaseObject)
+                .Returns(new Dictionary<string, DatabaseObject> { { ENTITY_NAME, dbTable } });
+            metadataProvider.Setup(x => x.GetSourceDefinition(ENTITY_NAME)).Returns(sourceDefinition);
+            metadataProvider.Setup(x => x.GetDatabaseType()).Returns(DatabaseType.Oracle);
+
+            string? outColumn;
+            metadataProvider.Setup(x => x.TryGetBackingColumn(It.IsAny<string>(), It.IsAny<string>(), out outColumn))
+                .Callback(new TryGetColumnCallback((string entity, string field, out string? column)
+                    => _columnMapping.TryGetValue(field, out column)))
+                .Returns((string entity, string field, string? column) => _columnMapping.ContainsKey(field));
+
+            string? outExposed;
+            metadataProvider.Setup(x => x.TryGetExposedColumnName(It.IsAny<string>(), It.IsAny<string>(), out outExposed))
+                .Callback(new TryGetColumnCallback((string entity, string field, out string? column)
+                    => _columnMapping.TryGetValue(field, out column)))
+                .Returns((string entity, string field, string? column) => _columnMapping.ContainsKey(field));
+
+            Mock<IAuthorizationResolver> authorizationResolver = new();
+            authorizationResolver
+                .Setup(x => x.ResolveDBPolicy(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<EntityActionOperation>(),
+                    It.IsAny<HttpContext>()))
+                .Returns(ResolvedDatabasePolicy.Empty);
+
+            RuntimeConfigProvider runtimeConfigProvider = TestHelper.GetRuntimeConfigProvider(TestHelper.GetRuntimeConfigLoader());
+            Mock<IMetadataProviderFactory> metadataProviderFactory = new();
+            GQLFilterParser gQLFilterParser = new(runtimeConfigProvider, metadataProviderFactory.Object);
+
+            DefaultHttpContext httpContext = new();
+            httpContext.Request.Headers[AuthorizationResolver.CLIENT_ROLE_HEADER] = "authenticated";
+
+            Dictionary<string, object?> mutationParams = new()
+            {
+                { "id", 1 },
+                { "title", "The Hobbit Returns to The Shire" }
+            };
+
+            return new SqlUpdateStructure(
+                entityName: ENTITY_NAME,
+                sqlMetadataProvider: metadataProvider.Object,
+                authorizationResolver: authorizationResolver.Object,
+                gQLFilterParser: gQLFilterParser,
+                mutationParams: mutationParams,
+                httpContext: httpContext,
+                isIncrementalUpdate: true);
+        }
+
+        /// <summary>
         /// Verifies that PL/SQL RETURNING binds use the type hints emitted by the builder and
         /// that the REF CURSOR result bind is registered with the correct Oracle type.
         /// </summary>
