@@ -102,9 +102,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(
                 query.Contains(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, StringComparison.Ordinal),
                 $"The upsert MUST carry the {OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME} indicator. Query: {query}");
-            Assert.IsTrue(
-                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
-                $"The both-blocked branch MUST open an EMPTY cursor (WHERE 1 = 0). Query: {query}");
         }
 
         /// <summary>
@@ -139,11 +136,123 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 query.Contains(createDbPolicy, StringComparison.Ordinal),
                 $"The Oracle upsert INSERT MUST include the create database policy. Query: {query}");
             Assert.IsTrue(
+                query.Contains("SELECT COUNT(*) FROM DUAL WHERE", StringComparison.Ordinal),
+                $"The create-policy INSERT MUST be gated by an IF (SELECT COUNT(*) FROM DUAL WHERE ...) pre-check. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
+                $"The policy-blocked INSERT path MUST open an empty cursor (WHERE 1 = 0) to surface 403. Query: {query}");
+            Assert.IsTrue(
                 query.Contains(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, StringComparison.Ordinal),
                 $"The Oracle upsert MUST carry the {OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME} indicator. Query: {query}");
             Assert.IsTrue(
                 query.Contains("'inserted'", StringComparison.Ordinal),
                 $"The INSERT branch MUST emit the 'inserted' indicator. Query: {query}");
+        }
+
+        /// <summary>
+        /// Verifies that a standalone INSERT with a create database policy gates the INSERT on
+        /// the policy via IF (SELECT COUNT(*) FROM DUAL WHERE policy), and opens an empty cursor
+        /// when the policy blocks — surfacing 403 rather than ORA-01400 (400).
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleInsertWithCreatePolicyGatesOnPolicyAndOpensEmptyCursorWhenBlocked()
+        {
+            // Arrange
+            const string createDbPolicy = "(publisher_id != 0)";
+
+            SourceDefinition sourceDefinition = new()
+            {
+                PrimaryKey = new() { "id" }
+            };
+            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            {
+                SystemType = typeof(int),
+                DbType = DbType.Int32
+            });
+            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            {
+                SystemType = typeof(string),
+                DbType = DbType.String,
+                IsNullable = true
+            });
+
+            DatabaseTable dbTable = new(SCHEMA_NAME, TABLE_NAME)
+            {
+                TableDefinition = sourceDefinition,
+                SourceType = EntitySourceType.Table
+            };
+
+            Mock<ISqlMetadataProvider> metadataProvider = new();
+            metadataProvider.Setup(x => x.EntityToDatabaseObject)
+                .Returns(new Dictionary<string, DatabaseObject> { { ENTITY_NAME, dbTable } });
+            metadataProvider.Setup(x => x.GetSourceDefinition(ENTITY_NAME)).Returns(sourceDefinition);
+            metadataProvider.Setup(x => x.GetDatabaseType()).Returns(DatabaseType.Oracle);
+
+            string? outColumn;
+            metadataProvider.Setup(x => x.TryGetBackingColumn(It.IsAny<string>(), It.IsAny<string>(), out outColumn))
+                .Callback(new TryGetColumnCallback((string entity, string field, out string? column)
+                    => _columnMapping.TryGetValue(field, out column)))
+                .Returns((string entity, string field, string? column) => _columnMapping.ContainsKey(field));
+
+            string? outExposed;
+            metadataProvider.Setup(x => x.TryGetExposedColumnName(It.IsAny<string>(), It.IsAny<string>(), out outExposed))
+                .Callback(new TryGetColumnCallback((string entity, string field, out string? column)
+                    => _columnMapping.TryGetValue(field, out column)))
+                .Returns((string entity, string field, string? column) => _columnMapping.ContainsKey(field));
+
+            Mock<IAuthorizationResolver> authorizationResolver = new();
+            authorizationResolver
+                .Setup(x => x.ResolveDBPolicy(
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<EntityActionOperation>(),
+                    It.IsAny<HttpContext>()))
+                .Returns(ResolvedDatabasePolicy.Empty);
+
+            RuntimeConfigProvider runtimeConfigProvider = TestHelper.GetRuntimeConfigProvider(TestHelper.GetRuntimeConfigLoader());
+            Mock<IMetadataProviderFactory> metadataProviderFactory = new();
+            GQLFilterParser gQLFilterParser = new(runtimeConfigProvider, metadataProviderFactory.Object);
+
+            DefaultHttpContext httpContext = new();
+            httpContext.Request.Headers[AuthorizationResolver.CLIENT_ROLE_HEADER] = "authenticated";
+
+            Dictionary<string, object?> mutationParams = new()
+            {
+                { "id", 1 },
+                { "title", "New Book" }
+            };
+
+            SqlInsertStructure structure = new(
+                entityName: ENTITY_NAME,
+                sqlMetadataProvider: metadataProvider.Object,
+                authorizationResolver: authorizationResolver.Object,
+                gQLFilterParser: gQLFilterParser,
+                mutationParams: mutationParams,
+                httpContext: httpContext);
+
+            // Set the create policy directly on the structure (bypasses the resolver/AST pipeline
+            // which requires a full GraphQL context). This mirrors how the upsert test sets its
+            // DbPolicyPredicatesForOperations.
+            structure.DbPolicyPredicatesForOperations[EntityActionOperation.Create] = createDbPolicy;
+
+            OracleQueryBuilder builder = new();
+
+            // Act
+            string query = builder.Build(structure);
+
+            // Assert
+            Assert.IsTrue(query.Contains("BEGIN", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
+            Assert.IsTrue(query.Contains("INSERT INTO", StringComparison.Ordinal), $"Expected an INSERT statement. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("SELECT COUNT(*) FROM DUAL WHERE", StringComparison.Ordinal),
+                $"The INSERT MUST be gated by an IF (SELECT COUNT(*) FROM DUAL WHERE ...) pre-check. Query: {query}");
+            Assert.IsTrue(
+                query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
+                $"The policy-blocked path MUST open an empty cursor (WHERE 1 = 0) to surface 403. Query: {query}");
+            Assert.IsTrue(
+                query.Contains(createDbPolicy, StringComparison.Ordinal),
+                $"The policy MUST appear in the IF-guard condition. Query: {query}");
         }
 
         /// <summary>

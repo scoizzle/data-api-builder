@@ -123,21 +123,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
                 insertQuery += $"({insertColumns}) ";
-                
-                // POST-CONDITION: Apply database policy to VALUES clause.
-                // Oracle does NOT support RETURNING with INSERT ... SELECT (ORA-03049), so the
-                // create policy is enforced by wrapping each value in a guarded scalar subselect
-                // (SELECT <value> FROM DUAL WHERE <policy>) inside a VALUES list.
-                if (dbPolicyPredicates.Equals(BASE_PREDICATE))
-                {
-                    insertQuery += $"VALUES ({string.Join(", ", structure.Values)}) ";
-                }
-                else
-                {
-                    string guardedValues = string.Join(", ", structure.Values.Select(
-                        v => $"(SELECT {v} FROM DUAL WHERE {dbPolicyPredicates})"));
-                    insertQuery += $"VALUES ({guardedValues}) ";
-                }
+                insertQuery += $"VALUES ({string.Join(", ", structure.Values)}) ";
             }
             else
             {
@@ -192,6 +178,21 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
             string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, sourceDefinition);
+
+            bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
+            if (hasCreatePolicy)
+            {
+                // Gate the INSERT on the create policy: when blocked, open an empty cursor
+                // (WHERE 1 = 0) so the executor surfaces 403 rather than ORA-01400 (400).
+                return $"{outputTypeHints}BEGIN " +
+                    $"IF (SELECT COUNT(*) FROM DUAL WHERE {dbPolicyPredicates}) > 0 THEN " +
+                    $"{insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
+                    $"ELSE " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL WHERE 1 = 0; " +
+                    $"END IF; " +
+                    $"END;";
+            }
 
             return $"{outputTypeHints}BEGIN {insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
                 $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; END;";
@@ -375,75 +376,53 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
             else
             {
-                // INSERT only runs when the UPDATE matched no row (row absent). The create database
-                // policy, when defined, is applied by selecting the VALUES through a DUAL subquery
-                // that filters on the policy. NOTE: Oracle does NOT support RETURNING with
-                // INSERT ... SELECT (ORA-03049), and the create-policy predicate must live in the
-                // SELECT ... FROM DUAL WHERE clause, so the value list is emitted as a
-                // scalar subquery per column when a policy is present.
-                //
-                // KNOWN LIMITATION: when the create policy blocks the write, each guarded scalar
-                // subquery returns NULL. Inserting NULL into a NOT NULL column (e.g. the primary
-                // key) raises ORA-01400, which the exception parser maps to HTTP 400 - not the
-                // HTTP 403 the other engines produce for a policy-blocked write. The empty-cursor
-                // branch below (WHERE 1 = 0) is therefore unreachable for the INSERT path because
-                // Oracle INSERT ... VALUES always inserts exactly one row or raises. Resolving
-                // this parity gap requires a policy pre-check (e.g. SELECT COUNT(*) FROM DUAL
-                // WHERE <policy>) before issuing the INSERT, which is a future improvement.
+                // INSERT only runs when the UPDATE matched no row (row absent).
+                // When a create policy is present, the INSERT is gated by an IF-guard that checks
+                // the policy via (SELECT COUNT(*) FROM DUAL WHERE <policy>). When the policy blocks,
+                // the INSERT is skipped entirely and an empty cursor is opened, surfacing 403
+                // (matching the Postgres/MSSQL behavior for a policy-blocked write).
+                // When no policy exists, plain INSERT ... VALUES is used.
                 //
                 // Race safety: concurrent upserts for the same missing PK serialize on the primary
                 // key; the loser hits ORA-00001 (unique constraint) which the exception parser maps
                 // to HTTP 409, matching the behavior of the other engines' non-atomic upserts.
-                List<string> insertWhere = new();
                 string? createPolicy = structure.GetDbPolicyForOperation(EntityActionOperation.Create);
-                if (!string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE))
-                {
-                    insertWhere.Add(createPolicy);
-                }
+                bool hasCreatePolicy = !string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE);
 
-                // Build INSERT ... VALUES form (RETURNING is only valid with VALUES, not SELECT).
                 string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
-                string insertQuery;
-                if (insertWhere.Count == 0)
-                {
-                    insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
-                        $"VALUES ({string.Join(", ", structure.Values)}) " +
-                        $"RETURNING {returningColumns} " +
-                        $"INTO {bindNames}";
-                }
-                else
-                {
-                    // With a create policy, wrap each value in a guarded scalar subselect
-                    // (SELECT value FROM DUAL WHERE <policy>) so the policy filters the insert.
-                    string whereSql = string.Join(" AND ", insertWhere);
-                    string guardedValues = string.Join(", ", structure.Values.Select(
-                        v => $"(SELECT {v} FROM DUAL WHERE {whereSql})"));
-                    insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
-                        $"VALUES ({guardedValues}) " +
-                        $"RETURNING {returningColumns} " +
-                        $"INTO {bindNames}";
-                }
+                string insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
+                    $"VALUES ({string.Join(", ", structure.Values)}) " +
+                    $"RETURNING {returningColumns} " +
+                    $"INTO {bindNames}";
 
                 string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
                 string updateIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
 
-                return $"{outputTypeHints}BEGIN " +
-                    $"{updateQuery}; " +
-                    $"IF SQL%ROWCOUNT > 0 THEN " +
-                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL; " +
-                    $"ELSE " +
-                    $"{insertQuery}; " +
-                    $"IF SQL%ROWCOUNT > 0 THEN " +
-                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; " +
-                    $"ELSE " +
-                    // Neither UPDATE (row existed but policy-blocked) nor INSERT (create-policy
-                    // blocked -> the guarded VALUES yielded NULLs and the NOT NULL PK failed, or
-                    // the guarded subquery returned no row) ran. Open an EMPTY cursor so the
-                    // executor reports 403 rather than fabricating a row of NULLs.
-                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL WHERE 1 = 0; " +
-                    $"END IF; " +
-                    $"END IF; " +
-                    $"END;";
+                StringBuilder block = new();
+                block.Append($"{outputTypeHints}BEGIN ");
+                block.Append($"{updateQuery}; ");
+                block.Append($"IF SQL%ROWCOUNT > 0 THEN ");
+                block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL; ");
+                block.Append($"ELSE ");
+                if (hasCreatePolicy)
+                {
+                    // Gate the INSERT on the create policy: when blocked, open an empty cursor
+                    // so the executor surfaces 403 rather than ORA-01400 (400).
+                    block.Append($"IF (SELECT COUNT(*) FROM DUAL WHERE {createPolicy}) > 0 THEN ");
+                    block.Append($"{insertQuery}; ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
+                    block.Append($"ELSE ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL WHERE 1 = 0; ");
+                    block.Append($"END IF; ");
+                }
+                else
+                {
+                    block.Append($"{insertQuery}; ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
+                }
+                block.Append($"END IF; ");
+                block.Append($"END;");
+                return block.ToString();
             }
         }
 
