@@ -27,7 +27,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // NULL handling codes
                 "1400",     // ORA-01400: cannot insert NULL into column
                 "1407",     // ORA-01407: cannot update NULL into column
-                "1422",     // ORA-01422: exact fetch returns more than requested
 
                 // Size and precision codes
                 "12899",    // ORA-12899: value too large for column
@@ -41,7 +40,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2015",     // ORA-02015: cannot use FOR UPDATE with group functions
 
                 // PL/SQL error codes
-                "4091",     // ORA-04091: table is mutating, trigger/function may not see
                 "4101",     // ORA-04101: referential integrity - different transaction
                 "4102",     // ORA-04102: referential integrity - unknown table
 
@@ -54,7 +52,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2005",     // ORA-02005: invalid column specification
                 "1018",     // ORA-01018: open cursor forced to close
                 "1019",     // ORA-01019: cannot allocate memory in the user side
-                "1035"      // ORA-01035: ORACLE only available to users with RESTRICTED SESSION
             });
 
             TransientExceptionCodes.UnionWith(new List<string>
@@ -116,8 +113,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "1410",     // ORA-01410: invalid ROWID
                 "1411",     // ORA-01411: invalid row (no valid ROWID)
                 "1412",     // ORA-01412: invalid row sequence
-                "60",       // ORA-00060: deadlock detected (also transient)
                 "8177"      // ORA-08177: can't serialize access for this transaction
+                // NOTE: ORA-00060 (deadlock) is intentionally NOT here — it is transient and
+                // handled by TransientExceptionCodes for retry logic, not mapped to 409.
             });
         }
 
@@ -181,22 +179,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Extracts Oracle error code from exception.
         /// </summary>
-        private static string GetOracleErrorCode(DbException e)
+        private static string GetOracleErrorCode(DbException e) => e switch
         {
-            // Oracle.ManagedDataAccess.Client.OracleException has a Number property
-            // We need to use reflection since we don't have a direct reference to the Oracle library here
-            var oracleException = e;
-            var numberProperty = oracleException.GetType().GetProperty("Number");
-            if (numberProperty != null)
-            {
-                var errorNumber = numberProperty.GetValue(oracleException);
-                if (errorNumber != null)
-                {
-                    return errorNumber.ToString()!;
-                }
-            }
-
-            return string.Empty;
-        }
+            Oracle.ManagedDataAccess.Client.OracleException oraException => oraException.Number.ToString(),
+            _ => string.Empty
+        };
     }
 }
