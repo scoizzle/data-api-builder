@@ -1973,7 +1973,7 @@ Entities.TryGetValue(entityName, out Entity? entity);
         /// <param name="schemaName">Name of schema the table belongs within.</param>
         /// <param name="tableName">Name of the table.</param>
         /// <returns>Properly formatted table name with schema prefix if it exists.</returns>
-        internal string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
+        internal virtual string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
         {
             IQueryBuilder queryBuilder = GetQueryBuilder();
             StringBuilder tablePrefix = new();
@@ -1981,13 +1981,13 @@ Entities.TryGetValue(entityName, out Entity? entity);
             if (!string.IsNullOrEmpty(schemaName))
             {
                 // Determine schemaName for prefix.
-                schemaName = queryBuilder.QuoteIdentifier(schemaName.ToUpperInvariant());
+                schemaName = queryBuilder.QuoteIdentifier(schemaName);
                 // Database name is empty we just need the schema name.
                 tablePrefix.Append(schemaName);
             }
 
             string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
-            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName.ToUpperInvariant())}";
+            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName)}";
         }
 
         /// <summary>

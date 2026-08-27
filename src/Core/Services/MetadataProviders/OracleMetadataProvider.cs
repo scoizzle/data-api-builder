@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -57,6 +58,28 @@ namespace Azure.DataApiBuilder.Core.Services
                 // If we can't parse the connection string, default to SYSTEM
                 return "SYSTEM";
             }
+        }
+
+        /// <summary>
+        /// Oracle-specific table-name prefix formatting. Oracle stores unquoted identifiers in
+        /// uppercase, so the schema and table names are uppercased before quoting so the generated
+        /// identifier matches the physical object. The base implementation must NOT uppercase for
+        /// every provider - PostgreSQL and MySQL (case-sensitive identifiers) rely on the base
+        /// pass-through behavior.
+        /// </summary>
+        internal override string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
+        {
+            IQueryBuilder queryBuilder = GetQueryBuilder();
+            StringBuilder tablePrefix = new();
+
+            if (!string.IsNullOrEmpty(schemaName))
+            {
+                schemaName = queryBuilder.QuoteIdentifier(schemaName.ToUpperInvariant());
+                tablePrefix.Append(schemaName);
+            }
+
+            string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
+            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName.ToUpperInvariant())}";
         }
 
         /// <summary>

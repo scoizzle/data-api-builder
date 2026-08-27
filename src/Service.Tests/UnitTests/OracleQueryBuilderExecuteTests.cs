@@ -93,6 +93,34 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(query.Contains(":param", StringComparison.Ordinal), $"No IN binds expected. Query: {query}");
         }
 
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleExecuteScalarOutputDoesNotAppendRefCursorBind()
+        {
+            StoredProcedureDefinition spDef = new();
+            spDef.Parameters.Add("id", new ParameterDefinition
+            {
+                SystemType = typeof(decimal),
+                DbType = DbType.Decimal
+            });
+            spDef.Columns.Add("result", new ColumnDefinition
+            {
+                SystemType = typeof(decimal),
+                DbType = DbType.Decimal
+            });
+
+            SqlExecuteStructure structure = CreateExecuteStructure(
+                spDef,
+                requestParams: new Dictionary<string, object?> { { "id", 1 } });
+
+            string query = new OracleQueryBuilder().Build(structure);
+
+            Assert.IsTrue(query.Contains("BEGIN", StringComparison.Ordinal), $"Expected a PL/SQL block. Query: {query}");
+            Assert.IsFalse(
+                query.Contains($":{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal),
+                $"A scalar OUT parameter must not receive the REF CURSOR bind. Query: {query}");
+        }
+
         /// <summary>
         /// A procedure that performs work but returns no result set and declares no parameters
         /// must be invoked as <c>BEGIN "SYSTEM"."DELETE_LAST_INSERTED_BOOK"; END;</c> (no
