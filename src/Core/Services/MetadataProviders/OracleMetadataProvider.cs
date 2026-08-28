@@ -282,6 +282,16 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Oracle stores unquoted identifiers in UPPERCASE, so the schema bind for the read-only
+        /// (virtual column) query must be uppercased regardless of the casing authored in the
+        /// config source, matching the FK and column-metadata lookups.
+        /// </summary>
+        protected override string GetSchemaOrDatabaseNameForReadOnlyColumnQuery(string schemaOrDatabaseName)
+        {
+            return schemaOrDatabaseName.ToUpperInvariant();
+        }
+
+        /// <summary>
         /// Oracle-specific implementation to populate stored procedure schema information.
         /// Oracle only supports 2 restrictions (Owner, Name) for the Procedures collection,
         /// unlike SQL Server which supports 4 (Database, Schema, Table, Column).

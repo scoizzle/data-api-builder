@@ -1917,6 +1917,19 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Returns the schema/database name to bind when querying read-only (virtual/computed)
+        /// columns. Providers whose catalog stores identifiers in a specific casing (e.g. Oracle
+        /// stores unquoted identifiers UPPERCASE) override this so the bind matches regardless of
+        /// the casing authored in the config source. The default returns the name unchanged.
+        /// </summary>
+        /// <param name="schemaOrDatabaseName">The schema (or database for MySql) name of the table.</param>
+        /// <returns>The name to bind for the read-only column query.</returns>
+        protected virtual string GetSchemaOrDatabaseNameForReadOnlyColumnQuery(string schemaOrDatabaseName)
+        {
+            return schemaOrDatabaseName;
+        }
+
+        /// <summary>
         /// Helper method to populate the column definitions of each column in a table with the info about
         /// whether the column can be updated or not.
         /// </summary>
@@ -1931,7 +1944,7 @@ namespace Azure.DataApiBuilder.Core.Services
             string queryToGetReadOnlyColumns = SqlQueryBuilder.BuildQueryToGetReadOnlyColumns(schemaOrDatabaseParamName, tableParamName);
             Dictionary<string, DbConnectionParam> parameters = new()
             {
-                { schemaOrDatabaseParamName, new(schemaOrDatabaseName, DbType.String) },
+                { schemaOrDatabaseParamName, new(GetSchemaOrDatabaseNameForReadOnlyColumnQuery(schemaOrDatabaseName), DbType.String) },
                 { tableParamName, new(quotedTableName, DbType.String) }
             };
 
