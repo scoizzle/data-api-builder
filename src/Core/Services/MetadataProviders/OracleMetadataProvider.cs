@@ -217,6 +217,17 @@ namespace Azure.DataApiBuilder.Core.Services
                         continue;
                     }
 
+                    // CLOB/NCLOB columns are surfaced as System.String by the driver, but their
+                    // bind/output types must not be limited to VARCHAR2(4000) - the Oracle query
+                    // builder maps these to OracleDbType.Clob so RETURNING ... INTO binds hold
+                    // values larger than 4000 characters.
+                    if (physicalType is not null
+                        && (physicalType.Equals("CLOB", StringComparison.OrdinalIgnoreCase)
+                            || physicalType.Equals("NCLOB", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        columnDefinition.IsClob = true;
+                    }
+
                     columnDefinition.DbType = TypeHelper.GetDbTypeFromSystemType(columnDefinition.SystemType);
                 }
             }
