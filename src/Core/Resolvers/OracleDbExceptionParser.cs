@@ -52,6 +52,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2005",     // ORA-02005: invalid column specification
                 "1018",     // ORA-01018: open cursor forced to close
                 "1019",     // ORA-01019: cannot allocate memory in the user side
+
+                // PL/SQL / SQL statement errors (wrong number or types of arguments when
+                // invoking a stored procedure). Keep in sync with the DatabaseInputError
+                // mapping in GetResultSubStatusCodeForException so REST status (400) matches
+                // the substatus (GraphQL already coerces DatabaseInputError to 400 via
+                // DetermineStatusCodeMiddleware).
+                "6550",     // ORA-06550: line/column in PL/SQL statement
+                "933"       // ORA-00933: SQL command not properly ended
             });
 
             TransientExceptionCodes.UnionWith(new List<string>

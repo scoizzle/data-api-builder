@@ -438,7 +438,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// set (:dab_result) carrying the resulting columns plus the ___upsert_op___ indicator:
         ///   - 'updated': the UPDATE branch ran (row matched the primary key and the update policy).
         ///   - 'inserted': the INSERT branch ran (row was absent and the create policy allowed it).
-        ///   - empty: neither branch produced a row (policy-blocked).
+        ///   - 'missing' (fallback-to-update only): the target row does not exist -> 404.
+        ///   - empty: neither branch produced a row (a policy blocked the operation) -> 403.
         /// </summary>
         /// <param name="dbDataReader">A DbDataReader.</param>
         /// <param name="args">The arguments to this handler - args[0] = primary key in pretty format, args[1] = entity name.</param>
@@ -465,13 +466,31 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 //    absent but the create policy blocked the insert -> 403 policy failure (and we
                 //    deliberately avoid distinguishing "row existed" vs "didn't" so row existence is
                 //    not leaked to unauthorized callers).
-                //  - fallback (autogen PK): no row matched the PK + update policy, and no INSERT is
-                //    attempted -> 403 is the safe, non-leaky response (the caller learns only that the
-                //    upsert could not modify the target row, not whether it exists).
+                //  - fallback (autogen PK): the row exists but the update policy blocked it (the
+                //    existence probe distinguishes this from a missing row, which yields a 'missing'
+                //    indicator row instead) -> 403 is the safe, non-leaky response.
                 throw new DataApiBuilderException(
                     message: DataApiBuilderException.AUTHORIZATION_FAILURE,
                     statusCode: HttpStatusCode.Forbidden,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
+            }
+
+            // The fallback-to-update branch fabricates a 'missing' indicator row when the target
+            // row does not exist, so the caller gets a 404 (item not found) matching PostgreSQL and
+            // MSSQL instead of an ambiguous policy failure.
+            bool isMissing =
+                upsertResultSetRow.Columns.TryGetValue(OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME, out object? missingOp)
+                && string.Equals(missingOp?.ToString(), OracleQueryBuilder.MISSING_UPSERT, StringComparison.OrdinalIgnoreCase);
+
+            if (isMissing)
+            {
+                string message = args is not null && args.Count > 1
+                    ? $"Cannot perform INSERT and could not find {args[1]} with primary key {args[0]} to perform UPDATE on."
+                    : "Neither insert nor update could be performed.";
+                throw new DataApiBuilderException(
+                    message: message,
+                    statusCode: HttpStatusCode.NotFound,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ItemNotFound);
             }
 
             // The UPDATE branch yields 'updated', the INSERT branch 'inserted'. Fallback-to-update
