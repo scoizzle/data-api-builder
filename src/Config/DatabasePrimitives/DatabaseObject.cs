@@ -309,6 +309,14 @@ public class ColumnDefinition
     /// </summary>
     public Type? ElementSystemType { get; set; }
 
+    /// <summary>
+    /// True when the physical column is a CLOB/NCLOB (large-character) type. Providers use this to
+    /// select bind/output types that are not limited to 4000 bytes (e.g. Oracle maps such columns
+    /// to OracleDbType.Clob instead of OracleDbType.Varchar2 for RETURNING ... INTO binds).
+    /// </summary>
+    [JsonIgnore]
+    public bool IsClob { get; set; }
+
     public ColumnDefinition() { }
 
     public ColumnDefinition(Type systemType)
