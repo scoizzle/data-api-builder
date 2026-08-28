@@ -223,14 +223,27 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Oracle stores unquoted identifiers in uppercase. DAB exposes these as-is which makes
-        /// REST/GraphQL field names UPPERCASE, inconsistent with the other SQL providers
-        /// (MsSql/PostgreSQL/MySQL surface lowercase field names). Lowercase the physical column
-        /// name so the exposed schema matches the other providers.
+        /// Preserve the physical column name exactly as Oracle reports it (uppercase for unquoted
+        /// identifiers, exact case for quoted ones). The backing column name stored on
+        /// <see cref="SourceDefinition.Columns"/> and <see cref="SourceDefinition.PrimaryKey"/> is
+        /// emitted verbatim by <see cref="OracleQueryBuilder"/>, so preserving casing lets quoted
+        /// lowercase/mixed-case columns resolve correctly. Exposed REST/GraphQL field names are
+        /// kept lowercase separately via <see cref="GetExposedColumnName"/>.
         /// </summary>
         protected override string GetPhysicalDatabaseColumnName(string columnName)
         {
-            return columnName.ToLowerInvariant();
+            return columnName;
+        }
+
+        /// <summary>
+        /// Oracle stores unquoted identifiers in uppercase, so an unaliased column would otherwise
+        /// surface as an UPPERCASE REST/GraphQL field name, inconsistent with the other SQL
+        /// providers (MsSql/PostgreSQL/MySQL). Lowercase the exposed name so the API schema matches
+        /// the other providers while the backing (physical) name is emitted unchanged in SQL.
+        /// </summary>
+        protected override string GetExposedColumnName(string backingColumnName)
+        {
+            return backingColumnName.ToLowerInvariant();
         }
 
         /// <summary>

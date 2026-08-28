@@ -299,6 +299,16 @@ public class ColumnDefinition
     public int? Length { get; set; }
 
     /// <summary>
+    /// The physical name of the column exactly as the database stores/reports it (e.g. Oracle
+    /// stores unquoted identifiers in UPPERCASE). This is what SQL emission must quote; the
+    /// <see cref="SourceDefinition.Columns"/> dictionary key is the exposed (API) name and may
+    /// differ in casing (e.g. lowercase for Oracle). Null for columns that have no separate
+    /// physical identity (e.g. stored-procedure result columns).
+    /// </summary>
+    [JsonIgnore]
+    public string? PhysicalName { get; set; }
+
+    /// <summary>
     /// Indicates whether this column is a database array type (e.g., PostgreSQL int[], text[]).
     /// </summary>
     public bool IsArrayType { get; set; }

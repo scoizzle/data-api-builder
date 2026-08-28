@@ -139,7 +139,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 query.Contains("SELECT COUNT(*) FROM (SELECT", StringComparison.Ordinal),
                 $"The create-policy INSERT MUST be gated by an IF (SELECT COUNT(*) FROM (SELECT <named values> FROM DUAL) WHERE ...) pre-check so column-referencing policies resolve. Query: {query}");
             Assert.IsTrue(
-                query.Contains($"SELECT COUNT(*) FROM \"SYSTEM\".\"BOOKS\" WHERE \"ID\" =", StringComparison.Ordinal),
+                query.Contains($"SELECT COUNT(*) FROM \"SYSTEM\".\"BOOKS\" WHERE \"id\" =", StringComparison.Ordinal),
                 $"The upsert MUST distinguish a policy-blocked existing row from a missing row via a PK existence check. Query: {query}");
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),

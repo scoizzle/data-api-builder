@@ -48,25 +48,26 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Oracle stores unquoted identifiers in UPPERCASE. A double-quoted lowercase column
-        /// reference (e.g. "piecesavailable") resolves to a non-existent lowercase object
-        /// (ORA-00904), so physical column references in raw SQL fragments (OData filters,
-        /// predicate operands) must be emitted UPPERCASE and quoted.
+        /// Quotes a physical column reference for use in raw SQL fragments (OData filters,
+        /// predicate operands). Callers pass names already resolved to the PHYSICAL backing
+        /// casing preserved from Oracle metadata, so no case transformation is applied - a
+        /// quoted lowercase/mixed-case column resolves exactly as Oracle stores it.
         /// </summary>
         /// <inheritdoc />
         public override string QuotePhysicalColumn(string columnName)
         {
-            return QuoteIdentifier(columnName.ToUpperInvariant());
+            return QuoteIdentifier(columnName);
         }
 
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
-            // All Oracle identifiers are case-insensitive by default and are stored in
-            // uppercase when created unquoted. DAB builds columns via Build(Column) which
-            // emits the table alias uppercased (e.g. "SYSTEM_BOOKS"), so the FROM-clause
-            // alias must be uppercased too or the column references will not resolve
-            // (ORA-00904: invalid identifier).
+            // The FROM-clause table alias is DAB-generated ("table{N}", lowercase) and emitted
+            // UPPERCASE here, matching the UPPERCASE alias emitted by Build(Column) for column
+            // references. The table/schema names come from the config and resolve against Oracle
+            // case-insensitively; they are emitted UPPERCASE (the physical casing for unquoted
+            // objects). Column names are physical backing names preserved from metadata and are
+            // emitted verbatim by Build(Column).
             string fromSql = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                              $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)}";
             fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key.ToUpperInvariant())} ON (1=1)"));
@@ -92,11 +93,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             StringBuilder result = new();
             if (structure.IsListQuery)
             {
-                result.Append($"SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(*)), JSON_ARRAY()) ");
+                // JSON_ARRAYAGG(JSON_OBJECT(*) RETURNING CLOB) avoids ORA-40478 ("output value too
+                // large, maximum: 4000") when nested/aggregated JSON exceeds 4000 bytes. The empty
+                // fallback JSON_ARRAY() is TO_CLOB-wrapped so COALESCE operands share the CLOB type.
+                result.Append($"SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(*) RETURNING CLOB), TO_CLOB(JSON_ARRAY())) ");
             }
             else
             {
-                result.Append($"SELECT JSON_OBJECT(*) ");
+                // Oracle rejects RETURNING CLOB directly on the wildcard scalar form
+                // JSON_OBJECT(*) (ORA-00923), so wrap it in TO_CLOB instead.
+                result.Append($"SELECT TO_CLOB(JSON_OBJECT(*)) ");
             }
 
             result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
@@ -121,7 +127,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             
             if (structure.InsertColumns.Any())
             {
-                string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
+                string insertColumns = BuildColumnList(structure.InsertColumns);
                 insertQuery += $"({insertColumns}) ";
                 insertQuery += $"VALUES ({string.Join(", ", structure.Values)}) ";
             }
@@ -150,7 +156,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         DataApiBuilderException.SubStatusCodes.DatabaseInputError);
                 }
 
-                insertQuery += $"({QuoteIdentifier(defaultColumn.ToUpperInvariant())}) VALUES (DEFAULT) ";
+                insertQuery += $"({QuoteIdentifier(defaultColumn)}) VALUES (DEFAULT) ";
             }
 
             // POST-CONDITION: Handle DML trigger scenario (Oracle-specific, not yet fully implemented)
@@ -172,9 +178,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             //   END;
             //
             // NOTE: Oracle's RETURNING clause rejects aliases (ORA-00925 "missing INTO keyword"
-            // when an AS alias appears before INTO), so the output column list is the bare,
-            // UPPERCASE physical column name (unquoted-lowercase input resolves case-insensitively).
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            // when an AS alias appears before INTO), so the output column list is the bare
+            // PHYSICAL column name (exact case preserved from Oracle metadata).
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
             string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, sourceDefinition);
@@ -188,7 +194,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // QuotePhysicalColumn), so alias each value with its physical column name in a
                 // DUAL subquery to make those columns resolvable - otherwise ORA-00904.
                 string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
-                    (col, val) => $"{val} AS {QuoteIdentifier(col.ToUpperInvariant())}"));
+                    (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
                 return $"{outputTypeHints}BEGIN " +
                     $"IF (SELECT COUNT(*) FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}) > 0 THEN " +
                     $"{insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
@@ -210,10 +216,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                    structure.GetDbPolicyForOperation(EntityActionOperation.Update),
                                    Build(structure.Predicates));
 
-            // Wrap in a PL/SQL block and surface the returned columns as a REF CURSOR result set
-            // (see Build(SqlInsertStructure) for why output binds + cursor are required in Oracle).
-            // The RETURNING column list must be bare/UPPERCASE (no aliases - ORA-00925).
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            // The RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
+            // exact physical casing preserved from Oracle metadata.
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string updateQuery = $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
@@ -352,8 +357,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string pkPredicates = Build(structure.Predicates);
 
             string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
-            // RETURNING column list must be bare/UPPERCASE (no aliases - ORA-00925).
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName.ToUpperInvariant())));
+            // RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
+            // exact physical casing preserved from Oracle metadata.
+            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string updateQuery = $"UPDATE {tableName} " +
                 $"SET {Build(structure.UpdateOperations, ", ")} " +
@@ -393,7 +399,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 string? createPolicy = structure.GetDbPolicyForOperation(EntityActionOperation.Create);
                 bool hasCreatePolicy = !string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE);
 
-                string insertColumns = BuildUppercaseColumns(structure.InsertColumns);
+                string insertColumns = BuildColumnList(structure.InsertColumns);
                 string insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
                     $"VALUES ({string.Join(", ", structure.Values)}) " +
                     $"RETURNING {returningColumns} " +
@@ -403,7 +409,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // policy that references column names (e.g. "OWNERID" = :paramN, emitted via
                 // QuotePhysicalColumn) can resolve them - otherwise ORA-00904 invalid identifier.
                 string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
-                    (col, val) => $"{val} AS {QuoteIdentifier(col.ToUpperInvariant())}"));
+                    (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
 
                 string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
                 string updateIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
@@ -494,18 +500,47 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         protected override string Build(Column column)
         {
-            // Oracle stores unquoted identifiers in uppercase. Column names are exposed
-            // lowercase (see OracleMetadataProvider.GetPhysicalDatabaseColumnName) but must
-            // be emitted UPPERCASE (and unquoted, or quoted-uppercase) so they resolve against
-            // the physical column. If the table alias is not empty, we return [{SourceAlias}].[{Column}]
+            // Oracle stores unquoted identifiers in uppercase. The table alias is DAB-generated
+            // ("table{N}", lowercase) and emitted UPPERCASE in the FROM/JOIN clauses, so it must be
+            // uppercased here to resolve. The column name is the PHYSICAL backing name preserved
+            // from Oracle metadata (uppercase for unquoted identifiers, exact case for quoted ones),
+            // so it is emitted verbatim - no case transformation.
             if (!string.IsNullOrEmpty(column.TableAlias))
             {
-                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
+                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName)}";
             }
             // If there is no table alias we return [{Column}]
             else
             {
-                return $"{QuoteIdentifier(column.ColumnName.ToUpperInvariant())}";
+                return $"{QuoteIdentifier(column.ColumnName)}";
+            }
+        }
+
+        /// <summary>
+        /// Override to emit the INNER JOIN alias WITHOUT the AS keyword - Oracle does not accept
+        /// "AS" for table aliases in the FROM/JOIN clause (unlike column aliases) and rejects it
+        /// with ORA-02000 "missing ON or USING keyword". The alias is uppercased to match the
+        /// uppercase alias emitted by <see cref="Build(Column)"/> (Oracle is case-sensitive for
+        /// quoted identifiers).
+        /// </summary>
+        protected override string Build(SqlJoinStructure join)
+        {
+            if (join is null)
+            {
+                throw new ArgumentNullException(nameof(join));
+            }
+
+            if (!string.IsNullOrWhiteSpace(join.DbObject.SchemaName))
+            {
+                return $" INNER JOIN {QuoteIdentifier(join.DbObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(join.DbObject.Name.ToUpperInvariant())} " +
+                       $"{QuoteIdentifier(join.TableAlias.ToUpperInvariant())} " +
+                       $"ON {Build(join.Predicates)}";
+            }
+            else
+            {
+                return $" INNER JOIN {QuoteIdentifier(join.DbObject.Name.ToUpperInvariant())} " +
+                       $"{QuoteIdentifier(join.TableAlias.ToUpperInvariant())} " +
+                       $"ON {Build(join.Predicates)}";
             }
         }
 
@@ -524,13 +559,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Builds a comma-separated, UPPERCASE, individually-quoted column list for INSERT column
-        /// lists. Oracle stores unquoted identifiers uppercase, so a quoted-lowercase column
-        /// reference (e.g. "title") resolves to a non-existent object (ORA-00904) unless uppercased.
+        /// Builds a comma-separated, individually-quoted column list for INSERT column lists.
+        /// Column names carry the exact physical casing preserved from Oracle metadata (uppercase
+        /// for unquoted identifiers, exact case for quoted ones), so they are emitted verbatim.
         /// </summary>
-        private string BuildUppercaseColumns(IEnumerable<string> columnNames)
+        private string BuildColumnList(IEnumerable<string> columnNames)
         {
-            return string.Join(", ", columnNames.Select(c => QuoteIdentifier(c.ToUpperInvariant())));
+            return string.Join(", ", columnNames.Select(c => QuoteIdentifier(c)));
         }
 
         /// <summary>
@@ -749,6 +784,60 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string query = $"SELECT COLUMN_NAME FROM ALL_TAB_COLS " +
                 $"WHERE OWNER = :{schemaParamName.TrimStart('@')} AND TABLE_NAME = :{tableParamName.TrimStart('@')} AND VIRTUAL_COLUMN = 'YES'";
             return query;
+        }
+
+        /// <summary>
+        /// Builds an Oracle query that discovers autoentity tables: user-accessible tables that
+        /// have a primary key, filtered by the include/exclude patterns and named per the name
+        /// pattern (both using {schema}/{object} placeholders). Include/exclude patterns are comma-
+        /// separated SQL LIKE patterns (with ESCAPE '\') matched against "schema.object".
+        /// Returns rows aliased as "schema", "object", and "entity_name" (the JSON property names
+        /// the metadata provider reads when materializing generated entities).
+        /// </summary>
+        public string BuildGetAutoentitiesQuery()
+        {
+            return @"
+WITH exclude_patterns AS (
+    SELECT TRIM(REGEXP_SUBSTR(:exclude_pattern, '[^,]+', 1, LEVEL)) AS pattern
+    FROM dual
+    CONNECT BY LEVEL <= REGEXP_COUNT(:exclude_pattern, ',') + 1
+        AND TRIM(REGEXP_SUBSTR(:exclude_pattern, '[^,]+', 1, LEVEL)) IS NOT NULL
+),
+include_patterns AS (
+    SELECT TRIM(REGEXP_SUBSTR(:include_pattern, '[^,]+', 1, LEVEL)) AS pattern
+    FROM dual
+    CONNECT BY LEVEL <= REGEXP_COUNT(:include_pattern, ',') + 1
+        AND TRIM(REGEXP_SUBSTR(:include_pattern, '[^,]+', 1, LEVEL)) IS NOT NULL
+),
+candidate_tables AS (
+    SELECT
+        t.owner AS schema_name,
+        t.table_name AS object_name,
+        t.owner || '.' || t.table_name AS full_name
+    FROM all_tables t
+    WHERE EXISTS (
+        SELECT 1
+        FROM all_constraints c
+        WHERE c.owner = t.owner
+          AND c.table_name = t.table_name
+          AND c.constraint_type = 'P'
+    )
+)
+SELECT
+    a.schema_name AS ""schema"",
+    a.object_name AS ""object"",
+    CASE
+        WHEN NVL(TRIM(:name_pattern), '1') = '1' THEN a.object_name
+        ELSE REPLACE(REPLACE(:name_pattern, '{schema}', a.schema_name), '{object}', a.object_name)
+    END AS ""entity_name""
+FROM candidate_tables a
+WHERE
+    (NOT EXISTS (SELECT 1 FROM exclude_patterns)
+     OR NOT EXISTS (SELECT 1 FROM exclude_patterns WHERE a.full_name LIKE exclude_patterns.pattern ESCAPE '\'))
+    AND
+    (NOT EXISTS (SELECT 1 FROM include_patterns)
+     OR EXISTS (SELECT 1 FROM include_patterns WHERE a.full_name LIKE include_patterns.pattern ESCAPE '\'))
+ORDER BY a.schema_name, a.object_name";
         }
 
         public string QuoteTableNameAsDBConnectionParam(string param)

@@ -61,7 +61,8 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
                         databaseObject: databaseObject,
                         configEntity: configEntity,
                         rolesAllowedForEntity: rolesAllowedForEntity,
-                        rolesAllowedForFields: rolesAllowedForFields);
+                        rolesAllowedForFields: rolesAllowedForFields,
+                        databaseType: databaseType);
                     break;
                 case EntitySourceType.Table:
                 case EntitySourceType.View:
@@ -110,7 +111,8 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
             DatabaseObject databaseObject,
             Entity configEntity,
             IEnumerable<string> rolesAllowedForEntity,
-            IDictionary<string, IEnumerable<string>> rolesAllowedForFields)
+            IDictionary<string, IEnumerable<string>> rolesAllowedForFields,
+            DatabaseType databaseType = DatabaseType.MSSQL)
         {
             Dictionary<string, FieldDefinitionNode> fields = new();
             SourceDefinition storedProcedureDefinition = databaseObject.SourceDefinition;
@@ -132,7 +134,7 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
                 {
                     // Even if roles is empty, we create a field for columns returned by a stored-procedures since they only support 1 CRUD action,
                     // and it's possible that it might return some values during mutation operation (i.e, containing one of create/update/delete permission).
-                    FieldDefinitionNode field = GenerateFieldForColumn(configEntity, columnName, column, directives, roles);
+                    FieldDefinitionNode field = GenerateFieldForColumn(configEntity, columnName, column, directives, roles, databaseType);
                     fields.Add(columnName, field);
                 }
             }
@@ -208,7 +210,7 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
                     // This check is bypassed for linking entities for the same reason explained above.
                     if (configEntity.IsLinkingEntity || roles is not null && roles.Any())
                     {
-                        FieldDefinitionNode field = GenerateFieldForColumn(configEntity, columnName, column, directives, roles);
+FieldDefinitionNode field = GenerateFieldForColumn(configEntity, columnName, column, directives, roles, databaseType);
                         fieldDefinitionNodes.Add(columnName, field);
                     }
                 }
@@ -416,20 +418,26 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
         /// Helper method to generate the FieldDefinitionNode for a column in a table/view or a result set field in a stored-procedure.
         /// </summary>
         /// <param name="configEntity">Entity's definition (to which the column belongs).</param>
-        /// <param name="columnName">Backing column name.</param>
+        /// <param name="columnName">Backing column name (the physical spelling, e.g. UPPERCASE for Oracle).</param>
         /// <param name="column">Column definition.</param>
         /// <param name="directives">List of directives to be added to the column's field definition.</param>
         /// <param name="roles">List of roles having read permission on the column (for tables/views) or execute permission for stored-procedure.</param>
+        /// <param name="databaseType">Database type, used to derive the default exposed name casing
+        /// (Oracle stores unquoted identifiers UPPERCASE but exposes lowercase field names).</param>
         /// <returns>Generated field definition node for the column to be used in the entity's object type definition.</returns>
-        private static FieldDefinitionNode GenerateFieldForColumn(Entity configEntity, string columnName, ColumnDefinition column, List<DirectiveNode> directives, IEnumerable<string>? roles)
+        private static FieldDefinitionNode GenerateFieldForColumn(Entity configEntity, string columnName, ColumnDefinition column, List<DirectiveNode> directives, IEnumerable<string>? roles, DatabaseType databaseType)
         {
             if (GraphQLUtils.CreateAuthorizationDirectiveIfNecessary(roles, out DirectiveNode? authZDirective))
             {
                 directives.Add(authZDirective!);
             }
 
-            // Determine the exposed column name considering mappings and aliases
-            string exposedColumnName = columnName;
+            // Determine the exposed column name considering mappings and aliases.
+            // The default (unaliased) exposed name is the physical column name normalized for the
+            // database (Oracle: lowercase to match the other SQL providers).
+            string exposedColumnName = databaseType is DatabaseType.Oracle
+                ? columnName.ToLowerInvariant()
+                : columnName;
             if (configEntity.Mappings is not null && configEntity.Mappings.TryGetValue(key: columnName, out string? columnAlias))
             {
                 exposedColumnName = columnAlias;

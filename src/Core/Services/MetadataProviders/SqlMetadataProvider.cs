@@ -324,7 +324,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
             }
 
-            if (GetDatabaseType() == DatabaseType.MSSQL)
+            // Autoentities are supported for MSSQL and Oracle; the provider's query builder supplies
+            // the table-discovery query (IQueryBuilder.BuildGetAutoentitiesQuery). Other engines keep
+            // their default (NotSupportedException) behavior via the throwing virtual.
+            if (GetDatabaseType() is DatabaseType.MSSQL or DatabaseType.Oracle)
             {
                 await GenerateAutoentitiesIntoEntities(Autoentities);
             }
@@ -727,9 +730,158 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Creates entities for each table that is found, based on the autoentity configuration.
         /// This method is only called for tables in MsSql.
         /// </summary>
-        protected virtual Task GenerateAutoentitiesIntoEntities(IReadOnlyDictionary<string, Autoentity>? autoentities)
+        /// <summary>
+        /// Creates entities for each table that is found, based on the autoentity configuration.
+        /// The implementation is database-agnostic; the database-specific table-discovery query is
+        /// supplied by <see cref="IQueryBuilder.BuildGetAutoentitiesQuery"/> and executed through
+        /// <see cref="QueryAutoentitiesFromDatabaseAsync"/>.
+        /// </summary>
+        protected virtual async Task GenerateAutoentitiesIntoEntities(IReadOnlyDictionary<string, Autoentity>? autoentities)
         {
-            throw new NotSupportedException($"{GetType().Name} does not support autoentities yet.");
+            if (autoentities is null)
+            {
+                return;
+            }
+
+            RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
+            Dictionary<string, Entity> entities = new();
+            Dictionary<string, string> entityNameToRawEntity = new();
+            foreach ((string autoentityName, Autoentity autoentity) in autoentities)
+            {
+                int addedEntities = 0;
+                JsonArray? resultArray = await QueryAutoentitiesFromDatabaseAsync(autoentityName, autoentity);
+                if (resultArray is null)
+                {
+                    continue;
+                }
+
+                foreach (JsonObject? resultObject in resultArray)
+                {
+                    if (resultObject is null)
+                    {
+                        throw new DataApiBuilderException(
+                            message: $"Cannot create new entity from autoentities definition '{autoentityName}' due to an internal error.",
+                            statusCode: HttpStatusCode.InternalServerError,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    // Extract the entity name, schema, and database object name from the query result.
+                    // The SQL query returns these values with placeholders already replaced.
+                    string? entityName = resultObject["entity_name"]?.ToString();
+                    string? objectName = resultObject["object"]?.ToString();
+                    string? schemaName = resultObject["schema"]?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(entityName) || string.IsNullOrWhiteSpace(objectName) || string.IsNullOrWhiteSpace(schemaName))
+                    {
+                        _logger.LogError("Skipping autoentity generation: 'entity_name', 'object', or 'schema' is null or empty for autoentities definition '{autoentityName}'.", autoentityName);
+                        continue;
+                    }
+
+                    // Remove whitespace from the entity name and camelCase-join words so the result is
+                    // a valid identifier for REST paths and GraphQL singular/plural names.
+                    string rawEntityName = entityName;
+                    entityName = RemoveWhitespaceAddCamelCase(entityName);
+
+                    if (string.IsNullOrEmpty(entityName))
+                    {
+                        _logger.LogError(
+                            "Skipping autoentity generation: entity name '{rawEntityName}' for schema '{schemaName}' resolves to an empty string after whitespace removal for autoentities definition '{autoentityName}'.",
+                            rawEntityName, schemaName, autoentityName);
+                        continue;
+                    }
+
+                    if (rawEntityName != entityName)
+                    {
+                        _logger.LogDebug(
+                            "Entity name '{rawEntityName}' was normalized to '{entityName}' by removing whitespace.",
+                            rawEntityName, entityName);
+                    }
+
+                    // Create the entity using the template settings and permissions from the autoentity configuration.
+                    // Currently the source type is always Table for auto-generated entities from database objects.
+                    Entity generatedEntity = new(
+                        Source: new EntitySource(
+                            Object: $"{schemaName}.{objectName}",
+                            Type: EntitySourceType.Table,
+                            Parameters: null,
+                            KeyFields: null),
+                        GraphQL: autoentity.Template.GraphQL,
+                        Rest: autoentity.Template.Rest,
+                        Mcp: autoentity.Template.Mcp,
+                        Permissions: autoentity.Permissions,
+                        Cache: autoentity.Template.Cache,
+                        Health: autoentity.Template.Health,
+                        Fields: null,
+                        Relationships: null,
+                        Mappings: new(),
+                        IsAutoentity: true);
+
+                    // Add the generated entity to the linking entities dictionary.
+                    // This allows the entity to be processed later during metadata population.
+                    // A collision can occur when two database objects produce the same entity name after
+                    // whitespace removal (e.g. "Order Item" and "OrderItem" both yield "OrderItem").
+                    if (!entities.TryAdd(entityName, generatedEntity) || !runtimeConfig.TryAddGeneratedAutoentityNameToDataSourceName(entityName, autoentityName))
+                    {
+                        string checkEntityName = entityNameToRawEntity.ContainsKey(entityName) && !rawEntityName.Contains(" ")
+                            ? entityNameToRawEntity[entityName]
+                            : rawEntityName;
+                        string collisionMessage = checkEntityName.Contains(" ")
+                            ? $"Entity '{entityName}' normalized from '{checkEntityName}' from '{schemaName}' schema conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it."
+                            : $"Entity '{entityName}' conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it.";
+                        throw new DataApiBuilderException(
+                            message: collisionMessage,
+                            statusCode: HttpStatusCode.BadRequest,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    addedEntities++;
+                    entityNameToRawEntity.Add(entityName, rawEntityName);
+                }
+
+                if (addedEntities == 0)
+                {
+                    _logger.LogWarning("No new entities were generated from the autoentities definition '{autoentityName}'.", autoentityName);
+                }
+
+                // Track resolution count for validation.
+                runtimeConfig.AutoentityResolutionCounts[autoentityName] = addedEntities;
+            }
+
+            LogRestPathsForEntities(runtimeConfig, entities);
+            _runtimeConfigProvider.AddMergedEntitiesToConfig(entities);
+        }
+
+        /// <summary>
+        /// Queries the database for autoentities based on the provided autoentity definition.
+        /// The query text is supplied by <see cref="IQueryBuilder.BuildGetAutoentitiesQuery"/> so each
+        /// database engine can discover its tables with the include/exclude/name patterns applied.
+        /// </summary>
+        /// <param name="autoentityName">The name of the autoentity definition.</param>
+        /// <param name="autoentity">The autoentity definition containing patterns for inclusion, exclusion, and name.</param>
+        /// <returns>A JsonArray containing the queried autoentities, or an empty array if none are found.</returns>
+        protected virtual async Task<JsonArray?> QueryAutoentitiesFromDatabaseAsync(string autoentityName, Autoentity autoentity)
+        {
+            string include = string.Join(",", autoentity.Patterns.Include);
+            string exclude = string.Join(",", autoentity.Patterns.Exclude);
+            string namePattern = autoentity.Patterns.Name;
+            string getAutoentitiesQuery = SqlQueryBuilder.BuildGetAutoentitiesQuery();
+            Dictionary<string, DbConnectionParam> parameters = new()
+            {
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}include_pattern", new(include, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}exclude_pattern", new(exclude, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}name_pattern", new(namePattern, DbType.String) }
+            };
+
+            _logger.LogDebug("Query for autoentities is being executed with the following parameters.");
+            _logger.LogDebug("The autoentities definition '{autoentityName}' include pattern: {include}", autoentityName, include);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' exclude pattern: {exclude}", autoentityName, exclude);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' name pattern: {namePattern}", autoentityName, namePattern);
+
+            return await QueryExecutor.ExecuteQueryAsync(
+                sqltext: getAutoentitiesQuery,
+                parameters: parameters,
+                dataReaderHandler: QueryExecutor.GetJsonArrayAsync,
+                dataSourceName: _dataSourceName);
         }
 
         /// <summary>
@@ -1604,7 +1756,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 {
                     if (!backToExposed.ContainsKey(backing))
                     {
-                        backToExposed[backing] = backing;
+                        backToExposed[backing] = GetExposedColumnName(backing);
                     }
 
                     string exposed = backToExposed[backing];
@@ -1677,7 +1829,12 @@ namespace Azure.DataApiBuilder.Core.Services
             RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
             foreach (DataRow columnInfoFromAdapter in schemaTable.Rows)
             {
-                string columnName = GetPhysicalDatabaseColumnName(columnInfoFromAdapter["ColumnName"].ToString()!);
+                // Capture the driver-reported physical column name BEFORE any casing normalization.
+                // It is preserved on the ColumnDefinition so SQL emission can quote the exact
+                // physical spelling (e.g. Oracle reports unquoted identifiers in UPPERCASE) while
+                // the Columns dictionary key is the exposed, normalized name.
+                string rawColumnName = columnInfoFromAdapter["ColumnName"].ToString()!;
+                string columnName = GetPhysicalDatabaseColumnName(rawColumnName);
 
                 if (runtimeConfig.IsGraphQLEnabled
                     && entity is not null
@@ -1704,6 +1861,7 @@ namespace Azure.DataApiBuilder.Core.Services
 
                 ColumnDefinition column = new()
                 {
+                    PhysicalName = rawColumnName,
                     IsNullable = (bool)columnInfoFromAdapter["AllowDBNull"],
                     IsAutoGenerated = (bool)columnInfoFromAdapter["IsAutoIncrement"],
                     SystemType = systemType,
@@ -2002,6 +2160,21 @@ namespace Azure.DataApiBuilder.Core.Services
         protected virtual string GetPhysicalDatabaseColumnName(string columnName)
         {
             return columnName;
+        }
+
+        /// <summary>
+        /// Returns the exposed (REST/GraphQL) name to use for a backing column when no explicit
+        /// field or mapping alias is configured. Providers that surface physical identifiers in a
+        /// different case than their API field names (e.g. Oracle stores unquoted identifiers
+        /// uppercase but exposes lowercase field names to match the other SQL providers) override
+        /// this to translate the backing name to the desired exposed casing. The backing (physical)
+        /// name is still emitted verbatim in SQL.
+        /// </summary>
+        /// <param name="backingColumnName">The physical backing column name.</param>
+        /// <returns>The exposed field name for the column.</returns>
+        protected virtual string GetExposedColumnName(string backingColumnName)
+        {
+            return backingColumnName;
         }
 
         /// <summary>
