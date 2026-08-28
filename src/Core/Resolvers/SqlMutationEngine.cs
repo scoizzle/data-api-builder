@@ -1475,19 +1475,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 exposedColumnNames = exposedFieldToBackingFieldMap.Keys.ToList();
             }
+            else if (sqlMetadataProvider.TryGetBackingFieldToExposedFieldMap(entityName, out IReadOnlyDictionary<string, string>? backingFieldToExposedFieldMap))
+            {
+                // Non-throwing fallback: the values of the backing->exposed map are the exposed names.
+                exposedColumnNames = backingFieldToExposedFieldMap.Values.ToList();
+            }
             else
             {
-                // Fallback when the exposed-to-backing map is unavailable: resolve each physical
-                // backing column to its exposed name so the extracted result keys match the
-                // SELECT aliases (exposed names).
-                foreach (string column in sourceDefinition.Columns.Keys)
-                {
-                    if (sqlMetadataProvider.TryGetExposedColumnName(entityName, column, out string? exposedName)
-                        && exposedName is not null)
-                    {
-                        exposedColumnNames.Add(exposedName);
-                    }
-                }
+                // Last-resort fallback (both maps absent): use the physical column keys so the
+                // result extraction degrades gracefully instead of throwing.
+                exposedColumnNames = sourceDefinition.Columns.Keys.ToList();
             }
 
             DbResultSet? dbResultSet;
