@@ -91,7 +91,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 + $" WHERE {predicates}"
                 + BuildGroupBy(structure)
                 + BuildHaving(structure)
-                + $" ORDER BY {Build(structure.OrderByColumns)}"
+                + BuildOrderBy(structure)
                 + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
 
             string subqueryName = QuoteIdentifier($"subq{structure.Counter.Next()}");
