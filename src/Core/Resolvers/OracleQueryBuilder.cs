@@ -65,6 +65,29 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return QuoteIdentifier(columnName);
         }
 
+        /// <summary>
+        /// Overrides the base EXISTS-subquery builder used for predicates that filter on a nested
+        /// relationship (e.g. <c>characters(filter: { actor: { name: { eq: ... } } })</c>). The base
+        /// emits <c>FROM schema.table AS "alias"</c> which Oracle rejects: the AS keyword is not
+        /// accepted for table aliases (ORA-00907/ORA-02000) and quoted identifiers are
+        /// case-sensitive, so the alias and table/schema names must be emitted UPPERCASE to match
+        /// the references produced by <see cref="Build(Column)"/>.
+        /// </summary>
+        /// <inheritdoc />
+        public override string Build(BaseSqlQueryStructure structure)
+        {
+            string predicates = new(JoinPredicateStrings(
+                       structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                       Build(structure.Predicates)));
+
+            string query = $"SELECT 1 " +
+                   $"FROM {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
+                   $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)} " +
+                   $"WHERE {predicates}";
+
+            return query;
+        }
+
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
