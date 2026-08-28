@@ -20,7 +20,12 @@ Data API builder supports Oracle Database 19c and later through
 
 ### Stored procedures
 
-Oracle stored procedures and functions can be invoked as REST or GraphQL operations. `SqlExecuteStructure` is implemented for Oracle: subprograms are invoked from a PL/SQL anonymous block (never the SQL*Plus-only `EXEC` keyword), engine-generated `@paramN` bind references are translated to Oracle `:paramN` syntax, and a trailing `:dab_result` REF CURSOR OUT bind exposes the result set to ODP.NET. Package-qualified subprograms (`schema.package.subprogram`) are supported, as are standalone functions invoked via `SELECT ... FROM DUAL`.
+Oracle stored procedures and functions can be invoked as REST operations, and as GraphQL operations for result sets DAB can describe. `SqlExecuteStructure` is implemented for Oracle: subprograms are invoked from a PL/SQL anonymous block (never the SQL*Plus-only `EXEC` keyword), engine-generated `@paramN` bind references are translated to Oracle `:paramN` syntax, and a trailing `:dab_result` REF CURSOR OUT bind exposes the result set to ODP.NET. Package-qualified subprograms (`schema.package.subprogram`) are supported, as are standalone functions invoked via `SELECT ... FROM DUAL`.
+
+Known limitations:
+
+- **GraphQL stored-procedure result typing.** Oracle metadata discovery describes a subprogram's REF CURSOR by its OUT parameter name (e.g. `CURSOR`), not by the columns the cursor returns. REST invocations are unaffected (the response is keyed by the actual returned columns), but the GraphQL schema for a cursor-returning subprogram exposes the cursor parameter name rather than the rowset's columns, so GraphQL queries over stored-procedure result sets are not reliably typed. Prefer REST for stored-procedure invocations on Oracle until cursor-column discovery is implemented.
+- **Scalar OUT/IN OUT parameters.** Subprograms whose result is a scalar OUT/IN OUT parameter (no REF CURSOR) are invoked with only their IN arguments; the OUT argument is not bound, so such subprograms fail at request time. Only subprograms with IN parameters plus an optional REF CURSOR OUT parameter are supported.
 
 Oracle stored-procedure metadata discovery (including OUT parameters and REF CURSOR metadata) is used to validate signatures for schema generation. Invoking a procedure whose metadata cannot be resolved, or that returns an unsupported result shape, surfaces an error at request time.
 
@@ -32,7 +37,11 @@ A future implementation must use a valid Oracle application context package and 
 
 ### Autoentities and aggregation
 
-Oracle autoentity discovery remains disabled; autoentity generation is a database-provider-specific contract limited to providers that implement it. The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
+Oracle autoentity discovery is supported: tables with a primary key are discovered through `ALL_TABLES` (Oracle-maintained system schemas are excluded) and materialized as entities according to the include/exclude/name patterns, both at engine startup and through `dab auto-config-simulate`. Generated entity names are lowercased so REST paths and GraphQL names match the lowercase exposed-column convention. The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
+
+### Binary values
+
+Oracle `RAW` values are serialized as base64. `BLOB` columns are typed as byte[] and null-guarded during base64 encoding; values larger than roughly 2000 bytes are not covered because `UTL_ENCODE.BASE64_ENCODE` accepts `RAW` and the implicit `BLOB`-to-`RAW` conversion is size-limited.
 
 ## Identifier casing
 
