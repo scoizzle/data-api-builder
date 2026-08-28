@@ -791,6 +791,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// have a primary key, filtered by the include/exclude patterns and named per the name
         /// pattern (both using {schema}/{object} placeholders). Include/exclude patterns are comma-
         /// separated SQL LIKE patterns (with ESCAPE '\') matched against "schema.object".
+        /// Oracle-maintained system schemas (SYS dictionary base tables and friends) are excluded
+        /// so a privileged connection does not materialize hundreds of system entities, mirroring
+        /// the system-object filtering the MSSQL builder performs.
+        /// Entity names are lowercased so generated REST/GraphQL names are consistent with the
+        /// lowercase exposed names Oracle uses for columns; the returned "schema"/"object" values
+        /// keep physical casing for source resolution.
         /// Returns rows aliased as "schema", "object", and "entity_name" (the JSON property names
         /// the metadata provider reads when materializing generated entities).
         /// </summary>
@@ -815,7 +821,12 @@ candidate_tables AS (
         t.table_name AS object_name,
         t.owner || '.' || t.table_name AS full_name
     FROM all_tables t
-    WHERE EXISTS (
+    WHERE t.owner NOT IN (
+              'SYS', 'XDB', 'ORDSYS', 'ORDDATA', 'MDSYS', 'OLAPSYS', 'LBACSYS',
+              'DVSYS', 'AUDSYS', 'OJVMSYS', 'CTXSYS', 'WMSYS', 'EXFSYS', 'OUTLN',
+              'GSMADMIN_INTERNAL', 'DBSNMP', 'APPQOSSYS', 'FLOWS_FILES')
+      AND NOT REGEXP_LIKE(t.owner, '^APEX_[0-9]+')
+      AND EXISTS (
         SELECT 1
         FROM all_constraints c
         WHERE c.owner = t.owner
@@ -827,8 +838,8 @@ SELECT
     a.schema_name AS ""schema"",
     a.object_name AS ""object"",
     CASE
-        WHEN NVL(TRIM(:name_pattern), '1') = '1' THEN a.object_name
-        ELSE REPLACE(REPLACE(:name_pattern, '{schema}', a.schema_name), '{object}', a.object_name)
+        WHEN NVL(LENGTH(TRIM(:name_pattern)), 0) = 0 THEN LOWER(a.object_name)
+        ELSE REPLACE(REPLACE(:name_pattern, '{schema}', LOWER(a.schema_name)), '{object}', LOWER(a.object_name))
     END AS ""entity_name""
 FROM candidate_tables a
 WHERE
