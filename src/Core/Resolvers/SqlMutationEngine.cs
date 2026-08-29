@@ -140,7 +140,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
                     await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
                     await conn.OpenAsync();
-                    using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn);
+                    using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn, dataSourceName);
                     try
                     {
                         bool isPointMutation = IsPointMutation(context);

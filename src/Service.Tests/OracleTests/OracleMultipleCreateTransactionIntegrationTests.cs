@@ -134,7 +134,7 @@ END;";
                     return;
                 }
 
-                using OracleTransaction tx = executor.BeginLocalReadCommittedTransaction(conn);
+                using OracleTransaction tx = executor.BeginLocalReadCommittedTransaction(conn, dataSourceName: "default");
                 logger.Verify(
                     x => x.Log(
                         LogLevel.Debug,
