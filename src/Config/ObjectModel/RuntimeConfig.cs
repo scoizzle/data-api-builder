@@ -778,7 +778,9 @@ public record RuntimeConfig
 
         if (first is not null)
         {
-            if (first < -1 || first == 0 || first > maxPageSize)
+            // 0 is a valid GraphQL page size (empty connection). REST $first=0 is rejected
+            // separately in RequestValidator. -1 means max page size.
+            if (first < -1 || first > maxPageSize)
             {
                 throw new DataApiBuilderException(
                 message: $"Invalid number of items requested, {nameof(first)} argument must be either -1 or a positive number within the max page size limit of {maxPageSize}. Actual value: {first}",
