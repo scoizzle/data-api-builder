@@ -151,7 +151,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
             string insertQuery = $"INSERT INTO {tableName} ";
-            
+
             if (structure.InsertColumns.Any())
             {
                 string insertColumns = BuildColumnList(structure.InsertColumns);
