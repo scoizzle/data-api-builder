@@ -7,6 +7,7 @@ Data API builder supports Oracle Database 19c and later through
 
 - REST and GraphQL queries, filters, ordering, selection, and cursor pagination
 - REST and GraphQL create, update, delete, and upsert operations
+- GraphQL nested multiple-create (`runtime.graphql.multiple-mutations.create.enabled` / `--graphql.multiple-mutations.create.enabled`), same surface as MSSQL
 - Composite primary keys
 - Database-policy predicates for read, create, update, and delete operations
 - Oracle `NUMBER`, character, date/time, `RAW`, and `BLOB` values
@@ -38,6 +39,16 @@ A future implementation must use a valid Oracle application context package and 
 ### Autoentities and aggregation
 
 Oracle autoentity discovery is supported: tables with a primary key are discovered through `ALL_TABLES` (Oracle-maintained system schemas are excluded) and materialized as entities according to the include/exclude/name patterns, both at engine startup and through `dab auto-config-simulate`. Generated entity names are lowercased so REST paths and GraphQL names match the lowercase exposed-column convention. The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
+
+### GraphQL multiple-create
+
+Nested GraphQL create (parent/child/linking inserts in FK order, then a follow-up SELECT of created keys) is supported for Oracle when the CLI flag or config option is enabled, the same as MSSQL. The path uses a **local `OracleTransaction`** on a single connection (`ExecuteQueryOnConnection`); it is **not XA** and does not rely on `TransactionScope` promotion.
+
+Oracle rejects the `AS` keyword on table aliases (`INNER JOIN t AS alias`); generated join/FROM/EXISTS SQL omits `AS`.
+
+Create-policy failure on a non-linking insert returns **403** (`DatabasePolicyFailure`). Trigger-assigned primary keys that cannot be returned to the mutation engine result in **500** and **rollback** of the nested graph.
+
+This path is **GraphQL-only**. REST batch/array create does not share it (same as MSSQL).
 
 ### Binary values
 
