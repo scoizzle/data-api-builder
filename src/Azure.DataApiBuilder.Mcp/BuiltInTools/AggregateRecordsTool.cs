@@ -242,12 +242,13 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                     return authError;
                 }
 
-                // 5. Validate database type support
+                // 5. Validate database type support (mirrors QueryBuilder.AggregationEnabledDatabaseTypes:
+                // aggregation is supported for MSSQL, DWSQL, PostgreSQL, and Oracle).
                 DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
-                if (databaseType != DatabaseType.MSSQL && databaseType != DatabaseType.DWSQL)
+                if (databaseType is not (DatabaseType.MSSQL or DatabaseType.DWSQL or DatabaseType.PostgreSQL or DatabaseType.Oracle))
                 {
                     return McpResponseBuilder.BuildErrorResult(toolName, "UnsupportedDatabase",
-                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, and SQL Data Warehouse.", logger);
+                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, PostgreSQL, and Oracle.", logger);
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
@@ -273,7 +274,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 string sql = queryBuilder.Build(structure);
                 if (args.Groupby.Count > 0)
                 {
-                    sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
+                    sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!, databaseType);
                 }
 
                 // 8. Execute query and return results
@@ -930,13 +931,17 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
         /// <summary>
         /// Post-processes the generated SQL to add ORDER BY and OFFSET/FETCH pagination
         /// for grouped aggregation queries.
+        /// The ORDER BY must be injected into the scope where the table alias is visible
+        /// (the INNER query), otherwise engines with case-sensitive quoted identifiers and
+        /// strict scope rules (Oracle: ORA-00904, PostgreSQL/MySQL) reject the reference.
         /// </summary>
         private static string ApplyOrderByAndPagination(
             string sql,
             AggregateArguments args,
             SqlQueryStructure structure,
             IQueryBuilder queryBuilder,
-            string backingField)
+            string backingField,
+            DatabaseType databaseType)
         {
             string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
             string quotedCol = $"{queryBuilder.QuoteIdentifier(structure.SourceAlias)}.{queryBuilder.QuoteIdentifier(backingField)}";
@@ -945,18 +950,12 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 : $"{args.Function.ToUpperInvariant()}({quotedCol})";
             string orderByClause = $" ORDER BY {orderByAggExpr} {direction}";
 
-            if (args.First.HasValue)
+            // MSSQL/DWSQL: the generated query ends with "FOR JSON PATH"; insert the ORDER BY
+            // (and OFFSET/FETCH pagination) before it and drop TOP, since SQL Server requires
+            // ORDER BY for OFFSET/FETCH and forbids combining TOP with OFFSET/FETCH.
+            if (databaseType is DatabaseType.MSSQL or DatabaseType.DWSQL)
             {
-                // With pagination: SQL Server requires ORDER BY for OFFSET/FETCH and
-                // does not allow both TOP and OFFSET/FETCH. Remove TOP and add ORDER BY + OFFSET/FETCH.
-                int offset = DecodeCursorOffset(args.After);
-                int fetchCount = args.First.Value + 1;
-                string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
-                structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
-                string limitParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
-                structure.Parameters.Add(limitParam, new DbConnectionParam(fetchCount));
-
-                string paginationClause = $" OFFSET {offsetParam} ROWS FETCH NEXT {limitParam} ROWS ONLY";
+                string paginationClause = args.First.HasValue ? BuildPaginationClause(args, structure) : string.Empty;
 
                 // Remove TOP N from the SELECT clause (TOP conflicts with OFFSET/FETCH)
                 sql = Regex.Replace(sql, @"SELECT TOP \d+", "SELECT");
@@ -971,22 +970,74 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 {
                     sql += orderByClause + paginationClause;
                 }
+
+                return sql;
             }
-            else
+
+            // Oracle: the inner query ends with " OFFSET 0 ROWS FETCH NEXT <n> ROWS ONLY".
+            // The ORDER BY must go BEFORE that clause (inside the inner query); when pagination is
+            // requested, replace the inner OFFSET/FETCH with the real pagination.
+            if (databaseType is DatabaseType.Oracle)
             {
-                // Without pagination: insert ORDER BY before FOR JSON PATH
-                int jsonPathIdx = sql.IndexOf(" FOR JSON PATH", StringComparison.OrdinalIgnoreCase);
-                if (jsonPathIdx > 0)
+                const string innerPagination = " OFFSET 0 ROWS FETCH NEXT ";
+                const string rowsOnly = " ROWS ONLY";
+                int offsetIdx = sql.LastIndexOf(innerPagination, StringComparison.OrdinalIgnoreCase);
+                if (offsetIdx > 0)
                 {
-                    sql = sql.Insert(jsonPathIdx, orderByClause);
+                    int rowsOnlyIdx = sql.IndexOf(rowsOnly, offsetIdx, StringComparison.OrdinalIgnoreCase);
+                    if (rowsOnlyIdx > offsetIdx)
+                    {
+                        int endIdx = rowsOnlyIdx + rowsOnly.Length;
+                        string replacement = args.First.HasValue
+                            ? orderByClause + BuildPaginationClause(args, structure)
+                            : orderByClause;
+                        return sql.Remove(offsetIdx, endIdx - offsetIdx).Insert(offsetIdx, replacement);
+                    }
                 }
-                else
+
+                return sql + orderByClause;
+            }
+
+            // PostgreSQL/MySQL: the inner query ends with " LIMIT <n>". The ORDER BY goes before
+            // LIMIT; pagination replaces LIMIT with "LIMIT <fetch> OFFSET <offset>".
+            int limitIdx = sql.LastIndexOf(" LIMIT ", StringComparison.OrdinalIgnoreCase);
+            if (limitIdx > 0)
+            {
+                int closeParen = sql.IndexOf(')', limitIdx);
+                if (closeParen > limitIdx)
                 {
-                    sql += orderByClause;
+                    if (args.First.HasValue)
+                    {
+                        int offset = DecodeCursorOffset(args.After);
+                        int fetchCount = args.First.Value + 1;
+                        string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+                        structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+                        string limitParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+                        structure.Parameters.Add(limitParam, new DbConnectionParam(fetchCount));
+                        string replacement = $"{orderByClause} LIMIT {limitParam} OFFSET {offsetParam}";
+                        return sql.Remove(limitIdx, closeParen - limitIdx).Insert(limitIdx, replacement);
+                    }
+
+                    return sql.Insert(limitIdx, orderByClause);
                 }
             }
 
-            return sql;
+            return sql + orderByClause;
+        }
+
+        /// <summary>
+        /// Builds the " OFFSET :param ROWS FETCH NEXT :param ROWS ONLY" pagination clause for
+        /// grouped aggregation queries, registering the bind parameters on the structure.
+        /// </summary>
+        private static string BuildPaginationClause(AggregateArguments args, SqlQueryStructure structure)
+        {
+            int offset = DecodeCursorOffset(args.After);
+            int fetchCount = args.First!.Value + 1;
+            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+            string limitParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(limitParam, new DbConnectionParam(fetchCount));
+            return $" OFFSET {offsetParam} ROWS FETCH NEXT {limitParam} ROWS ONLY";
         }
 
         #endregion
