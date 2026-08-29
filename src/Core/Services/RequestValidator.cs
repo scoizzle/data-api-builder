@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
@@ -105,6 +106,26 @@ namespace Azure.DataApiBuilder.Core.Services
                              " requested were not found in the entity definition.",
                     statusCode: HttpStatusCode.BadRequest,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.InvalidIdentifierField);
+            }
+
+            // After ParsePrimaryKey, URL PK values are on the context. If the body also
+            // supplies a PK field, it must match the URL (PUT/PATCH by-route).
+            foreach (string pkBacking in sourceDefinition.PrimaryKey)
+            {
+                if (!sqlMetadataProvider.TryGetExposedColumnName(context.EntityName, pkBacking, out string? exposedName))
+                {
+                    continue;
+                }
+
+                if (context.FieldValuePairsInBody.TryGetValue(exposedName!, out object? bodyPkValue)
+                    && context.PrimaryKeyValuePairs.TryGetValue(exposedName!, out object? urlPkValue)
+                    && !PrimaryKeyValuesEqual(bodyPkValue, urlPkValue))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"The value of primary key field '{exposedName}' in the request body does not match the value in the URL.",
+                        statusCode: HttpStatusCode.BadRequest,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
+                }
             }
         }
 
@@ -604,6 +625,31 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             string dataSourceName = _runtimeConfigProvider.GetConfig().GetDataSourceNameFromEntityName(entityName);
             return _sqlMetadataProviderFactory.GetMetadataProvider(dataSourceName);
+        }
+
+        /// <summary>
+        /// Compare a primary-key value from the URL route with the same field in the request body.
+        /// JSON numbers may deserialize as decimal/long/JsonElement, so compare invariant string forms.
+        /// </summary>
+        private static bool PrimaryKeyValuesEqual(object? bodyValue, object? urlValue)
+        {
+            if (Equals(bodyValue, urlValue))
+            {
+                return true;
+            }
+
+            if (bodyValue is null || urlValue is null)
+            {
+                return false;
+            }
+
+            string bodyText = bodyValue is JsonElement bodyElement
+                ? bodyElement.ToString()
+                : Convert.ToString(bodyValue, CultureInfo.InvariantCulture) ?? string.Empty;
+            string urlText = urlValue is JsonElement urlElement
+                ? urlElement.ToString()
+                : Convert.ToString(urlValue, CultureInfo.InvariantCulture) ?? string.Empty;
+            return string.Equals(bodyText, urlText, StringComparison.Ordinal);
         }
     }
 }
