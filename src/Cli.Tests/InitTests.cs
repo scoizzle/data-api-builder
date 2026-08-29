@@ -420,10 +420,10 @@ namespace Cli.Tests
         /// <summary>
         /// Test to validate the contents of the config file generated when init command is used with --graphql.multiple-mutations.create.enabled flag option for different database types.
         ///
-        /// 1. For database types other than MsSQL:
+        /// 1. For database types other than MsSQL and Oracle:
         ///      - Irrespective of whether the --graphql.multiple-mutations.create.enabled option is used or not, fields related to multiple-create will NOT be written to the config file.
         ///
-        /// 2. For MsSQL database type:
+        /// 2. For MsSQL and Oracle database types:
         ///      a. When --graphql.multiple-mutations.create.enabled option is used
         ///           - In this case, the fields related to multiple mutation and multiple create operations will be written to the config file.
         ///                "multiple-mutations": {
