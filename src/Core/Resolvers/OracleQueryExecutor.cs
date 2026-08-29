@@ -111,12 +111,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
 
-                // PRE-CONDITION: Check if late-configured (security-sensitive scenario)
                 if (_runtimeConfigProvider.IsLateConfigured)
                 {
-                    // POST-CONDITION: Enforce encryption for late-configured connections
-                    // Oracle managed driver uses connection string encryption parameter
-                    // Ensure encryption is enabled for production deployments
                     if (!builder.ConnectionString.Contains("Encryption", StringComparison.OrdinalIgnoreCase))
                     {
                         string newConnectionString = builder.ConnectionString + 

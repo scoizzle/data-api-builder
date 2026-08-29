@@ -366,7 +366,16 @@ namespace Azure.DataApiBuilder.Core.Services
 
                         string argumentName = reader.GetString(0);
                         string dataType = reader.GetString(1);
+                        string inOut = reader.IsDBNull(2) ? "IN" : reader.GetString(2);
                         Type systemType = SqlToCLRType(dataType);
+                        // REF CURSOR is the result path (bound as :dab_result), not a client input.
+                        // Pure OUT scalars are not bound as IN parameters.
+                        if (systemType == typeof(IDataReader) ||
+                            inOut.Equals("OUT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
                         storedProcedureDefinition.Parameters.TryAdd(
                             argumentName.TrimStart('@', ':'),
                             new ParameterDefinition
@@ -623,7 +632,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 "LONG RAW" => typeof(byte[]),
                 "ROWID" => typeof(string),
                 "UROWID" => typeof(string),
-                "CURSOR" or "REF CURSOR" => typeof(IDataReader), // Oracle cursors can be mapped to object or a specific data reader type
+                "CURSOR" or "REF CURSOR" => typeof(IDataReader),
                 _ => typeof(object)
             };
         }
