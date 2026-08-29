@@ -6,6 +6,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Transactions;
+using Oracle.ManagedDataAccess.Client;
 using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -127,6 +128,61 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             try
             {
+                // Oracle multiple-create uses an explicit OracleConnection + OracleTransaction.
+                // Ambient TransactionScope is skipped here because a second ODP.NET Open in the same
+                // scope promotes to XA/MSDTC, which is not supported on .NET Core.
+                // Other Oracle mutations (Delete/Update/single create without the flag) keep TransactionScope.
+                if (mutationOperation is EntityActionOperation.Create
+                    && _runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled()
+                    && sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle)
+                {
+                    OracleQueryExecutor oracleExecutor = (OracleQueryExecutor)_queryManagerFactory.GetQueryExecutor(DatabaseType.Oracle);
+                    using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
+                    await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
+                    await conn.OpenAsync();
+                    using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn);
+                    try
+                    {
+                        bool isPointMutation = IsPointMutation(context);
+                        List<IDictionary<string, object?>> primaryKeysOfCreatedItems = PerformMultipleCreateOperation(
+                                    entityName,
+                                    context,
+                                    parameters,
+                                    sqlMetadataProvider,
+                                    _runtimeConfigProvider.GetConfig(),
+                                    !isPointMutation,
+                                    conn,
+                                    tx);
+
+                        SqlQueryEngine sqlQueryEngine = (SqlQueryEngine)queryEngine;
+                        if (isPointMutation)
+                        {
+                            result = await sqlQueryEngine.ExecuteAsync(
+                                        context,
+                                        primaryKeysOfCreatedItems[0],
+                                        dataSourceName,
+                                        conn,
+                                        tx);
+                        }
+                        else
+                        {
+                            result = await sqlQueryEngine.ExecuteMultipleCreateFollowUpQueryAsync(
+                                        context,
+                                        primaryKeysOfCreatedItems,
+                                        dataSourceName,
+                                        conn,
+                                        tx);
+                        }
+
+                        tx.Commit();
+                    }
+                    catch
+                    {
+                        tx.Rollback();
+                        throw;
+                    }
+                }
+                else
                 // Creating an implicit transaction
                 using (TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider))
                 {
@@ -1068,7 +1124,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 IDictionary<string, object?> mutationInputParamsFromGQLContext,
                 ISqlMetadataProvider sqlMetadataProvider,
                 RuntimeConfig runtimeConfig,
-                bool isMultipleInputType = false)
+                bool isMultipleInputType = false,
+                DbConnection? dbConnection = null,
+                DbTransaction? dbTransaction = null)
         {
             // rootFieldName can be either "item" or "items" depending on whether the operation
             // is point multiple create or many-type multiple create.
@@ -1170,7 +1228,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
+                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
 
                     // Ideally the CurrentEntityCreatedValues should not be null. CurrentEntityCreatedValues being null indicates that the create operation
                     // has failed and that will result in an exception being thrown.
@@ -1220,7 +1278,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     parentEntityName: entityName,
                     inputMutParams: parsedInputFields);
 
-                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
+                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
 
                 if (multipleCreateStructure.CurrentEntityCreatedValues is not null)
                 {
@@ -1245,7 +1303,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             object? unparsedInputFields,
             ISqlMetadataProvider sqlMetadataProvider,
             MultipleCreateStructure multipleCreateStructure,
-            int nestingLevel)
+            int nestingLevel,
+            DbConnection? dbConnection = null,
+            DbTransaction? dbTransaction = null)
         {
 
             if (multipleCreateStructure.InputMutParams is null || unparsedInputFields is null)
@@ -1288,7 +1348,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel);
+                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel, dbConnection, dbTransaction);
                     parsedInputItemIndex++;
                 }
             }
@@ -1319,7 +1379,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     string relatedEntityName = GraphQLUtils.GetRelationshipTargetEntityName(entity, entityName, relationshipName);
                     MultipleCreateStructure referencedRelationshipMultipleCreateStructure = new(entityName: relatedEntityName, parentEntityName: entityName, inputMutParams: relationshipFieldValue);
                     IValueNode node = GraphQLUtils.GetFieldNodeForGivenFieldName(parameterNodes, relationshipName);
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
 
                     if (sqlMetadataProvider.TryGetFKDefinition(
                                                     sourceEntityName: entityName,
@@ -1346,7 +1406,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                           parameters: multipleCreateStructure.CurrentEntityParams!,
                                                                           sourceDefinition: currentEntitySourceDefinition,
                                                                           isLinkingEntity: false,
-                                                                          nestingLevel: nestingLevel);
+                                                                          nestingLevel: nestingLevel,
+                                                                          dbConnection: dbConnection,
+                                                                          dbTransaction: dbTransaction);
 
                 //Perform an insertion in the linking table if required
                 if (multipleCreateStructure.IsLinkingTableInsertionRequired)
@@ -1389,7 +1451,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             parameters: multipleCreateStructure.LinkingTableParams!,
                             sourceDefinition: linkingTableSourceDefinition,
                             isLinkingEntity: true,
-                            nestingLevel: nestingLevel);
+                            nestingLevel: nestingLevel,
+                            dbConnection: dbConnection,
+                            dbTransaction: dbTransaction);
                 }
 
                 // Process referencing relationships
@@ -1426,7 +1490,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             entityName: entityName);
                     }
 
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
                 }
             }
         }
@@ -1449,7 +1513,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                            IDictionary<string, object?> parameters,
                                                                            SourceDefinition sourceDefinition,
                                                                            bool isLinkingEntity,
-                                                                           int nestingLevel)
+                                                                           int nestingLevel,
+                                                                           DbConnection? dbConnection = null,
+                                                                           DbTransaction? dbTransaction = null)
         {
             SqlInsertStructure sqlInsertStructure = new(
                                                      entityName: entityName,
@@ -1489,13 +1555,32 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             DbResultSet? dbResultSet;
             DbResultSetRow? dbResultSetRow;
-            dbResultSet = queryExecutor.ExecuteQuery(
-                queryString,
-                queryParameters,
-                queryExecutor.ExtractResultSetFromDbDataReader,
-                GetHttpContext(),
-                EnumerableUtilities.IsNullOrEmpty(exposedColumnNames) ? sourceDefinition.Columns.Keys.ToList() : exposedColumnNames,
-                dataSourceName);
+            List<string> resultColumns = EnumerableUtilities.IsNullOrEmpty(exposedColumnNames)
+                ? sourceDefinition.Columns.Keys.ToList()
+                : exposedColumnNames;
+
+            if (dbConnection is not null)
+            {
+                dbResultSet = queryExecutor.ExecuteQueryOnConnection(
+                    dbConnection,
+                    queryString,
+                    queryParameters,
+                    queryExecutor.ExtractResultSetFromDbDataReader,
+                    GetHttpContext(),
+                    resultColumns,
+                    dataSourceName,
+                    dbTransaction);
+            }
+            else
+            {
+                dbResultSet = queryExecutor.ExecuteQuery(
+                    queryString,
+                    queryParameters,
+                    queryExecutor.ExtractResultSetFromDbDataReader,
+                    GetHttpContext(),
+                    resultColumns,
+                    dataSourceName);
+            }
 
             dbResultSetRow = dbResultSet is not null ? (dbResultSet.Rows.FirstOrDefault() ?? new DbResultSetRow()) : null;
             if (dbResultSetRow is null || dbResultSetRow.Columns.Count == 0)
