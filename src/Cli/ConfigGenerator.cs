@@ -133,20 +133,21 @@ namespace Cli
 
             bool isMultipleCreateEnabledForGraphQL;
 
-            // Multiple mutation operations are applicable only for MSSQL database. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
+            // Multiple mutation operations are applicable for MSSQL and Oracle. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
             // a warning is logged.
             // When multiple mutation operations are extended for other database types, this option should be honored.
             // Tracked by issue #2001: https://github.com/Azure/data-api-builder/issues/2001.
-            if (dbType is not DatabaseType.MSSQL && options.MultipleCreateOperationEnabled is not CliBool.None)
+            if (dbType is not DatabaseType.MSSQL and not DatabaseType.Oracle
+                && options.MultipleCreateOperationEnabled is not CliBool.None)
             {
                 _logger.LogWarning($"The option --graphql.multiple-mutations.create.enabled is not supported for the {dbType.ToString()} database type and will not be honored.");
             }
 
             MultipleMutationOptions? multipleMutationOptions = null;
 
-            // Multiple mutation operations are applicable only for MSSQL database. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
+            // Multiple mutation operations are applicable for MSSQL and Oracle. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
             // it is not honored.
-            if (dbType is DatabaseType.MSSQL && options.MultipleCreateOperationEnabled is not CliBool.None)
+            if ((dbType is DatabaseType.MSSQL or DatabaseType.Oracle) && options.MultipleCreateOperationEnabled is not CliBool.None)
             {
                 isMultipleCreateEnabledForGraphQL = IsMultipleCreateOperationEnabled(options.MultipleCreateOperationEnabled);
                 multipleMutationOptions = new(multipleCreateOptions: new MultipleCreateOptions(enabled: isMultipleCreateEnabledForGraphQL));

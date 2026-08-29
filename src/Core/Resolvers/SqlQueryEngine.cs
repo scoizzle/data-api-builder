@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -69,7 +70,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <param name="context">HotChocolate Request Pipeline context containing request metadata</param>
         /// <param name="parameters">GraphQL Query Parameters from schema retrieved from ResolverMiddleware.GetParametersFromSchemaAndQueryFields()</param>
         /// <param name="dataSourceName">Name of datasource for which to set access token. Default dbName taken from config if empty</param>
-        public async Task<Tuple<JsonDocument?, IMetadata?>> ExecuteAsync(IMiddlewareContext context, IDictionary<string, object?> parameters, string dataSourceName)
+        public Task<Tuple<JsonDocument?, IMetadata?>> ExecuteAsync(IMiddlewareContext context, IDictionary<string, object?> parameters, string dataSourceName)
+        {
+            return ExecuteAsync(context, parameters, dataSourceName, dbConnection: null, dbTransaction: null);
+        }
+
+        public async Task<Tuple<JsonDocument?, IMetadata?>> ExecuteAsync(
+            IMiddlewareContext context,
+            IDictionary<string, object?> parameters,
+            string dataSourceName,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
         {
             SqlQueryStructure structure = new(
                 context,
@@ -82,13 +93,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (structure.PaginationMetadata.IsPaginated)
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName), structure.PaginationMetadata, structure.GroupByMetadata),
+                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: false, dbConnection, dbTransaction), structure.PaginationMetadata, structure.GroupByMetadata),
                     structure.PaginationMetadata);
             }
             else
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    await ExecuteAsync(structure, dataSourceName),
+                    await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: false, dbConnection, dbTransaction),
                     structure.PaginationMetadata);
             }
         }
@@ -101,7 +112,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <param name="context">HotChocolate Request Pipeline context containing request metadata</param>
         /// <param name="parameters">PKs of the created items</param>
         /// <param name="dataSourceName">Name of datasource for which to set access token. Default dbName taken from config if empty</param>
-        public async Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateFollowUpQueryAsync(IMiddlewareContext context, List<IDictionary<string, object?>> parameters, string dataSourceName)
+        public Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateFollowUpQueryAsync(IMiddlewareContext context, List<IDictionary<string, object?>> parameters, string dataSourceName)
+        {
+            return ExecuteMultipleCreateFollowUpQueryAsync(context, parameters, dataSourceName, dbConnection: null, dbTransaction: null);
+        }
+
+        public async Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateFollowUpQueryAsync(
+            IMiddlewareContext context,
+            List<IDictionary<string, object?>> parameters,
+            string dataSourceName,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
         {
 
             string entityName = GraphQLUtils.GetEntityNameFromContext(context);
@@ -120,13 +141,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (structure.PaginationMetadata.IsPaginated)
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: true), structure.PaginationMetadata),
+                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: true, dbConnection, dbTransaction), structure.PaginationMetadata),
                     structure.PaginationMetadata);
             }
             else
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: true),
+                    await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: true, dbConnection, dbTransaction),
                     structure.PaginationMetadata);
             }
         }
@@ -305,7 +326,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // <summary>
         // Given the SqlQueryStructure structure, obtains the query text and executes it against the backend.
         // </summary>
-        private async Task<JsonDocument?> ExecuteAsync(SqlQueryStructure structure, string dataSourceName, bool isMultipleCreateOperation = false)
+        private async Task<JsonDocument?> ExecuteAsync(
+            SqlQueryStructure structure,
+            string dataSourceName,
+            bool isMultipleCreateOperation = false,
+            DbConnection? dbConnection = null,
+            DbTransaction? dbTransaction = null)
         {
             RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
             DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
@@ -325,8 +351,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 queryString = queryBuilder.Build(structure);
             }
 
-            // Global Cache enablement check
-            if (runtimeConfig.CanUseCache())
+            // Follow-up reads on an uncommitted local transaction must not use the cache (different connection).
+            if (dbConnection is null && runtimeConfig.CanUseCache())
             {
                 // Entity level cache behavior checks
                 bool dbPolicyConfigured = !string.IsNullOrEmpty(structure.DbPolicyPredicatesForOperations[EntityActionOperation.Read]);
@@ -352,13 +378,29 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // 2. MSSQL datasource set-session-context property is true
             // 3. Entity level cache is disabled
             // 4. A db policy is resolved for the read operation
-            JsonDocument? response = await queryExecutor.ExecuteQueryAsync(
-                sqltext: queryString,
-                parameters: structure.Parameters,
-                dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
-                httpContext: _httpContextAccessor.HttpContext!,
-                args: null,
-                dataSourceName: dataSourceName);
+            JsonDocument? response;
+            if (dbConnection is not null)
+            {
+                response = await queryExecutor.ExecuteQueryOnConnectionAsync(
+                    connection: dbConnection,
+                    sqltext: queryString,
+                    parameters: structure.Parameters,
+                    dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
+                    dataSourceName: dataSourceName,
+                    transaction: dbTransaction,
+                    httpContext: _httpContextAccessor.HttpContext!,
+                    args: null);
+            }
+            else
+            {
+                response = await queryExecutor.ExecuteQueryAsync(
+                    sqltext: queryString,
+                    parameters: structure.Parameters,
+                    dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
+                    httpContext: _httpContextAccessor.HttpContext!,
+                    args: null,
+                    dataSourceName: dataSourceName);
+            }
 
             return response;
         }

@@ -298,10 +298,10 @@ public class EndToEndTests
     /// <summary>
     /// Test to validate the usage of --graphql.multiple-mutations.create.enabled option of the init command for all database types.
     ///
-    /// 1. Behavior for database types other than MsSQL:
+    /// 1. Behavior for database types other than MsSQL and Oracle:
     ///      - Irrespective of whether the --graphql.multiple-mutations.create.enabled option is used or not, fields related to multiple-create will NOT be written to the config file.
     ///      - As a result, after deserialization of such a config file, the Runtime.GraphQL.MultipleMutationOptions is expected to be null.
-    /// 2. Behavior for MsSQL database type:
+    /// 2. Behavior for MsSQL and Oracle database types:
     ///
     ///      a. When --graphql.multiple-mutations.create.enabled option is used
     ///           - In this case, the fields related to multiple mutation and multiple create operations will be written to the config file.
@@ -370,7 +370,7 @@ public class EndToEndTests
         Assert.AreEqual(expectedDbType, runtimeConfig.DataSource!.DatabaseType);
         Assert.IsNotNull(runtimeConfig.Runtime);
         Assert.IsNotNull(runtimeConfig.Runtime.GraphQL);
-        if (runtimeConfig.DataSource.DatabaseType is DatabaseType.MSSQL && isMultipleCreateEnabled is not CliBool.None)
+        if ((runtimeConfig.DataSource.DatabaseType is DatabaseType.MSSQL or DatabaseType.Oracle) && isMultipleCreateEnabled is not CliBool.None)
         {
             Assert.IsNotNull(runtimeConfig.Runtime.GraphQL.MultipleMutationOptions);
             Assert.IsNotNull(runtimeConfig.Runtime.GraphQL.MultipleMutationOptions.MultipleCreateOptions);
@@ -379,7 +379,7 @@ public class EndToEndTests
         }
         else
         {
-            Assert.IsNull(runtimeConfig.Runtime.GraphQL.MultipleMutationOptions, message: "MultipleMutationOptions is expected to be null because a) DB type is not MsSQL or b) Either --graphql.multiple-mutations.create.enabled option was not used or no value was provided.");
+            Assert.IsNull(runtimeConfig.Runtime.GraphQL.MultipleMutationOptions, message: "MultipleMutationOptions is expected to be null because a) DB type is not MsSQL or Oracle or b) Either --graphql.multiple-mutations.create.enabled option was not used or no value was provided.");
         }
     }
 

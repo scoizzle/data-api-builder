@@ -86,6 +86,21 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Starts a local <see cref="OracleTransaction"/> at ReadCommitted.
+        /// ODP.NET Core does not expose BeginTransactionAsync; ambient TransactionScope is not used
+        /// because a second Open inside the same scope promotes to XA/MSDTC, which is unsupported on .NET Core.
+        /// </summary>
+        public OracleTransaction BeginLocalReadCommittedTransaction(OracleConnection conn, string dataSourceName)
+        {
+            QueryExecutorLogger.LogDebug(
+                "{correlationId} Using local OracleTransaction for multiple-create on data source {dataSourceName} ({oracleDataSource}); skipping ambient TransactionScope.",
+                HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
+                dataSourceName,
+                conn.DataSource);
+            return conn.BeginTransaction(IsolationLevel.ReadCommitted);
+        }
+
+        /// <summary>
         /// Configure during construction or a hot-reload scenario.
         /// </summary>
         private void ConfigureOracleQueryExecutor()

@@ -57,6 +57,34 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string dataSourceName = "");
 
         /// <summary>
+        /// Executes SQL on an already-owned connection and optional local transaction.
+        /// Does not create, open (if already open), close, or dispose the connection.
+        /// Does not retry when <paramref name="transaction"/> is attached.
+        /// </summary>
+        public Task<TResult?> ExecuteQueryOnConnectionAsync<TResult>(
+            DbConnection connection,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            Func<DbDataReader, List<string>?, Task<TResult>>? dataReaderHandler,
+            string dataSourceName,
+            DbTransaction? transaction,
+            HttpContext? httpContext = null,
+            List<string>? args = null) => throw new NotImplementedException();
+
+        /// <summary>
+        /// Synchronous counterpart of <see cref="ExecuteQueryOnConnectionAsync{TResult}"/>.
+        /// </summary>
+        public TResult? ExecuteQueryOnConnection<TResult>(
+            DbConnection connection,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            Func<DbDataReader, List<string>?, TResult>? dataReaderHandler,
+            HttpContext? httpContext,
+            List<string>? args,
+            string dataSourceName,
+            DbTransaction? transaction) => throw new NotImplementedException();
+
+        /// <summary>
         /// Extracts the rows from the given DbDataReader to populate
         /// the JsonArray to be returned.
         /// </summary>
