@@ -18,6 +18,7 @@ using Azure.DataApiBuilder.Core.Parsers;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Resolvers.Factories;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder;
 using HotChocolate.Language;
 using Microsoft.Extensions.Logging;
 using static Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLNaming;
@@ -1222,7 +1223,26 @@ namespace Azure.DataApiBuilder.Core.Services
             string linkingObject,
             Dictionary<string, DatabaseObject> sourceObjects)
         {
-            return;
+            if (!_runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled())
+            {
+                return;
+            }
+
+            string linkingEntityName = GraphQLUtils.GenerateLinkingEntityName(entityName, targetEntityName);
+
+            // Linking entities stay off REST/GraphQL endpoints. Schema generation still builds
+            // directional linking object types from this metadata when multiple create is enabled.
+            Entity linkingEntity = new(
+                Source: new EntitySource(Type: EntitySourceType.Table, Object: linkingObject, Parameters: null, KeyFields: null),
+                Fields: null,
+                Rest: new(Array.Empty<SupportedHttpVerb>(), Enabled: false),
+                GraphQL: new(Singular: linkingEntityName, Plural: linkingEntityName, Enabled: false),
+                Permissions: Array.Empty<EntityPermission>(),
+                Relationships: null,
+                Mappings: new(),
+                IsLinkingEntity: true);
+            _linkingEntities.TryAdd(linkingEntityName, linkingEntity);
+            PopulateDatabaseObjectForEntity(linkingEntity, linkingEntityName, sourceObjects);
         }
 
         /// <summary>
