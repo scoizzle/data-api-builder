@@ -30,19 +30,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string COUNT_ROWS_WITH_GIVEN_PK = "cnt_rows_to_update";
         public const string IS_FALLBACK_TO_UPDATE = "is_fallback_to_update";
 
-        // Oracle DML statements (INSERT/UPDATE/DELETE + RETURNING) deliver their result via output
-        // bind variables, NOT via the DbDataReader. ODP.NET surfaces RETURNING INTO values only in
-        // the command's output parameters and the reader is empty. To keep DAB's DbDataReader-based
-        // result contract intact, data-modifying statements are wrapped in a single PL/SQL anonymous
-        // block:
-        //   BEGIN
-        //     <DML> RETURNING <cols> INTO :o1, :o2, ...;
-        //     OPEN :dab_result FOR SELECT <cols> FROM DUAL;
-        //   END;
-        // The :dab_result REF CURSOR then yields one row that ExtractResultSetFromDbDataReaderAsync
-        // can consume. (A literal can NOT appear in Oracle's RETURNING list - only column expressions
-        // are allowed - which is why the upsert branch indicator is emitted via the SELECT clause of
-        // the REF CURSOR instead.)
+        // DML RETURNING INTO fills output binds, not the DbDataReader. Wrap DML in a PL/SQL block
+        // that opens :dab_result so ExtractResultSetFromDbDataReaderAsync can consume one row.
+        // Literals cannot appear in RETURNING (upsert indicators go on the REF CURSOR SELECT).
         internal const string RESULT_CURSOR_PARAM_NAME = "dab_result";
 
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
@@ -101,11 +91,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                              $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)}";
             fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key.ToUpperInvariant())} ON (1=1)"));
 
-            string predicates = JoinPredicateStrings(
+            string predicates;
+            if (structure.IsMultipleCreateOperation)
+            {
+                predicates = JoinPredicateStrings(
+                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                                    structure.FilterPredicates,
+                                    Build(structure.Predicates, " OR ", isMultipleCreateOperation: true),
+                                    Build(structure.PaginationMetadata.PaginationPredicate));
+            }
+            else
+            {
+                predicates = JoinPredicateStrings(
                                     structure.GetDbPolicyForOperation(EntityActionOperation.Read),
                                     structure.FilterPredicates,
                                     Build(structure.Predicates),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
+            }
 
             string aggregations = BuildAggregationColumns(structure);
 
@@ -144,12 +146,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlInsertStructure structure)
         {
-            // PRE-CONDITION: Get database policy for CREATE action (required for row-level security)
             string dbPolicyPredicates = JoinPredicateStrings(structure.GetDbPolicyForOperation(EntityActionOperation.Create));
-            
-            // PRE-CONDITION: Get source definition for DML trigger detection
             SourceDefinition sourceDefinition = structure.GetUnderlyingSourceDefinition();
-            bool isInsertDMLTriggerEnabled = sourceDefinition.IsInsertDMLTriggerEnabled;
 
             string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
             string insertQuery = $"INSERT INTO {tableName} ";
@@ -188,27 +186,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 insertQuery += $"({QuoteIdentifier(defaultColumn)}) VALUES (DEFAULT) ";
             }
 
-            // POST-CONDITION: Handle DML trigger scenario (Oracle-specific, not yet fully implemented)
-            if (isInsertDMLTriggerEnabled)
-            {
-                // Note: Oracle supports DML triggers but the full trigger-aware logic
-                // (similar to MSSQL with temp tables) is not yet implemented.
-                // For now, we log a warning and continue with the standard INSERT.
-                // TODO: Implement full DML trigger-aware INSERT logic for Oracle
-            }
-
-            // POST-CONDITION: Return inserted data. Oracle's RETURNING INTO delivers values through
-            // output bind variables (the DbDataReader is empty), so wrap the statement in a PL/SQL
-            // block and expose the returned columns as a REF CURSOR result set that DAB's reader can
-            // consume:
-            //   BEGIN
-            //     INSERT INTO ... RETURNING "ID", "TITLE" INTO :id, :title;
-            //     OPEN :dab_result FOR SELECT :id AS "id", :title AS "title" FROM DUAL;
-            //   END;
-            //
-            // NOTE: Oracle's RETURNING clause rejects aliases (ORA-00925 "missing INTO keyword"
-            // when an AS alias appears before INTO), so the output column list is the bare
-            // PHYSICAL column name (exact case preserved from Oracle metadata).
+            // RETURNING rejects aliases (ORA-00925); emit bare physical column names.
             string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
             string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
@@ -217,15 +195,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
             if (hasCreatePolicy)
             {
-                // Gate the INSERT on the create policy: when blocked, open an empty cursor
-                // (WHERE 1 = 0) so the executor surfaces 403 rather than ORA-01400 (400).
-                // The policy may reference column names (e.g. "OWNERID" = :paramN via
-                // QuotePhysicalColumn), so alias each value with its physical column name in a
-                // DUAL subquery to make those columns resolvable - otherwise ORA-00904.
+                // PL/SQL cannot host a scalar subquery in IF (PLS-00103). SELECT COUNT(*) INTO a
+                // NUMBER, then gate the INSERT. Empty cursor (WHERE 1 = 0) surfaces 403, not ORA-01400.
                 string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
                     (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
-                return $"{outputTypeHints}BEGIN " +
-                    $"IF (SELECT COUNT(*) FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}) > 0 THEN " +
+                return $"{outputTypeHints}DECLARE v_dab_insert_count NUMBER; BEGIN " +
+                    $"SELECT COUNT(*) INTO v_dab_insert_count FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}; " +
+                    $"IF v_dab_insert_count > 0 THEN " +
                     $"{insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
                     $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
                     $"ELSE " +
