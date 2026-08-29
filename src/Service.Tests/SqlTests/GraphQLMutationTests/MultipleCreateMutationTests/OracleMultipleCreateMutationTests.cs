@@ -299,7 +299,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
                         'author_id' VALUE author_id,
                         'royalty_percentage' VALUE royalty_percentage
                     )
-                    ORDER BY book_id ASC
+                    ORDER BY book_id, author_id ASC
                     RETURNING CLOB
                 )
                 FROM book_author_link
