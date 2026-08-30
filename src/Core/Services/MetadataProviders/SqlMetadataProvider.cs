@@ -1848,16 +1848,15 @@ namespace Azure.DataApiBuilder.Core.Services
             SourceDefinition sourceDefinition,
             List<string> pkFields)
         {
-            // Normalize primary-key column names through GetPhysicalDatabaseColumnName so they are
-            // consistent with the sourceDefinition.Columns keys (e.g. Oracle lowercases both).
-            // Without this, a driver that reports PK names in a different case than the column
-            // metadata (Oracle reports unquoted identifiers in UPPERCASE) leaves
-            // sourceDefinition.PrimaryKey inconsistent with the exposed-to-backing map, which breaks
-            // REST by-PK routes ("primary keys: id requested were not found in the entity
-            // definition") and RequestValidator's PK checks.
-            sourceDefinition.PrimaryKey = [.. pkFields.Select(GetPhysicalDatabaseColumnName)];
-
-            if (sourceDefinition.PrimaryKey.Count == 0)
+            // The primary-key names are resolved to the physical column spelling AFTER the column
+            // metadata is populated below (the Columns keys). The pkFields can come from the
+            // runtime config (entity.Fields or key-fields) where the authored casing may differ
+            // from the driver-reported physical column name (e.g. Oracle stores unquoted
+            // identifiers UPPERCASE while configs author lowercase key-fields), or from the
+            // driver's constraint metadata (already physical). Failing to resolve the casing
+            // leaves sourceDefinition.PrimaryKey inconsistent with the Columns keys, which breaks
+            // GraphQL @primaryKey directive generation and REST by-PK routes.
+            if (pkFields.Count == 0)
             {
                 throw new DataApiBuilderException(
                        message: $"Primary key not configured on the given database object {tableName}",
@@ -1921,6 +1920,13 @@ namespace Azure.DataApiBuilder.Core.Services
                 // has already been added and need not error out.
                 sourceDefinition.Columns.TryAdd(columnName, column);
             }
+
+            // Resolve the primary-key names to the exact physical spelling of the column metadata
+            // keys now that the Columns dictionary is populated. A case-insensitive match keeps
+            // PrimaryKey consistent with Columns regardless of whether the pkFields originated
+            // from the runtime config (key-fields/entity.Fields) or the driver's constraint
+            // metadata (see the guard above PopulateTriggerMetadataForTable).
+            sourceDefinition.PrimaryKey = [.. pkFields.Select(pk => ResolvePhysicalColumnName(sourceDefinition, pk))];
 
             DataTable columnsInTable = await GetColumnsAsync(schemaName, tableName);
 
