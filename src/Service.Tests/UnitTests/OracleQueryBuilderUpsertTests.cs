@@ -42,9 +42,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// </summary>
         private static readonly Dictionary<string, string> _columnMapping = new()
         {
-            { "id", "id" },
-            { "title", "title" },
-            { "publisher_id", "publisher_id" }
+            { "id", "ID" },
+            { "title", "TITLE" },
+            { "publisher_id", "PUBLISHER_ID" }
         };
 
         /// <summary>
@@ -142,7 +142,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 query.Contains("FROM (SELECT", StringComparison.Ordinal),
                 $"The create-policy INSERT MUST gate on <named values> FROM DUAL so column-referencing policies resolve. Query: {query}");
             Assert.IsTrue(
-                query.Contains($"SELECT COUNT(*) INTO v_dab_upsert_count FROM \"SYSTEM\".\"BOOKS\" WHERE \"id\" =", StringComparison.Ordinal),
+                query.Contains($"SELECT COUNT(*) INTO v_dab_upsert_count FROM \"SYSTEM\".\"BOOKS\" WHERE \"ID\" =", StringComparison.Ordinal),
                 $"The upsert MUST distinguish a policy-blocked existing row from a missing row via a PK existence check. Query: {query}");
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
@@ -169,14 +169,14 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             SourceDefinition sourceDefinition = new()
             {
-                PrimaryKey = new() { "id" }
+                PrimaryKey = new() { "ID" }
             };
-            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
             });
-            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            sourceDefinition.Columns.Add("TITLE", new ColumnDefinition
             {
                 SystemType = typeof(string),
                 DbType = DbType.String,
@@ -293,7 +293,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 query.Contains("'updated'", StringComparison.Ordinal),
                 $"Fallback-to-update MUST emit the 'updated' indicator. Query: {query}");
             Assert.IsTrue(
-                query.Contains("SELECT COUNT(*) INTO v_dab_upsert_count FROM \"SYSTEM\".\"BOOKS\" WHERE \"id\" =", StringComparison.Ordinal),
+                query.Contains("SELECT COUNT(*) INTO v_dab_upsert_count FROM \"SYSTEM\".\"BOOKS\" WHERE \"ID\" =", StringComparison.Ordinal),
                 $"Fallback-to-update MUST probe row existence to distinguish a blocked row from a missing row. Query: {query}");
             Assert.IsTrue(
                 query.Contains("WHERE 1 = 0", StringComparison.Ordinal),
@@ -343,20 +343,20 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             SourceDefinition sourceDefinition = new()
             {
-                PrimaryKey = new() { "id" }
+                PrimaryKey = new() { "ID" }
             };
-            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
             });
-            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            sourceDefinition.Columns.Add("TITLE", new ColumnDefinition
             {
                 SystemType = typeof(string),
                 DbType = DbType.String,
                 IsNullable = true
             });
-            sourceDefinition.Columns.Add("publisher_id", new ColumnDefinition
+            sourceDefinition.Columns.Add("PUBLISHER_ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
@@ -449,20 +449,20 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             SourceDefinition sourceDefinition = new()
             {
-                PrimaryKey = new() { "id" }
+                PrimaryKey = new() { "ID" }
             };
-            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
             });
-            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            sourceDefinition.Columns.Add("TITLE", new ColumnDefinition
             {
                 SystemType = typeof(string),
                 DbType = DbType.String,
                 IsNullable = true
             });
-            sourceDefinition.Columns.Add("publisher_id", new ColumnDefinition
+            sourceDefinition.Columns.Add("PUBLISHER_ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
@@ -492,7 +492,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     => _columnMapping.TryGetValue(field, out column)))
                 .Returns((string entity, string field, string? column) => _columnMapping.ContainsKey(field));
 
-            // The update/create policies are injected directly onto the structure after construction.
             Mock<IAuthorizationResolver> authorizationResolver = new();
             authorizationResolver
                 .Setup(x => x.ResolveDBPolicy(
@@ -534,21 +533,21 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             SourceDefinition sourceDefinition = new()
             {
-                PrimaryKey = new() { "id" }
+                PrimaryKey = new() { "ID" }
             };
-            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32,
                 IsAutoGenerated = true
             });
-            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            sourceDefinition.Columns.Add("TITLE", new ColumnDefinition
             {
                 SystemType = typeof(string),
                 DbType = DbType.String,
                 IsNullable = true
             });
-            sourceDefinition.Columns.Add("publisher_id", new ColumnDefinition
+            sourceDefinition.Columns.Add("PUBLISHER_ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32

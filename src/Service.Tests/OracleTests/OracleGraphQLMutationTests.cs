@@ -39,11 +39,10 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         {
             string oracleQuery = @"
                 SELECT JSON_OBJECT(
-                    'id' VALUE id, 'title' VALUE title,
-                    'publisher_id' VALUE publisher_id
+                    'id' VALUE id, 'title' VALUE title
                 ) AS data
                 FROM (
-                    SELECT id, title, publisher_id FROM books
+                    SELECT id, title FROM books
                     WHERE id = 5001 AND title = 'My New Book' AND publisher_id = 1234
                     ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
                 )";
@@ -55,11 +54,10 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         {
             string oracleQuery = @"
                 SELECT JSON_OBJECT(
-                    'id' VALUE id, 'title' VALUE title,
-                    'publisher_id' VALUE publisher_id
+                    'id' VALUE id, 'title' VALUE title
                 ) AS data
                 FROM (
-                    SELECT id, title, publisher_id FROM books
+                    SELECT id, title FROM books
                     WHERE id = 5001 AND title = 'My New Book' AND publisher_id = 1234
                     ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
                 )";
@@ -165,7 +163,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
                 ) AS data
                 FROM (
-                    SELECT id, title, issue_number FROM magazines
+                    SELECT id, title, issue_number FROM foo.magazines
                     WHERE id = 800 FETCH FIRST 1 ROWS ONLY
                 )";
             await TestExplicitNullInsert(oracleQuery);
@@ -179,7 +177,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
                 ) AS data
                 FROM (
-                    SELECT id, title, issue_number FROM magazines
+                    SELECT id, title, issue_number FROM foo.magazines
                     WHERE id = 801 FETCH FIRST 1 ROWS ONLY
                 )";
             await TestImplicitNullInsert(oracleQuery);
@@ -193,7 +191,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     'id' VALUE id, 'issue_number' VALUE issue_number
                 ) AS data
                 FROM (
-                    SELECT id, issue_number FROM magazines
+                    SELECT id, issue_number FROM foo.magazines
                     WHERE id = 1 FETCH FIRST 1 ROWS ONLY
                 )";
             await TestUpdateColumnToNull(oracleQuery);
@@ -207,7 +205,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
                 ) AS data
                 FROM (
-                    SELECT id, title, issue_number FROM magazines
+                    SELECT id, title, issue_number FROM foo.magazines
                     WHERE id = 1 FETCH FIRST 1 ROWS ONLY
                 )";
             await TestMissingColumnNotUpdatedToNull(oracleQuery);
