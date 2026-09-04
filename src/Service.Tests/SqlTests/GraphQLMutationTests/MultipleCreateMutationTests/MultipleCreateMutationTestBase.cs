@@ -147,7 +147,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         /// Then, the Stocks_Price item is created where stocks_price.categoryid and stocks_price.pieceid
         /// are populated with the previously created Stock record's categoryid and pieceid.
         /// </summary>
-        public async Task MultipleCreateMutationWithOneToOneRelationship(string expectedResponse)
+        public virtual async Task MultipleCreateMutationWithOneToOneRelationship(string expectedResponse)
         {
             string graphQLMutationName = "createStock";
             string graphQLMutation = @"
