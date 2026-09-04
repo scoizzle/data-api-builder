@@ -3,7 +3,6 @@
 
 using System.Data;
 using System.Data.Common;
-using System.Net;
 using System.Text;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -56,6 +55,38 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Unquoted catalog objects (schema, table, package, procedure) are stored UPPERCASE.
+        /// Always quoted here, so they must be emitted UPPERCASE.
+        /// </summary>
+        private string QuoteCatalogObject(string objectName)
+        {
+            return QuoteIdentifier(objectName.ToUpperInvariant());
+        }
+
+        /// <summary>
+        /// Quotes a schema-qualified catalog object. Empty schema yields a bare quoted object.
+        /// </summary>
+        internal string QuoteRelation(string? schemaName, string objectName)
+        {
+            string quotedObject = QuoteCatalogObject(objectName);
+            if (string.IsNullOrWhiteSpace(schemaName))
+            {
+                return quotedObject;
+            }
+
+            return $"{QuoteCatalogObject(schemaName)}.{quotedObject}";
+        }
+
+        /// <summary>
+        /// DAB-generated aliases start as table{N}. They are quoted, so FROM/JOIN and column
+        /// prefixes must share one spelling. Uppercase is that spelling.
+        /// </summary>
+        public string QuoteTableAlias(string alias)
+        {
+            return QuoteCatalogObject(alias);
+        }
+
+        /// <summary>
         /// Overrides the base EXISTS-subquery builder used for predicates that filter on a nested
         /// relationship (e.g. <c>characters(filter: { actor: { name: { eq: ... } } })</c>). The base
         /// emits <c>FROM schema.table AS "alias"</c> which Oracle rejects: the AS keyword is not
@@ -71,8 +102,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                        Build(structure.Predicates)));
 
             string query = $"SELECT 1 " +
-                   $"FROM {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
-                   $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)} " +
+                   $"FROM {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                   $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)} " +
                    $"WHERE {predicates}";
 
             return query;
@@ -81,15 +112,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
-            // The FROM-clause table alias is DAB-generated ("table{N}", lowercase) and emitted
-            // UPPERCASE here, matching the UPPERCASE alias emitted by Build(Column) for column
-            // references. The table/schema names come from the config and resolve against Oracle
-            // case-insensitively; they are emitted UPPERCASE (the physical casing for unquoted
-            // objects). Column names are physical backing names preserved from metadata and are
-            // emitted verbatim by Build(Column).
-            string fromSql = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
-                             $"{QuoteIdentifier(structure.SourceAlias.ToUpperInvariant())}{Build(structure.Joins)}";
-            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteIdentifier(x.Key.ToUpperInvariant())} ON (1=1)"));
+            // Schema/table and DAB aliases go through QuoteRelation / QuoteTableAlias (uppercase,
+            // quoted). Column names are physical backing names and are emitted verbatim.
+            string fromSql = $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                             $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
+            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteTableAlias(x.Key)} ON (1=1)"));
 
             string predicates;
             if (structure.IsMultipleCreateOperation)
@@ -149,14 +176,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string dbPolicyPredicates = JoinPredicateStrings(structure.GetDbPolicyForOperation(EntityActionOperation.Create));
             SourceDefinition sourceDefinition = structure.GetUnderlyingSourceDefinition();
 
-            string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
+            string tableName = QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name);
             string insertQuery = $"INSERT INTO {tableName} ";
 
             if (structure.InsertColumns.Any())
             {
-                string insertColumns = BuildColumnList(structure.InsertColumns);
+                // Config + derived FK params can resolve to the same physical column. Oracle
+                // rejects duplicate names in INSERT (ORA-00957). Last write wins so an explicit
+                // FK value is not dropped in favor of an earlier derived one.
+                (IReadOnlyList<string> insertCols, IReadOnlyList<string> insertVals) =
+                    DedupeInsertColumns(structure.InsertColumns, structure.Values);
+                string insertColumns = BuildColumnList(insertCols);
                 insertQuery += $"({insertColumns}) ";
-                insertQuery += $"VALUES ({string.Join(", ", structure.Values)}) ";
+                insertQuery += $"VALUES ({string.Join(", ", insertVals)}) ";
             }
             else
             {
@@ -225,7 +257,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // exact physical casing preserved from Oracle metadata.
             string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
             string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
-            string updateQuery = $"UPDATE {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
+            string updateQuery = $"UPDATE {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
                     $"WHERE {predicates} " +
                     $"RETURNING {returningColumns} INTO {bindNames}";
@@ -255,7 +287,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                        structure.GetDbPolicyForOperation(EntityActionOperation.Delete),
                        Build(structure.Predicates));
 
-            return $"DELETE FROM {QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())} " +
+            return $"DELETE FROM {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
                     $"WHERE {predicates}";
         }
 
@@ -287,11 +319,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // the startup pipeline. If it were ever skipped, IsFunction would remain false and a
             // function would be emitted as a bare `BEGIN schema.func(:p0); END;` statement, which
             // is invalid PL/SQL for a function.
-            string schemaName = QuoteIdentifier(sp.SchemaName.ToUpperInvariant());
-            string subprogramName = QuoteIdentifier(sp.Name.ToUpperInvariant());
             string qualifiedName = string.IsNullOrEmpty(sp.PackageName)
-                ? $"{schemaName}.{subprogramName}"
-                : $"{schemaName}.{QuoteIdentifier(sp.PackageName.ToUpperInvariant())}.{subprogramName}";
+                ? QuoteRelation(sp.SchemaName, sp.Name)
+                : $"{QuoteRelation(sp.SchemaName, sp.PackageName)}.{QuoteCatalogObject(sp.Name)}";
 
             // ProcedureParameters maps each subprogram argument NAME (no prefix, e.g. "id") to the
             // engine-generated bind reference (e.g. "@param0"). The actual bindable values live in
@@ -358,7 +388,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // performs a guarded INSERT. Each branch emits the resulting columns - plus an
             // ___upsert_op___ indicator literal - through a REF CURSOR result set that the executor
             // reads to distinguish update (200) from insert (201) and to surface policy failures.
-            string tableName = $"{QuoteIdentifier(structure.DatabaseObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(structure.DatabaseObject.Name.ToUpperInvariant())}";
+            string tableName = QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name);
             string pkPredicates = Build(structure.Predicates);
 
             string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
@@ -461,6 +491,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     block.Append($"{insertQuery}; ");
                     block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
                 }
+
                 block.Append($"END IF; ");
                 block.Append($"END IF; ");
                 block.Append($"END;");
@@ -469,10 +500,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Build column as
-        /// "{tableAlias}"."{ColumnName}"
-        /// or if SourceAlias is empty, as
-        /// "{ColumnName}"
+        /// Prefixes the PL/SQL block with a comment listing RETURNING bind types so the
+        /// executor can register output parameters with the correct OracleDbType.
         /// </summary>
         private static string BuildOutputTypeHints(
             IEnumerable<LabelledColumn> outputColumns,
@@ -531,14 +560,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         protected override string Build(Column column)
         {
-            // Oracle stores unquoted identifiers in uppercase. The table alias is DAB-generated
-            // ("table{N}", lowercase) and emitted UPPERCASE in the FROM/JOIN clauses, so it must be
-            // uppercased here to resolve. The column name is the PHYSICAL backing name preserved
-            // from Oracle metadata (uppercase for unquoted identifiers, exact case for quoted ones),
-            // so it is emitted verbatim - no case transformation.
+            // OracleMetadataProvider.GetPhysicalDatabaseColumnName preserves the exact physical
+            // casing stored in Oracle metadata: UPPERCASE for unquoted identifiers (e.g. ID,
+            // TITLE) and original case for quoted ones (e.g. __column1, data). Emit the name
+            // verbatim so quoted identifiers resolve correctly (Oracle is case-sensitive for
+            // quoted identifiers: "DATA" != "data", "__column1" != "__COLUMN1").
             if (!string.IsNullOrEmpty(column.TableAlias))
             {
-                return $"{QuoteIdentifier(column.TableAlias.ToUpperInvariant())}.{QuoteIdentifier(column.ColumnName)}";
+                return $"{QuoteTableAlias(column.TableAlias)}.{QuoteIdentifier(column.ColumnName)}";
             }
             // If there is no table alias we return [{Column}]
             else
@@ -561,25 +590,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 throw new ArgumentNullException(nameof(join));
             }
 
-            if (!string.IsNullOrWhiteSpace(join.DbObject.SchemaName))
-            {
-                return $" INNER JOIN {QuoteIdentifier(join.DbObject.SchemaName.ToUpperInvariant())}.{QuoteIdentifier(join.DbObject.Name.ToUpperInvariant())} " +
-                       $"{QuoteIdentifier(join.TableAlias.ToUpperInvariant())} " +
-                       $"ON {Build(join.Predicates)}";
-            }
-            else
-            {
-                return $" INNER JOIN {QuoteIdentifier(join.DbObject.Name.ToUpperInvariant())} " +
-                       $"{QuoteIdentifier(join.TableAlias.ToUpperInvariant())} " +
-                       $"ON {Build(join.Predicates)}";
-            }
+            return $" INNER JOIN {QuoteRelation(join.DbObject.SchemaName, join.DbObject.Name)} " +
+                   $"{QuoteTableAlias(join.TableAlias)} " +
+                   $"ON {Build(join.Predicates)}";
         }
 
         /// <summary>
-        /// Builds an aggregation column (e.g. MAX([SourceAlias].[Column])) for the SELECT list and
-        /// HAVING clauses. Oracle stores unquoted identifiers uppercase, so the table alias and
-        /// column name must be emitted UPPERCASE just like <see cref="Build(Column)"/> to avoid
-        /// ORA-00904. Aggregation functions (COUNT/SUM/AVG/MIN/MAX) are case-insensitive.
+        /// Builds an aggregation column (e.g. MAX("TABLE0"."ID")) for the SELECT list and
+        /// HAVING clauses. Reuses <see cref="Build(Column)"/> so alias and column casing stay
+        /// consistent. Aggregation functions (COUNT/SUM/AVG/MIN/MAX) are case-insensitive.
         /// </summary>
         protected override string Build(AggregationColumn column, bool useAlias = false)
         {
@@ -597,6 +616,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private string BuildColumnList(IEnumerable<string> columnNames)
         {
             return string.Join(", ", columnNames.Select(c => QuoteIdentifier(c)));
+        }
+
+        /// <summary>
+        /// Collapses insert column/value pairs that share a physical name (ignore-case).
+        /// Later values replace earlier ones so an explicit FK is kept over a derived one.
+        /// </summary>
+        private static (List<string> Columns, List<string> Values) DedupeInsertColumns(
+            IReadOnlyList<string> columns,
+            IReadOnlyList<string> values)
+        {
+            Dictionary<string, (string Column, string Value)> unique = new(StringComparer.OrdinalIgnoreCase);
+            int count = Math.Min(columns.Count, values.Count);
+            for (int i = 0; i < count; i++)
+            {
+                unique[columns[i]] = (columns[i], values[i]);
+            }
+
+            return ([.. unique.Values.Select(pair => pair.Column)], [.. unique.Values.Select(pair => pair.Value)]);
         }
 
         /// <summary>
@@ -767,7 +804,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
             string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
-            
+
             // Oracle uses :param syntax instead of @param
             string tableSchemaParamsForInClause = string.Join(", :", schemaNameParams);
             string tableNameParamsForInClause = string.Join(", :", tableNameParams);
@@ -777,7 +814,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ALL_CONS_COLUMNS contains column mappings for constraints
             // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
             string foreignKeyQuery = $@"
-                SELECT 
+                SELECT
                     RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
                     RefCons.OWNER {QuoteIdentifier($"Referencing{nameof(DatabaseObject.SchemaName)}")},
                     RefCons.TABLE_NAME {QuoteIdentifier($"Referencing{nameof(SourceDefinition)}")},
@@ -785,9 +822,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     RefConsPk.OWNER {QuoteIdentifier($"Referenced{nameof(DatabaseObject.SchemaName)}")},
                     RefConsPk.TABLE_NAME {QuoteIdentifier($"Referenced{nameof(SourceDefinition)}")},
                     RefConsPkCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencedColumns))}
-                FROM 
+                FROM
                     ALL_CONSTRAINTS RefCons
-                    INNER JOIN 
+                    INNER JOIN
                     ALL_CONS_COLUMNS RefConsCol
                         ON RefCons.OWNER = RefConsCol.OWNER
                         AND RefCons.CONSTRAINT_NAME = RefConsCol.CONSTRAINT_NAME
