@@ -34,6 +34,26 @@ begin
          dbms_output.put_line(SQLERRM);
    end;
 
+    -- Drop synonyms (must precede DROP TABLE of the base objects)
+   begin
+      execute immediate q'[DROP SYNONYM books_syn_nested]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[DROP SYNONYM books_syn]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[DROP PUBLIC SYNONYM dab_pub_publishers]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+
 
     -- Drop procedures
 
@@ -889,7 +909,8 @@ begin
    execute immediate q'[ALTER TABLE books 
     ADD CONSTRAINT book_publisher_fk
     FOREIGN KEY (publisher_id)
-    REFERENCES publishers (id ) ]';
+    REFERENCES publishers (id )
+    ON DELETE CASCADE ]';
    execute immediate q'[ALTER TABLE players 
     ADD CONSTRAINT player_club_fk
     FOREIGN KEY (current_club_id)
@@ -897,15 +918,18 @@ begin
    execute immediate q'[ALTER TABLE book_website_placements 
     ADD CONSTRAINT book_website_placement_book_fk
     FOREIGN KEY (book_id)
-    REFERENCES books (id ) ]';
+    REFERENCES books (id )
+    ON DELETE CASCADE ]';
    execute immediate q'[ALTER TABLE reviews 
     ADD CONSTRAINT review_book_fk
     FOREIGN KEY (book_id)
-    REFERENCES books (id ) ]';
+    REFERENCES books (id )
+    ON DELETE CASCADE ]';
    execute immediate q'[ALTER TABLE book_author_link 
     ADD CONSTRAINT book_author_link_book_fk
     FOREIGN KEY (book_id)
-    REFERENCES books (id ) ]';
+    REFERENCES books (id )
+    ON DELETE CASCADE ]';
    execute immediate q'[ALTER TABLE book_author_link 
     ADD CONSTRAINT book_author_link_author_fk
     FOREIGN KEY (author_id)
@@ -2731,6 +2755,10 @@ execute immediate q'[
         SELECT books.id, books.title, publishers.name, books.publisher_id
         FROM books, publishers
         WHERE publishers.id = books.publisher_id]';
+
+   execute immediate q'[CREATE SYNONYM books_syn FOR books]';
+   execute immediate q'[CREATE SYNONYM books_syn_nested FOR books_syn]';
+   execute immediate q'[CREATE PUBLIC SYNONYM dab_pub_publishers FOR publishers]';
 
 
     -- Create stored procedures
