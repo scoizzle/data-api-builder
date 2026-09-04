@@ -4,6 +4,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Text;
+using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
@@ -20,6 +21,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string UPSERT_IDENTIFIER_COLUMN_NAME = "___upsert_op___";
         private const string INSERT_UPSERT = "inserted";
         private const string UPDATE_UPSERT = "updated";
+        private const string ORACLE_ESCAPE_CHAR = "\\";
         /// <summary>
         /// Indicator emitted by the fallback-to-update branch when the target row does not exist
         /// (no row matched the primary key, and no update policy exists to explain a no-match).
@@ -87,6 +89,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Helper method to add ESCAPE clause to the LIKE clauses in the query.
+        /// </summary>
+        private static string AddEscapeToLikeClauses(string predicate)
+        {
+            const string escapeClause = $" ESCAPE '{ORACLE_ESCAPE_CHAR}'";
+            // Regex to find LIKE clauses and append ESCAPE
+            return Regex.Replace(predicate, @"(LIKE\s+@[\w\d]+)", $"$1{escapeClause}", RegexOptions.IgnoreCase);
+        }
+
+        /// <summary>
         /// Overrides the base EXISTS-subquery builder used for predicates that filter on a nested
         /// relationship (e.g. <c>characters(filter: { actor: { name: { eq: ... } } })</c>). The base
         /// emits <c>FROM schema.table AS "alias"</c> which Oracle rejects: the AS keyword is not
@@ -135,6 +147,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                     Build(structure.Predicates),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
             }
+
+            // Add ESCAPE clause to LIKE predicates so that % and _ wildcards in the
+            // search pattern are properly escaped when used as literal characters.
+            predicates = AddEscapeToLikeClauses(predicates);
 
             string aggregations = BuildAggregationColumns(structure);
 
