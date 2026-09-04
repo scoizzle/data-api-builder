@@ -1907,7 +1907,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Find
         /// Tests the REST Api for Find operation with an invalid column name for sorting.
         /// </summary>
         [TestMethod]
-        public async Task FindByIdTestInvalidOrderByColumn()
+        public virtual async Task FindByIdTestInvalidOrderByColumn()
         {
             await SetupAndRunRestApiTest(
                 primaryKeyRoute: string.Empty,
@@ -2088,35 +2088,33 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Find
         /// Sql Injection in the primary key route.
         /// </summary>
         [DataTestMethod]
-        [DataRow(" WHERE 1=1/*", true)]
-        [DataRow("id WHERE 1=1/*", true)]
-        [DataRow(" UNION SELECT * FROM books/*", true)]
-        [DataRow("id UNION SELECT * FROM books/*", true)]
-        [DataRow("; SELECT * FROM information_schema.tables/*", true)]
-        [DataRow("id; SELECT * FROM information_schema.tables/*", true)]
-        [DataRow("; SELECT * FROM v$version/*", true)]
-        [DataRow("id; SELECT * FROM v$version/*", true)]
-        [DataRow("id; DROP TABLE books;/*", true)]
-        [DataRow(" WHERE 1=1--", false)]
-        [DataRow("id WHERE 1=1--", false)]
-        [DataRow(" UNION SELECT * FROM books--", false)]
-        [DataRow("id UNION SELECT * FROM books--", false)]
-        [DataRow("; SELECT * FROM information_schema.tables--", false)]
-        [DataRow("id; SELECT * FROM information_schema.tables--", false)]
-        [DataRow("; SELECT * FROM v$version--", false)]
-        [DataRow("id; SELECT * FROM v$version--", false)]
-        [DataRow("id; DROP TABLE books;--", false)]
-        public async Task FindByIdTestWithSqlInjectionInPKRoute(string sqlInjection, bool slashStar)
+        [DataRow(" WHERE 1=1/*")]
+        [DataRow("id WHERE 1=1/*")]
+        [DataRow(" UNION SELECT * FROM books/*")]
+        [DataRow("id UNION SELECT * FROM books/*")]
+        [DataRow("; SELECT * FROM information_schema.tables/*")]
+        [DataRow("id; SELECT * FROM information_schema.tables/*")]
+        [DataRow("; SELECT * FROM v$version/*")]
+        [DataRow("id; SELECT * FROM v$version/*")]
+        [DataRow("id; DROP TABLE books;/*")]
+        [DataRow(" WHERE 1=1--")]
+        [DataRow("id WHERE 1=1--")]
+        [DataRow(" UNION SELECT * FROM books--")]
+        [DataRow("id UNION SELECT * FROM books--")]
+        [DataRow("; SELECT * FROM information_schema.tables--")]
+        [DataRow("id; SELECT * FROM information_schema.tables--")]
+        [DataRow("; SELECT * FROM v$version--")]
+        [DataRow("id; SELECT * FROM v$version--")]
+        [DataRow("id; DROP TABLE books;--")]
+        public virtual async Task FindByIdTestWithSqlInjectionInPKRoute(string sqlInjection)
         {
-            string message = slashStar ? "Support for url template with implicit primary key field names is not yet added." :
-                $"Parameter \"{sqlInjection}\" cannot be resolved as column \"id\" with type \"Int32\".";
             await SetupAndRunRestApiTest(
                 primaryKeyRoute: $"id/{sqlInjection}",
                 queryString: $"?$select=id",
                 entityNameOrPath: _integrationEntityName,
                 sqlQuery: string.Empty,
                 exceptionExpected: true,
-                expectedErrorMessage: message,
+                expectedErrorMessage: $"Parameter \"{sqlInjection}\" cannot be resolved as column \"id\" with type \"Int32\".",
                 expectedStatusCode: HttpStatusCode.BadRequest
             );
         }

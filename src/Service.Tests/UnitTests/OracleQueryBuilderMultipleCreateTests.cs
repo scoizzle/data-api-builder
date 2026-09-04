@@ -35,9 +35,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         private static readonly Dictionary<string, string> _columnMapping = new()
         {
-            { "id", "id" },
-            { "title", "title" },
-            { "publisher_id", "publisher_id" }
+            { "id", "ID" },
+            { "title", "TITLE" },
+            { "publisher_id", "PUBLISHER_ID" }
         };
 
         [TestMethod]
@@ -51,8 +51,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            StringAssert.Contains(query, "((\"SYSTEM_BOOKS\".\"id\" = @param0) OR (\"SYSTEM_BOOKS\".\"id\" = @param1))", StringComparison.Ordinal);
-            Assert.IsFalse(query.Contains("(\"SYSTEM_BOOKS\".\"id\" = @param0) AND (\"SYSTEM_BOOKS\".\"id\" = @param1)", StringComparison.Ordinal), query);
+            StringAssert.Contains(query, "((\"SYSTEM_BOOKS\".\"ID\" = @param0) OR (\"SYSTEM_BOOKS\".\"ID\" = @param1))", StringComparison.Ordinal);
+            Assert.IsFalse(query.Contains("(\"SYSTEM_BOOKS\".\"ID\" = @param0) AND (\"SYSTEM_BOOKS\".\"ID\" = @param1)", StringComparison.Ordinal), query);
         }
 
         [TestMethod]
@@ -66,7 +66,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            StringAssert.Contains(query, "\"SYSTEM_BOOKS\".\"id\" = @param0 AND \"SYSTEM_BOOKS\".\"id\" = @param1", StringComparison.Ordinal);
+            StringAssert.Contains(query, "\"SYSTEM_BOOKS\".\"ID\" = @param0 AND \"SYSTEM_BOOKS\".\"ID\" = @param1", StringComparison.Ordinal);
             Assert.IsFalse(query.Contains(" OR ", StringComparison.Ordinal), query);
         }
 
@@ -84,9 +84,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             StringAssert.Contains(query, READ_POLICY, StringComparison.Ordinal);
             int policyIndex = query.IndexOf(READ_POLICY, StringComparison.Ordinal);
-            int orGroupIndex = query.IndexOf("((\"SYSTEM_BOOKS\".\"id\" = @param0) OR (\"SYSTEM_BOOKS\".\"id\" = @param1))", StringComparison.Ordinal);
+            int orGroupIndex = query.IndexOf("((\"SYSTEM_BOOKS\".\"ID\" = @param0) OR (\"SYSTEM_BOOKS\".\"ID\" = @param1))", StringComparison.Ordinal);
             Assert.IsTrue(orGroupIndex > policyIndex, $"Read policy must sit outside the OR group. Query: {query}");
-            StringAssert.Contains(query, $"{READ_POLICY} AND ((\"SYSTEM_BOOKS\".\"id\" = @param0) OR (\"SYSTEM_BOOKS\".\"id\" = @param1))", StringComparison.Ordinal);
+            StringAssert.Contains(query, $"{READ_POLICY} AND ((\"SYSTEM_BOOKS\".\"ID\" = @param0) OR (\"SYSTEM_BOOKS\".\"ID\" = @param1))", StringComparison.Ordinal);
         }
 
         [TestMethod]
@@ -101,7 +101,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string query = new OracleQueryBuilder().Build((BaseSqlQueryStructure)structure);
 
             StringAssert.Contains(query, "SELECT 1 ", StringComparison.Ordinal);
-            StringAssert.Contains(query, "(\"SYSTEM_BOOKS\".\"id\" = @param0) AND (\"SYSTEM_BOOKS\".\"id\" = @param1)", StringComparison.Ordinal);
+            StringAssert.Contains(query, "(\"SYSTEM_BOOKS\".\"ID\" = @param0) AND (\"SYSTEM_BOOKS\".\"ID\" = @param1)", StringComparison.Ordinal);
             Assert.IsFalse(query.Contains(" OR ", StringComparison.Ordinal), query);
         }
 
@@ -142,7 +142,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         private static Predicate PkEquality(string columnName, string param, bool addParenthesis)
         {
             return new Predicate(
-                new PredicateOperand(new Column(SCHEMA_NAME, TABLE_NAME, columnName, "SYSTEM_BOOKS")),
+                new PredicateOperand(new Column(SCHEMA_NAME, TABLE_NAME, columnName.ToUpperInvariant(), "SYSTEM_BOOKS")),
                 PredicateOperation.Equal,
                 new PredicateOperand(param),
                 addParenthesis: addParenthesis);
@@ -152,20 +152,20 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             SourceDefinition sourceDefinition = new()
             {
-                PrimaryKey = new() { "id" }
+                PrimaryKey = new() { "ID" }
             };
-            sourceDefinition.Columns.Add("id", new ColumnDefinition
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
             });
-            sourceDefinition.Columns.Add("title", new ColumnDefinition
+            sourceDefinition.Columns.Add("TITLE", new ColumnDefinition
             {
                 SystemType = typeof(string),
                 DbType = DbType.String,
                 IsNullable = true
             });
-            sourceDefinition.Columns.Add("publisher_id", new ColumnDefinition
+            sourceDefinition.Columns.Add("PUBLISHER_ID", new ColumnDefinition
             {
                 SystemType = typeof(int),
                 DbType = DbType.Int32
