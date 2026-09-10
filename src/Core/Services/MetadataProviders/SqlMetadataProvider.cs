@@ -18,6 +18,7 @@ using Azure.DataApiBuilder.Core.Parsers;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Resolvers.Factories;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder;
 using HotChocolate.Language;
 using Microsoft.Extensions.Logging;
 using static Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLNaming;
@@ -89,7 +90,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Maps an entity name to a DatabaseObject.
         /// </summary>
         public virtual Dictionary<string, DatabaseObject> EntityToDatabaseObject { get; set; } =
-            new(StringComparer.InvariantCulture);
+            new(StringComparer.InvariantCultureIgnoreCase);
 
         protected readonly ILogger<ISqlMetadataProvider> _logger;
 
@@ -324,7 +325,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
             }
 
-            if (GetDatabaseType() == DatabaseType.MSSQL)
+            // Autoentities are supported for MSSQL and Oracle; the provider's query builder supplies
+            // the table-discovery query (IQueryBuilder.BuildGetAutoentitiesQuery). Other engines keep
+            // their default (NotSupportedException) behavior via the throwing virtual.
+            if (GetDatabaseType() is DatabaseType.MSSQL or DatabaseType.Oracle)
             {
                 await GenerateAutoentitiesIntoEntities(Autoentities);
             }
@@ -727,9 +731,158 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Creates entities for each table that is found, based on the autoentity configuration.
         /// This method is only called for tables in MsSql.
         /// </summary>
-        protected virtual Task GenerateAutoentitiesIntoEntities(IReadOnlyDictionary<string, Autoentity>? autoentities)
+        /// <summary>
+        /// Creates entities for each table that is found, based on the autoentity configuration.
+        /// The implementation is database-agnostic; the database-specific table-discovery query is
+        /// supplied by <see cref="IQueryBuilder.BuildGetAutoentitiesQuery"/> and executed through
+        /// <see cref="QueryAutoentitiesFromDatabaseAsync"/>.
+        /// </summary>
+        protected virtual async Task GenerateAutoentitiesIntoEntities(IReadOnlyDictionary<string, Autoentity>? autoentities)
         {
-            throw new NotSupportedException($"{GetType().Name} does not support autoentities yet.");
+            if (autoentities is null)
+            {
+                return;
+            }
+
+            RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
+            Dictionary<string, Entity> entities = new();
+            Dictionary<string, string> entityNameToRawEntity = new();
+            foreach ((string autoentityName, Autoentity autoentity) in autoentities)
+            {
+                int addedEntities = 0;
+                JsonArray? resultArray = await QueryAutoentitiesFromDatabaseAsync(autoentityName, autoentity);
+                if (resultArray is null)
+                {
+                    continue;
+                }
+
+                foreach (JsonObject? resultObject in resultArray)
+                {
+                    if (resultObject is null)
+                    {
+                        throw new DataApiBuilderException(
+                            message: $"Cannot create new entity from autoentities definition '{autoentityName}' due to an internal error.",
+                            statusCode: HttpStatusCode.InternalServerError,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    // Extract the entity name, schema, and database object name from the query result.
+                    // The SQL query returns these values with placeholders already replaced.
+                    string? entityName = resultObject["entity_name"]?.ToString();
+                    string? objectName = resultObject["object"]?.ToString();
+                    string? schemaName = resultObject["schema"]?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(entityName) || string.IsNullOrWhiteSpace(objectName) || string.IsNullOrWhiteSpace(schemaName))
+                    {
+                        _logger.LogError("Skipping autoentity generation: 'entity_name', 'object', or 'schema' is null or empty for autoentities definition '{autoentityName}'.", autoentityName);
+                        continue;
+                    }
+
+                    // Remove whitespace from the entity name and camelCase-join words so the result is
+                    // a valid identifier for REST paths and GraphQL singular/plural names.
+                    string rawEntityName = entityName;
+                    entityName = RemoveWhitespaceAddCamelCase(entityName);
+
+                    if (string.IsNullOrEmpty(entityName))
+                    {
+                        _logger.LogError(
+                            "Skipping autoentity generation: entity name '{rawEntityName}' for schema '{schemaName}' resolves to an empty string after whitespace removal for autoentities definition '{autoentityName}'.",
+                            rawEntityName, schemaName, autoentityName);
+                        continue;
+                    }
+
+                    if (rawEntityName != entityName)
+                    {
+                        _logger.LogDebug(
+                            "Entity name '{rawEntityName}' was normalized to '{entityName}' by removing whitespace.",
+                            rawEntityName, entityName);
+                    }
+
+                    // Create the entity using the template settings and permissions from the autoentity configuration.
+                    // Currently the source type is always Table for auto-generated entities from database objects.
+                    Entity generatedEntity = new(
+                        Source: new EntitySource(
+                            Object: $"{schemaName}.{objectName}",
+                            Type: EntitySourceType.Table,
+                            Parameters: null,
+                            KeyFields: null),
+                        GraphQL: autoentity.Template.GraphQL,
+                        Rest: autoentity.Template.Rest,
+                        Mcp: autoentity.Template.Mcp,
+                        Permissions: autoentity.Permissions,
+                        Cache: autoentity.Template.Cache,
+                        Health: autoentity.Template.Health,
+                        Fields: null,
+                        Relationships: null,
+                        Mappings: new(),
+                        IsAutoentity: true);
+
+                    // Add the generated entity to the linking entities dictionary.
+                    // This allows the entity to be processed later during metadata population.
+                    // A collision can occur when two database objects produce the same entity name after
+                    // whitespace removal (e.g. "Order Item" and "OrderItem" both yield "OrderItem").
+                    if (!entities.TryAdd(entityName, generatedEntity) || !runtimeConfig.TryAddGeneratedAutoentityNameToDataSourceName(entityName, autoentityName))
+                    {
+                        string checkEntityName = entityNameToRawEntity.ContainsKey(entityName) && !rawEntityName.Contains(" ")
+                            ? entityNameToRawEntity[entityName]
+                            : rawEntityName;
+                        string collisionMessage = checkEntityName.Contains(" ")
+                            ? $"Entity '{entityName}' normalized from '{checkEntityName}' from '{schemaName}' schema conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it."
+                            : $"Entity '{entityName}' conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it.";
+                        throw new DataApiBuilderException(
+                            message: collisionMessage,
+                            statusCode: HttpStatusCode.BadRequest,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    addedEntities++;
+                    entityNameToRawEntity.Add(entityName, rawEntityName);
+                }
+
+                if (addedEntities == 0)
+                {
+                    _logger.LogWarning("No new entities were generated from the autoentities definition '{autoentityName}'.", autoentityName);
+                }
+
+                // Track resolution count for validation.
+                runtimeConfig.AutoentityResolutionCounts[autoentityName] = addedEntities;
+            }
+
+            LogRestPathsForEntities(runtimeConfig, entities);
+            _runtimeConfigProvider.AddMergedEntitiesToConfig(entities);
+        }
+
+        /// <summary>
+        /// Queries the database for autoentities based on the provided autoentity definition.
+        /// The query text is supplied by <see cref="IQueryBuilder.BuildGetAutoentitiesQuery"/> so each
+        /// database engine can discover its tables with the include/exclude/name patterns applied.
+        /// </summary>
+        /// <param name="autoentityName">The name of the autoentity definition.</param>
+        /// <param name="autoentity">The autoentity definition containing patterns for inclusion, exclusion, and name.</param>
+        /// <returns>A JsonArray containing the queried autoentities, or an empty array if none are found.</returns>
+        protected virtual async Task<JsonArray?> QueryAutoentitiesFromDatabaseAsync(string autoentityName, Autoentity autoentity)
+        {
+            string include = string.Join(",", autoentity.Patterns.Include);
+            string exclude = string.Join(",", autoentity.Patterns.Exclude);
+            string namePattern = autoentity.Patterns.Name;
+            string getAutoentitiesQuery = SqlQueryBuilder.BuildGetAutoentitiesQuery();
+            Dictionary<string, DbConnectionParam> parameters = new()
+            {
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}include_pattern", new(include, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}exclude_pattern", new(exclude, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}name_pattern", new(namePattern, DbType.String) }
+            };
+
+            _logger.LogDebug("Query for autoentities is being executed with the following parameters.");
+            _logger.LogDebug("The autoentities definition '{autoentityName}' include pattern: {include}", autoentityName, include);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' exclude pattern: {exclude}", autoentityName, exclude);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' name pattern: {namePattern}", autoentityName, namePattern);
+
+            return await QueryExecutor.ExecuteQueryAsync(
+                sqltext: getAutoentitiesQuery,
+                parameters: parameters,
+                dataReaderHandler: QueryExecutor.GetJsonArrayAsync,
+                dataSourceName: _dataSourceName);
         }
 
         /// <summary>
@@ -789,40 +942,59 @@ namespace Azure.DataApiBuilder.Core.Services
                     // Reuse the same Database object for multiple entities if they share the same source.
                     if (!sourceObjects.TryGetValue(entity.Source.Object, out DatabaseObject? sourceObject))
                     {
-                        // parse source name into a tuple of (schemaName, databaseObjectName)
-                        (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(entity.Source.Object)!;
-
                         // if specified as stored procedure in config,
                         // initialize DatabaseObject as DatabaseStoredProcedure,
                         // else with DatabaseTable (for tables) / DatabaseView (for views).
 
                         if (sourceType is EntitySourceType.StoredProcedure)
                         {
+                            // Oracle stored-procedure entities may name a standalone subprogram
+                            // ("schema.subprogram") or a subprogram inside a package
+                            // ("schema.package.subprogram"). The generic 2-token parser rejects 3
+                            // tokens, so for Oracle we split the package qualifier out of the source
+                            // BEFORE the generic parse and record it on the database object.
+                            string subprogramSource = entity.Source.Object!;
+                            string? packageName = null;
+                            if (_databaseType is DatabaseType.Oracle)
+                            {
+                                (packageName, subprogramSource) = SplitOraclePackageQualifier(entity.Source.Object!);
+                            }
+
+                            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(subprogramSource)!;
+
                             sourceObject = new DatabaseStoredProcedure(schemaName, dbObjectName)
                             {
                                 SourceType = sourceType,
-                                StoredProcedureDefinition = new()
-                            };
-                        }
-                        else if (sourceType is EntitySourceType.Table)
-                        {
-                            sourceObject = new DatabaseTable()
-                            {
-                                SchemaName = schemaName,
-                                Name = dbObjectName,
-                                SourceType = sourceType,
-                                TableDefinition = new()
+                                StoredProcedureDefinition = new(),
+                                PackageName = packageName
                             };
                         }
                         else
                         {
-                            sourceObject = new DatabaseView(schemaName, dbObjectName)
+                            // parse source name into a tuple of (schemaName, databaseObjectName). Oracle
+                            // packages are irrelevant here - this is a table or view path.
+                            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(entity.Source.Object!);
+
+                            if (sourceType is EntitySourceType.Table)
                             {
-                                SchemaName = schemaName,
-                                Name = dbObjectName,
-                                SourceType = sourceType,
-                                ViewDefinition = new()
-                            };
+                                sourceObject = new DatabaseTable()
+                                {
+                                    SchemaName = schemaName,
+                                    Name = dbObjectName,
+                                    SourceType = sourceType,
+                                    TableDefinition = new()
+                                };
+                            }
+                            else
+                            {
+                                sourceObject = new DatabaseView(schemaName, dbObjectName)
+                                {
+                                    SchemaName = schemaName,
+                                    Name = dbObjectName,
+                                    SourceType = sourceType,
+                                    ViewDefinition = new()
+                                };
+                            }
                         }
 
                         sourceObjects.Add(entity.Source.Object, sourceObject);
@@ -1051,7 +1223,26 @@ namespace Azure.DataApiBuilder.Core.Services
             string linkingObject,
             Dictionary<string, DatabaseObject> sourceObjects)
         {
-            return;
+            if (!_runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled())
+            {
+                return;
+            }
+
+            string linkingEntityName = GraphQLUtils.GenerateLinkingEntityName(entityName, targetEntityName);
+
+            // Linking entities stay off REST/GraphQL endpoints. Schema generation still builds
+            // directional linking object types from this metadata when multiple create is enabled.
+            Entity linkingEntity = new(
+                Source: new EntitySource(Type: EntitySourceType.Table, Object: linkingObject, Parameters: null, KeyFields: null),
+                Fields: null,
+                Rest: new(Array.Empty<SupportedHttpVerb>(), Enabled: false),
+                GraphQL: new(Singular: linkingEntityName, Plural: linkingEntityName, Enabled: false),
+                Permissions: Array.Empty<EntityPermission>(),
+                Relationships: null,
+                Mappings: new(),
+                IsLinkingEntity: true);
+            _linkingEntities.TryAdd(linkingEntityName, linkingEntity);
+            PopulateDatabaseObjectForEntity(linkingEntity, linkingEntityName, sourceObjects);
         }
 
         /// <summary>
@@ -1130,6 +1321,106 @@ namespace Azure.DataApiBuilder.Core.Services
                     .Add(targetEntityName,
                         new List<ForeignKeyDefinition>() { foreignKeyDefinition });
             }
+        }
+
+        /// <summary>
+        /// For Oracle stored-procedure entities, splits a package-qualified source string of the
+        /// form <c>schema.package.subprogram</c> into its package name and the <c>schema.subprogram</c>
+        /// remainder that <see cref="ParseSchemaAndDbTableName"/> can handle. Sources that are NOT
+        /// package-qualified (standalone subprograms <c>schema.subprogram</c>, or a bare
+        /// <c>subprogram</c>) are returned unchanged with a null package name. This is Oracle-only;
+        /// the generic shared parser used elsewhere still accepts at most 2 dot-separated tokens.
+        /// </summary>
+        /// <param name="source">The raw <c>source.object</c> value from the runtime config.</param>
+        /// <returns>A tuple of (packageName, subprogramSource).</returns>
+        internal static (string? packageName, string subprogramSource) SplitOraclePackageQualifier(string source)
+        {
+            if (string.IsNullOrEmpty(source))
+            {
+                return (null, source);
+            }
+
+            // Count top-level '.' separators, honoring bracket-escaped identifiers ([a.b]) so a
+            // package/object name that itself contains a dot is not mis-split.
+            int firstDot = -1;
+            int secondDot = -1;
+            bool inBracket = false;
+            for (int i = 0; i < source.Length; i++)
+            {
+                char c = source[i];
+                if (c == '[')
+                {
+                    inBracket = true;
+                }
+                else if (c == ']')
+                {
+                    inBracket = false;
+                }
+                else if (c == '.' && !inBracket)
+                {
+                    if (firstDot == -1)
+                    {
+                        firstDot = i;
+                    }
+                    else if (secondDot == -1)
+                    {
+                        secondDot = i;
+                        break;
+                    }
+                }
+            }
+
+            // A package-qualified Oracle subprogram has exactly three parts
+            // (schema.package.subprogram). A three-token source is the only case we consume here;
+            // anything else (0-2 tokens) is left to the 2-token shared parser.
+            if (secondDot == -1)
+            {
+                return (null, source);
+            }
+
+            // Ensure there is no FOURTH top-level token, which would be an invalid source.
+            bool hasFourthToken = false;
+            bool nestedBracket = false;
+            for (int i = secondDot + 1; i < source.Length; i++)
+            {
+                char c = source[i];
+                if (c == '[')
+                {
+                    nestedBracket = true;
+                }
+                else if (c == ']')
+                {
+                    nestedBracket = false;
+                }
+                else if (c == '.' && !nestedBracket)
+                {
+                    hasFourthToken = true;
+                    break;
+                }
+            }
+
+            if (hasFourthToken)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Invalid Oracle stored procedure source: \"{source}\". Expected " +
+                             "\"schema.subprogram\" (standalone) or \"schema.package.subprogram\" (packaged).",
+                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
+            // Bracket-escaped identifiers are "[quoted]"; unescape the package part only (the
+            // remainder is handed to the shared 2-token parser which applies its own unescaping).
+            string packagePart = source[(firstDot + 1)..secondDot].Replace("[[", "[").Replace("]]", "]");
+            if (packagePart.StartsWith('[') && packagePart.EndsWith(']') && packagePart.Length >= 2)
+            {
+                packagePart = packagePart[1..^1];
+            }
+
+            // Reconstruct the schema-qualified subprogram remainder (schema + "." + subprogram) so
+            // the shared 2-token parser still receives the parts it expects. Dropping the schema here
+            // would silently resolve the subprogram against the wrong (default) schema.
+            string subprogramPart = source[..firstDot] + "." + source[(secondDot + 1)..];
+            return (packagePart, subprogramPart);
         }
 
         /// <summary>
@@ -1232,12 +1523,13 @@ namespace Azure.DataApiBuilder.Core.Services
                         GetDatabaseObjectName(entityName),
                         GetStoredProcedureDefinition(entityName));
 
-                    if (GetDatabaseType() == DatabaseType.MSSQL || GetDatabaseType() == DatabaseType.DWSQL)
+                    if (GetDatabaseType() == DatabaseType.MSSQL || GetDatabaseType() == DatabaseType.DWSQL || GetDatabaseType() == DatabaseType.Oracle)
                     {
                         await PopulateResultSetDefinitionsForStoredProcedureAsync(
                             GetSchemaName(entityName),
                             GetDatabaseObjectName(entityName),
-                            GetStoredProcedureDefinition(entityName));
+                            GetStoredProcedureDefinition(entityName),
+                            entityName);
                     }
                 }
                 else if (entitySourceType is EntitySourceType.Table)
@@ -1329,10 +1621,11 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Queries DB to get the result fields name and type to
         /// populate the result set definition for entities specified as stored procedures
         /// </summary>
-        private async Task PopulateResultSetDefinitionsForStoredProcedureAsync(
+        protected virtual async Task PopulateResultSetDefinitionsForStoredProcedureAsync(
             string schemaName,
             string storedProcedureName,
-            SourceDefinition sourceDefinition)
+            SourceDefinition sourceDefinition,
+            string entityName)
         {
             StoredProcedureDefinition storedProcedureDefinition = (StoredProcedureDefinition)sourceDefinition;
             string dbStoredProcedureName = $"{schemaName}.{storedProcedureName}";
@@ -1354,9 +1647,9 @@ namespace Azure.DataApiBuilder.Core.Services
             // one row in the result set.
             foreach (JsonElement element in sqlResult.RootElement.EnumerateArray())
             {
-                string resultFieldName = element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME).ToString();
-                Type resultFieldType = SqlToCLRType(element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME).ToString());
-                bool isResultFieldNullable = element.GetProperty(BaseSqlQueryBuilder.STOREDPROC_COLUMN_ISNULLABLE).GetBoolean();
+                string resultFieldName = GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_NAME).ToString();
+                Type resultFieldType = SqlToCLRType(GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_SYSTEMTYPENAME).ToString());
+                bool isResultFieldNullable = ConvertJsonElementToBoolean(GetPropertyByCaseInsensitiveName(element, BaseSqlQueryBuilder.STOREDPROC_COLUMN_ISNULLABLE));
 
                 // Validate that the stored procedure returns columns with proper names
                 // This commonly occurs when using aggregate functions or expressions without aliases
@@ -1373,6 +1666,25 @@ namespace Azure.DataApiBuilder.Core.Services
 
                 // Store the dictionary containing result set field with its type as Columns
                 storedProcedureDefinition.Columns.TryAdd(resultFieldName, new(resultFieldType) { IsNullable = isResultFieldNullable });
+            }
+
+            static JsonElement GetPropertyByCaseInsensitiveName(JsonElement element, string name)
+            {
+                return element.EnumerateObject()
+                    .First(property => string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                    .Value;
+            }
+
+            static bool ConvertJsonElementToBoolean(JsonElement element)
+            {
+                return element.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String when bool.TryParse(element.GetString(), out bool boolValue) => boolValue,
+                    JsonValueKind.Number when element.TryGetInt32(out int intValue) => intValue != 0,
+                    _ => throw new InvalidOperationException("Expected a boolean value."),
+                };
             }
         }
 
@@ -1425,13 +1737,17 @@ namespace Azure.DataApiBuilder.Core.Services
                 Entities.TryGetValue(entityName, out Entity? entity);
                 SourceDefinition sourceDefinition = GetSourceDefinition(entityName);
 
-                // 1) Prefer new-style fields (backing = f.Name, exposed = f.Alias ?? f.Name)
+                // 1) Prefer new-style fields (backing = physical column, exposed = f.Alias ?? authored f.Name).
+                // Config-authored field/mapping names may differ in case from the physical backing
+                // name (e.g. Oracle stores unquoted identifiers UPPERCASE while users author
+                // lowercase names), so each authored name is resolved to the physical spelling.
+                // The exposed name keeps the authored casing when no alias is present.
                 if (entity?.Fields is not null)
                 {
                     foreach (FieldMetadata f in entity.Fields)
                     {
-                        string backing = f.Name;
-                        string exposed = string.IsNullOrWhiteSpace(f.Alias) ? backing : f.Alias!;
+                        string backing = ResolvePhysicalColumnName(sourceDefinition, f.Name);
+                        string exposed = string.IsNullOrWhiteSpace(f.Alias) ? f.Name : f.Alias!;
                         backToExposed[backing] = exposed;
                         exposedToBack[exposed] = backing;
                     }
@@ -1442,7 +1758,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 {
                     foreach (KeyValuePair<string, string> kvp in entity.Mappings)
                     {
-                        string backing = kvp.Key;
+                        string backing = ResolvePhysicalColumnName(sourceDefinition, kvp.Key);
                         string exposed = kvp.Value;
 
                         // If fields already provided an alias for this backing column, keep fields precedence.
@@ -1464,7 +1780,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 {
                     if (!backToExposed.ContainsKey(backing))
                     {
-                        backToExposed[backing] = backing;
+                        backToExposed[backing] = GetExposedColumnName(backing);
                     }
 
                     string exposed = backToExposed[backing];
@@ -1482,6 +1798,30 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 HandleOrRecordException(e);
             }
+        }
+
+        /// <summary>
+        /// Resolves a config-authored column name (from entity fields or mappings) to the physical
+        /// backing column name stored on <see cref="SourceDefinition.Columns"/>. Config names are
+        /// matched case-insensitively because the physical casing is engine-specific (e.g. Oracle
+        /// stores unquoted identifiers UPPERCASE while configs commonly author lowercase names).
+        /// Returns the input unchanged when no column matches (e.g. computed/invalid names, which
+        /// validation surfaces elsewhere).
+        /// </summary>
+        /// <param name="sourceDefinition">The entity's source definition holding physical column keys.</param>
+        /// <param name="configColumnName">The column name as authored in the runtime config.</param>
+        /// <returns>The physical column name, or the input when no match is found.</returns>
+        private static string ResolvePhysicalColumnName(SourceDefinition sourceDefinition, string configColumnName)
+        {
+            foreach (string physicalName in sourceDefinition.Columns.Keys)
+            {
+                if (string.Equals(physicalName, configColumnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return physicalName;
+                }
+            }
+
+            return configColumnName;
         }
 
         /// <summary>
@@ -1508,9 +1848,15 @@ namespace Azure.DataApiBuilder.Core.Services
             SourceDefinition sourceDefinition,
             List<string> pkFields)
         {
-            sourceDefinition.PrimaryKey = [.. pkFields];
-
-            if (sourceDefinition.PrimaryKey.Count == 0)
+            // The primary-key names are resolved to the physical column spelling AFTER the column
+            // metadata is populated below (the Columns keys). The pkFields can come from the
+            // runtime config (entity.Fields or key-fields) where the authored casing may differ
+            // from the driver-reported physical column name (e.g. Oracle stores unquoted
+            // identifiers UPPERCASE while configs author lowercase key-fields), or from the
+            // driver's constraint metadata (already physical). Failing to resolve the casing
+            // leaves sourceDefinition.PrimaryKey inconsistent with the Columns keys, which breaks
+            // GraphQL @primaryKey directive generation and REST by-PK routes.
+            if (pkFields.Count == 0)
             {
                 throw new DataApiBuilderException(
                        message: $"Primary key not configured on the given database object {tableName}",
@@ -1519,7 +1865,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             Entities.TryGetValue(entityName, out Entity? entity);
-            if (GetDatabaseType() is DatabaseType.MSSQL && entity is not null && entity.Source.Type is EntitySourceType.Table)
+            if ((GetDatabaseType() is DatabaseType.MSSQL || GetDatabaseType() is DatabaseType.Oracle) && entity is not null && entity.Source.Type is EntitySourceType.Table)
             {
                 await PopulateTriggerMetadataForTable(entityName, schemaName, tableName, sourceDefinition);
             }
@@ -1530,7 +1876,7 @@ namespace Azure.DataApiBuilder.Core.Services
             RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
             foreach (DataRow columnInfoFromAdapter in schemaTable.Rows)
             {
-                string columnName = columnInfoFromAdapter["ColumnName"].ToString()!;
+                string columnName = GetPhysicalDatabaseColumnName(columnInfoFromAdapter["ColumnName"].ToString()!);
 
                 if (runtimeConfig.IsGraphQLEnabled
                     && entity is not null
@@ -1543,6 +1889,12 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
 
                 Type systemType = (Type)columnInfoFromAdapter["DataType"];
+
+                // Allow a provider to refine the driver-reported system type. Oracle, for example,
+                // surfaces RAW/BLOB columns as System.String (hex-encoded) even though DAB's
+                // REST/GraphQL contract treats byte columns as byte[] (base64-serialized), so the
+                // Oracle provider overrides this hook to return typeof(byte[]) for RAW/BLOB columns.
+                systemType = GetSystemTypeFromSchemaTable(columnInfoFromAdapter, systemType);
 
                 // Detect array types: concrete array types (e.g., int[]) have IsArray=true,
                 // while Npgsql reports abstract System.Array for PostgreSQL array columns.
@@ -1569,6 +1921,13 @@ namespace Azure.DataApiBuilder.Core.Services
                 sourceDefinition.Columns.TryAdd(columnName, column);
             }
 
+            // Resolve the primary-key names to the exact physical spelling of the column metadata
+            // keys now that the Columns dictionary is populated. A case-insensitive match keeps
+            // PrimaryKey consistent with Columns regardless of whether the pkFields originated
+            // from the runtime config (key-fields/entity.Fields) or the driver's constraint
+            // metadata (see the guard above PopulateTriggerMetadataForTable).
+            sourceDefinition.PrimaryKey = [.. pkFields.Select(pk => ResolvePhysicalColumnName(sourceDefinition, pk))];
+
             DataTable columnsInTable = await GetColumnsAsync(schemaName, tableName);
 
             PopulateColumnDefinitionWithHasDefaultAndDbType(
@@ -1581,6 +1940,19 @@ namespace Azure.DataApiBuilder.Core.Services
                 string schemaOrDatabaseName = GetDatabaseType() is DatabaseType.MySQL ? GetDatabaseName() : schemaName;
                 await PopulateColumnDefinitionsWithReadOnlyFlag(tableName, schemaOrDatabaseName, sourceDefinition);
             }
+        }
+
+        /// <summary>
+        /// Returns the schema/database name to bind when querying read-only (virtual/computed)
+        /// columns. Providers whose catalog stores identifiers in a specific casing (e.g. Oracle
+        /// stores unquoted identifiers UPPERCASE) override this so the bind matches regardless of
+        /// the casing authored in the config source. The default returns the name unchanged.
+        /// </summary>
+        /// <param name="schemaOrDatabaseName">The schema (or database for MySql) name of the table.</param>
+        /// <returns>The name to bind for the read-only column query.</returns>
+        protected virtual string GetSchemaOrDatabaseNameForReadOnlyColumnQuery(string schemaOrDatabaseName)
+        {
+            return schemaOrDatabaseName;
         }
 
         /// <summary>
@@ -1598,7 +1970,7 @@ namespace Azure.DataApiBuilder.Core.Services
             string queryToGetReadOnlyColumns = SqlQueryBuilder.BuildQueryToGetReadOnlyColumns(schemaOrDatabaseParamName, tableParamName);
             Dictionary<string, DbConnectionParam> parameters = new()
             {
-                { schemaOrDatabaseParamName, new(schemaOrDatabaseName, DbType.String) },
+                { schemaOrDatabaseParamName, new(GetSchemaOrDatabaseNameForReadOnlyColumnQuery(schemaOrDatabaseName), DbType.String) },
                 { tableParamName, new(quotedTableName, DbType.String) }
             };
 
@@ -1641,21 +2013,26 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 if (entity.GraphQL is null || (entity.GraphQL.Enabled))
                 {
-                    if (entity.Mappings is not null
-                       && entity.Mappings.TryGetValue(databaseColumnName, out string? fieldAlias)
-                       && !string.IsNullOrWhiteSpace(fieldAlias))
+                    if (entity.Mappings is not null)
                     {
-                        databaseColumnName = fieldAlias;
-                    }
-
-                    if (entity.Fields is not null)
-                    {
-                        FieldMetadata? fieldMeta = entity.Fields.FirstOrDefault(f => f.Name == databaseColumnName);
-                        if (fieldMeta != null && !string.IsNullOrWhiteSpace(fieldMeta.Alias))
+                        // Keys are authored in the config and may differ in case from the physical
+                        // column name, so resolve case-insensitively.
+                        string? fieldAlias = entity.Mappings
+                            .FirstOrDefault(m => m.Key.Equals(databaseColumnName, StringComparison.OrdinalIgnoreCase)).Value;
+                        if (!string.IsNullOrWhiteSpace(fieldAlias))
                         {
-                            databaseColumnName = fieldMeta.Alias;
+                            databaseColumnName = fieldAlias;
                         }
                     }
+
+                   if (entity.Fields is not null)
+                   {
+                       FieldMetadata? fieldMeta = entity.Fields.FirstOrDefault(f => f.Name.Equals(databaseColumnName, StringComparison.OrdinalIgnoreCase));
+                       if (fieldMeta != null && !string.IsNullOrWhiteSpace(fieldMeta.Alias))
+                       {
+                           databaseColumnName = fieldMeta.Alias;
+                       }
+                   }
 
                     return IsIntrospectionField(databaseColumnName);
                 }
@@ -1820,7 +2197,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <param name="schemaName">Name of schema the table belongs within.</param>
         /// <param name="tableName">Name of the table.</param>
         /// <returns>Properly formatted table name with schema prefix if it exists.</returns>
-        internal string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
+        internal virtual string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
         {
             IQueryBuilder queryBuilder = GetQueryBuilder();
             StringBuilder tablePrefix = new();
@@ -1835,6 +2212,49 @@ namespace Azure.DataApiBuilder.Core.Services
 
             string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
             return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName)}";
+        }
+
+        /// <summary>
+        /// Returns the physical column name as surfaced by the driver's schema table.
+        /// Databases store identifiers in different cases (e.g. Oracle stores unquoted
+        /// identifiers in uppercase; PostgreSQL stores them in lowercase). Overriding this
+        /// method lets a provider normalize the name (e.g. Oracle lowercases it) so that the
+        /// exposed REST/GraphQL field names are consistent with the other SQL providers.
+        /// </summary>
+        /// <param name="columnName">The column name reported by the database driver.</param>
+        /// <returns>The column name to use for the exposed schema.</returns>
+        protected virtual string GetPhysicalDatabaseColumnName(string columnName)
+        {
+            return columnName;
+        }
+
+        /// <summary>
+        /// Returns the exposed (REST/GraphQL) name to use for a backing column when no explicit
+        /// field or mapping alias is configured. Providers that surface physical identifiers in a
+        /// different case than their API field names (e.g. Oracle stores unquoted identifiers
+        /// uppercase but exposes lowercase field names to match the other SQL providers) override
+        /// this to translate the backing name to the desired exposed casing. The backing (physical)
+        /// name is still emitted verbatim in SQL.
+        /// </summary>
+        /// <param name="backingColumnName">The physical backing column name.</param>
+        /// <returns>The exposed field name for the column.</returns>
+        protected virtual string GetExposedColumnName(string backingColumnName)
+        {
+            return backingColumnName;
+        }
+
+        /// <summary>
+        /// Returns the System.Type a column should use, given the type the database driver reported
+        /// in the schema table. Providers may refine driver-reported types to match DAB's REST/GraphQL
+        /// contract (e.g. Oracle reports RAW/BLOB as hex-encoded System.String but DAB expects byte[],
+        /// base64-serialized). The default returns the driver-reported type unchanged.
+        /// </summary>
+        /// <param name="columnInfoFromAdapter">The schema-table row for the column.</param>
+        /// <param name="driverType">The type reported by the driver's schema table ("DataType").</param>
+        /// <returns>The System.Type to store on the column definition.</returns>
+        protected virtual Type GetSystemTypeFromSchemaTable(DataRow columnInfoFromAdapter, Type driverType)
+        {
+            return driverType;
         }
 
         /// <summary>

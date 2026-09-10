@@ -250,6 +250,7 @@ The standard queries that would be run on each Database Type are the following
 + MySQL: SELECT 1;
 + Cosmos DB: SELECT VALUE 1; (for SQL API)
 + MS SQL: SELECT 1;
++ Oracle: SELECT 1 FROM DUAL;
 
 
 **Here we add the tag `database` in the tags array to differentiate the datasource health check result from the entity health check result where `endpoint` is being added to Tags array.**

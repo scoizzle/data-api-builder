@@ -108,6 +108,22 @@ public class DatabaseStoredProcedure : DatabaseObject
 
     public DatabaseStoredProcedure() { }
     public StoredProcedureDefinition StoredProcedureDefinition { get; set; } = null!;
+
+    /// <summary>
+    /// For Oracle, an entity source may reference a subprogram that lives inside a package
+    /// (e.g. "schema.package.subprogram" in the config). When set, the object is invoked
+    /// as <c>schema.package.subprogram</c> rather than <c>schema.subprogram</c>. Null for
+    /// standalone procedures/functions and for all other database engines.
+    /// </summary>
+    public string? PackageName { get; set; }
+
+    /// <summary>
+    /// For Oracle, true when the underlying subprogram is a FUNCTION (standalone or packaged)
+    /// rather than a PROCEDURE. Functions must be invoked differently (assigned to a bind
+    /// variable or selected from DUAL) because Oracle does not allow calling them as a bare
+    /// statement inside a PL/SQL block.
+    /// </summary>
+    public bool IsFunction { get; set; }
 }
 
 public class StoredProcedureDefinition : SourceDefinition
@@ -116,7 +132,7 @@ public class StoredProcedureDefinition : SourceDefinition
     /// The list of input parameters
     /// Key: parameter name, Value: ParameterDefinition object
     /// </summary>
-    public Dictionary<string, ParameterDefinition> Parameters { get; set; } = new();
+    public Dictionary<string, ParameterDefinition> Parameters { get; set; } = new(StringComparer.InvariantCultureIgnoreCase);
 
     /// <inheritdoc/>
     public override DbType? GetDbTypeForParam(string paramName)
@@ -292,6 +308,14 @@ public class ColumnDefinition
     /// For example, typeof(int) for an int[] column.
     /// </summary>
     public Type? ElementSystemType { get; set; }
+
+    /// <summary>
+    /// True when the physical column is a CLOB/NCLOB (large-character) type. Providers use this to
+    /// select bind/output types that are not limited to 4000 bytes (e.g. Oracle maps such columns
+    /// to OracleDbType.Clob instead of OracleDbType.Varchar2 for RETURNING ... INTO binds).
+    /// </summary>
+    [JsonIgnore]
+    public bool IsClob { get; set; }
 
     public ColumnDefinition() { }
 

@@ -36,5 +36,5 @@ public class DbResultSetRow
     /// <summary>
     /// Represents a result set row in <c>ColumnName: Value</c> format, empty if no row was found.
     /// </summary>
-    public Dictionary<string, object?> Columns { get; private set; } = new();
+    public Dictionary<string, object?> Columns { get; private set; } = new(StringComparer.InvariantCultureIgnoreCase);
 }

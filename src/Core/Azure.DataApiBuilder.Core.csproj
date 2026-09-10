@@ -51,6 +51,7 @@
     <PackageReference Include="Newtonsoft.Json.Schema" />
     <PackageReference Include="Npgsql" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" />
     <PackageReference Include="Polly" />
     <PackageReference Include="Serilog.Sinks.File" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" />
