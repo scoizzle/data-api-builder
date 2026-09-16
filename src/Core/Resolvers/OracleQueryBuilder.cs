@@ -937,10 +937,10 @@ SELECT
 FROM candidate_tables a
 WHERE
     (NOT EXISTS (SELECT 1 FROM exclude_patterns)
-     OR NOT EXISTS (SELECT 1 FROM exclude_patterns WHERE a.full_name LIKE exclude_patterns.pattern ESCAPE '\'))
+     OR NOT EXISTS (SELECT 1 FROM exclude_patterns WHERE UPPER(a.full_name) LIKE UPPER(exclude_patterns.pattern) ESCAPE '\'))
     AND
     (NOT EXISTS (SELECT 1 FROM include_patterns)
-     OR EXISTS (SELECT 1 FROM include_patterns WHERE a.full_name LIKE include_patterns.pattern ESCAPE '\'))
+     OR EXISTS (SELECT 1 FROM include_patterns WHERE UPPER(a.full_name) LIKE UPPER(include_patterns.pattern) ESCAPE '\'))
 ORDER BY a.schema_name, a.object_name";
         }
 
