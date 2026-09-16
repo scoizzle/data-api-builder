@@ -532,7 +532,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     await conn.OpenAsync(cancellationToken);
                 }
 
-                DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                using DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
                 if (transaction is not null)
                 {
                     cmd.Transaction = transaction;
@@ -634,7 +634,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     conn.Open();
                 }
 
-                DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                using DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
                 if (transaction is not null)
                 {
                     cmd.Transaction = transaction;
@@ -1141,6 +1141,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 while (await ReadAsync(dbDataReader))
                 {
+                    if (dbDataReader.IsDBNull(0))
+                    {
+                        continue;
+                    }
+
                     jsonString.Append(dbDataReader.GetString(0));
                 }
             }
