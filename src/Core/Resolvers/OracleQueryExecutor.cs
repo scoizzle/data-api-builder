@@ -7,13 +7,11 @@ using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using Azure.Core;
-using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Authorization;
 using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
-using Azure.DataApiBuilder.Core.Resolvers.Factories;
 using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
@@ -402,7 +400,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // Oracle uses DBMS_SESSION.SET_CONTEXT to set application context values
             // Note: This requires creating an application context and a procedure to set values
             // In production, you'd create: CREATE CONTEXT dab_context USING dab_context_pkg;
-            foreach ((string claimType, string claimValue) in sessionParams)
+            foreach ((string _, string claimValue) in sessionParams)
             {
                 string paramName = $"{SESSION_PARAM_NAME}{counter.Next()}";
                 parameters.Add(paramName, new(claimValue));
