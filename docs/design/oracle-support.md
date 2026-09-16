@@ -54,6 +54,33 @@ This path is **GraphQL-only**. REST batch/array create does not share it (same a
 
 Oracle `RAW` values are serialized as base64. `BLOB` columns are typed as byte[] and null-guarded during base64 encoding; values larger than roughly 2000 bytes are not covered because `UTL_ENCODE.BASE64_ENCODE` accepts `RAW` and the implicit `BLOB`-to-`RAW` conversion is size-limited.
 
+### Synonyms
+
+Oracle resolves an **unqualified** name in this order: object in the current schema, then a **private synonym** owned by the current user, then a **public** synonym (`OWNER = 'PUBLIC'`). A **schema-qualified** name never uses a public synonym.
+
+DAB always schema-qualifies and quotes (`QuoteRelation` → `"USER"."OBJECT"`), so public synonyms would be skipped if the synonym name were emitted as-is. Catalog views (`ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, …) describe the **base** object, not the synonym.
+
+At startup, `OracleMetadataProvider` resolves each source (and FK pair table) to the local base object, then FillSchema and SQL use those physical names.
+
+Resolution (Oracle’s own order):
+
+1. Unqualified source (schema is the connected user, or `PUBLIC`): current-schema table/view/procedure, else private synonym, else public synonym (`OWNER = 'PUBLIC'`).
+2. Schema-qualified source other than the connected user / `PUBLIC`: object or private synonym in that schema only — no public fallback.
+3. Follow nested synonyms with a cycle/depth guard (max 10).
+4. If `DB_LINK` is set, fail startup (local objects only).
+5. Packaged stored procedures (`schema.package.sub`) are left unchanged; standalone subprogram synonyms are resolved.
+
+Autoentity discovery stays on `ALL_TABLES`. Synonym sources are opt-in via entity config.
+
+No change to `QuoteRelation` / shared SQL: after resolve, emit the base catalog names.
+
 ## Identifier casing
 
-Oracle stores unquoted identifiers in uppercase. DAB exposes Oracle column names using the normalized lower-case form used by its REST and GraphQL schemas, while generated SQL emits uppercase physical identifiers. Quoted, case-sensitive Oracle objects created with a different casing require explicit configuration mappings and are not covered by the default convention.
+Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every identifier, so SQL must use the **catalog spelling** (physical backing name). REST/GraphQL/OData names are a separate **exposed** layer.
+
+- Backing names on `SourceDefinition` (columns, primary key, FK column lists) are the catalog spelling: `ID`, `BOOK_ID`, or the exact spelling of a quoted identifier.
+- Exposed names default to lowercase (`id`, `book_id`) via `OracleMetadataProvider.GetExposedColumnName`, unless the entity config supplies a mapping or field alias.
+- Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject` (uppercase, quoted). DAB-generated aliases go through `QuoteTableAlias`. Quoted mixed-case *tables* are not covered yet.
+- Unquoted DDL such as `categoryName` is stored as `CATEGORYNAME` and exposed as `categoryname`. Mixed-case GraphQL/REST names require an explicit mapping (the Oracle test config maps `categoryName`, `AccountKey`, and similar columns used by the shared suite).
+
+Casing translation lives in `OracleMetadataProvider` and `OracleQueryBuilder`. Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle beyond the GraphQL schema converter's default-lowercase fallback for unmapped columns.
