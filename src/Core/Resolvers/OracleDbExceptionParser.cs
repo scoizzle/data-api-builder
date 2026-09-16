@@ -21,7 +21,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // here - they represent conflicts (the resource already exists / referential integrity)
             // and are mapped to HTTP 409 via ConflictExceptionCodes, matching MsSql's handling of
             // its duplicate-key (2627) and FK (547) errors. Only genuine client-input errors
-            // (bad literals, NULL into NOT NULL, value-too-large, privileges) are 400.
+            // (bad literals, NULL into NOT NULL, value-too-large) are 400.
+            // ORA-01031 (insufficient privileges) is authorization, not client input — mapped to 403.
             BadRequestExceptionCodes.UnionWith(new List<string>
             {
                 // NULL handling codes
@@ -45,7 +46,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 // Column and table related
                 "1430",     // ORA-01430: column is not in select list
-                "1031",     // ORA-01031: insufficient privileges
                 "1717",     // ORA-01717: invalid option for alter session
                 "2003",     // ORA-02003: invalid column specification
                 "2004",     // ORA-02004: invalid column specification
@@ -138,7 +138,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public override HttpStatusCode GetHttpStatusCodeForException(DbException e)
         {
             string errorCode = GetOracleErrorCode(e);
+            return MapStatusCode(errorCode);
+        }
 
+        /// <summary>
+        /// Maps an Oracle error number (without the ORA- prefix) to an HTTP status.
+        /// </summary>
+        internal HttpStatusCode MapStatusCode(string errorCode)
+        {
             if (string.IsNullOrEmpty(errorCode))
             {
                 return HttpStatusCode.InternalServerError;
@@ -147,6 +154,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (BadRequestExceptionCodes.Contains(errorCode))
             {
                 return HttpStatusCode.BadRequest;
+            }
+
+            if (errorCode == "1031")
+            {
+                return HttpStatusCode.Forbidden;
             }
 
             if (ConflictExceptionCodes.Contains(errorCode))
