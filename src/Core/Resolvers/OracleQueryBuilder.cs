@@ -174,15 +174,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // keeps the already-built object from being escaped as a string.
                 result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON RETURNING CLOB ORDER BY {orderAlias}), TO_CLOB(JSON_ARRAY())) ");
                 result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
-                result.Append($"SELECT JSON_OBJECT(*) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
+                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
                 result.Append(query);
                 result.Append($" ) ) {subqueryName}");
             }
             else
             {
-                // Oracle rejects RETURNING CLOB directly on the wildcard scalar form
-                // JSON_OBJECT(*) (ORA-00923), so wrap it in TO_CLOB instead.
-                result.Append($"SELECT TO_CLOB(JSON_OBJECT(*)) ");
+                // RETURNING CLOB must sit inside JSON_OBJECT(...) (outside the parens is ORA-00923)
+                // to lift the VARCHAR2 4000-byte cap. TO_CLOB(JSON_OBJECT(*)) does not.
+                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) ");
                 result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
                 result.Append(query);
                 result.Append($" ) {subqueryName}");
