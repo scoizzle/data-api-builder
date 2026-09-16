@@ -236,6 +236,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         }
                     }
                 }
+                else if (current == '"')
+                {
+                    // Copy a complete quoted identifier. Apostrophes inside a double-quoted
+                    // identifier (e.g. the exposed label "United State's Region") are not string
+                    // delimiters, so failing to skip them would make the scanner swallow following
+                    // '@paramN' tokens and leave them untranslated (ORA-00936 / ORA-01008).
+                    while (++i < sqltext.Length)
+                    {
+                        translated.Append(sqltext[i]);
+                        if (sqltext[i] == '"')
+                        {
+                            if (i + 1 < sqltext.Length && sqltext[i + 1] == '"')
+                            {
+                                translated.Append(sqltext[++i]);
+                                continue;
+                            }
+
+                            break;
+                        }
+                    }
+                }
                 else if (current == '@'
                     && sqltext.AsSpan(i).StartsWith("@param", StringComparison.Ordinal)
                     && i + "@param".Length < sqltext.Length
