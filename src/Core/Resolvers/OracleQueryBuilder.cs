@@ -36,6 +36,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // Literals cannot appear in RETURNING (upsert indicators go on the REF CURSOR SELECT).
         internal const string RESULT_CURSOR_PARAM_NAME = "dab_result";
 
+        // Exposed column labels are not guaranteed to be valid Oracle bind-variable names: a column
+        // mapping can expose a label containing spaces, punctuation, or non-ASCII characters
+        // (e.g. "Scientific Name", "United State's Region", "始計"). Oracle parses ':Scientific
+        // Name' as bind ':Scientific' followed by identifier 'Name', which corrupts the PL/SQL block.
+        // RETURNING ... INTO therefore uses generated safe bind names; the REF CURSOR still aliases
+        // them back to the exposed labels so the mutation response is unchanged.
+        private const string OUTPUT_BIND_PREFIX = "dab_out_";
+
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
         /// <inheritdoc />
@@ -242,10 +250,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             // RETURNING rejects aliases (ORA-00925); emit bare physical column names.
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
-            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
-            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
-            string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, sourceDefinition);
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, sourceDefinition);
 
             bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
             if (hasCreatePolicy)
@@ -278,15 +284,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             // The RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
             // exact physical casing preserved from Oracle metadata.
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
-            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
             string updateQuery = $"UPDATE {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
                     $"SET {Build(structure.UpdateOperations, ", ")} " +
                     $"WHERE {predicates} " +
                     $"RETURNING {returningColumns} INTO {bindNames}";
-
-            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
-            string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
 
             // When the UPDATE matches no row (record absent, or the update database policy blocks it),
             // RETURNING INTO never fires and the output binds stay NULL. Opening the cursor
@@ -417,17 +420,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
             // RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
             // exact physical casing preserved from Oracle metadata.
-            string returningColumns = string.Join(", ", structure.OutputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
-            string bindNames = string.Join(", ", structure.OutputColumns.Select(c => ":" + c.Label));
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
             string updateQuery = $"UPDATE {tableName} " +
                 $"SET {Build(structure.UpdateOperations, ", ")} " +
                 $"WHERE {updatePredicates} " +
                 $"RETURNING {returningColumns} " +
                 $"INTO {bindNames}";
-
-            // The REF CURSOR SELECT reads the output binds (populated by whichever branch ran).
-            string selectFromBinds = string.Join(", ", structure.OutputColumns.Select(c => $":{c.Label} AS {QuoteIdentifier(c.Label)}"));
-            string outputTypeHints = BuildOutputTypeHints(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
 
             if (structure.IsFallbackToUpdate)
             {
@@ -525,18 +524,42 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Builds the four correlated fragments a RETURNING ... INTO DML block needs:
+        /// the bare physical RETURNING column list, the generated safe INTO bind names,
+        /// the REF CURSOR SELECT that aliases each bind back to its exposed label, and the
+        /// type-hint comment consumed by <see cref="OracleQueryExecutor"/>.
+        /// Exposed labels are used only as cursor aliases - never as bind names, because they
+        /// may contain characters Oracle rejects in a bind variable.
+        /// </summary>
+        private (string ReturningColumns, string BindNames, string SelectFromBinds, string OutputTypeHints)
+            BuildOutputBindings(
+                IReadOnlyList<LabelledColumn> outputColumns,
+                SourceDefinition sourceDefinition)
+        {
+            // RETURNING rejects aliases (ORA-00925); emit bare physical column names.
+            string returningColumns = string.Join(", ", outputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
+            string bindNames = string.Join(", ", outputColumns.Select((_, index) => $":{OUTPUT_BIND_PREFIX}{index}"));
+            string selectFromBinds = string.Join(", ", outputColumns.Select(
+                (column, index) => $":{OUTPUT_BIND_PREFIX}{index} AS {QuoteIdentifier(column.Label)}"));
+            string outputTypeHints = BuildOutputTypeHints(outputColumns, sourceDefinition);
+
+            return (returningColumns, bindNames, selectFromBinds, outputTypeHints);
+        }
+
+        /// <summary>
         /// Prefixes the PL/SQL block with a comment listing RETURNING bind types so the
-        /// executor can register output parameters with the correct OracleDbType.
+        /// executor can register output parameters with the correct OracleDbType. The keys are
+        /// the generated safe bind names emitted by <see cref="BuildOutputBindings"/>.
         /// </summary>
         private static string BuildOutputTypeHints(
-            IEnumerable<LabelledColumn> outputColumns,
+            IReadOnlyList<LabelledColumn> outputColumns,
             SourceDefinition sourceDefinition)
         {
             IEnumerable<string> hints = outputColumns
-                .Select(column =>
+                .Select((column, index) =>
                 {
                     sourceDefinition.Columns.TryGetValue(column.ColumnName, out ColumnDefinition? definition);
-                    return $"{column.Label}={GetOracleOutputType(definition)}";
+                    return $"{OUTPUT_BIND_PREFIX}{index}={GetOracleOutputType(definition)}";
                 });
 
             return $"/* DAB_ORACLE_OUTPUT_TYPES:{string.Join(",", hints)} */ ";

@@ -159,10 +159,36 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle view insert behavior differs from SQL Server.")]
-        public override async Task InsertIntoSimpleView(string dbQuery)
+        public async Task InsertIntoSimpleView()
         {
-            await Task.CompletedTask;
+            // Oracle views do not expose the underlying identity attribute, so the generated
+            // GraphQL input type marks books_view_all.id as required. Supply the PK explicitly
+            // (Oracle still auto-generates when REST omits it; GraphQL requires the field).
+            string graphQLMutationName = "createbooks_view_all";
+            string graphQLMutation = @"
+                mutation {
+                    createbooks_view_all(item: { id: 5001, title: ""Book View"", publisher_id: 1234 }) {
+                        id
+                        title
+                    }
+                }
+            ";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, graphQLMutationName, isAuthenticated: true);
+
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title
+                ) AS data
+                FROM (
+                    SELECT id, title FROM books_view_all
+                    WHERE id = 5001 AND title = 'Book View' AND publisher_id = 1234
+                    ORDER BY id
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
         }
 
         [TestMethod]
@@ -180,31 +206,178 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle trigger behavior differs from SQL Server for non-auto-gen PK scenarios.")]
-        public override async Task InsertMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
+        public async Task NestedQueryingInMutation()
         {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE table0.id,
+                    'title' VALUE table0.title,
+                    'publishers' VALUE table1_subq.data
+                ) AS data
+                FROM books table0
+                LEFT OUTER JOIN LATERAL (
+                    SELECT JSON_OBJECT('name' VALUE table1.name) AS data
+                    FROM publishers table1
+                    WHERE table1.id = table0.publisher_id
+                    FETCH FIRST 1 ROWS ONLY
+                ) table1_subq ON (1=1)
+                WHERE table0.title = 'My New Book' AND table0.publisher_id = 1234
+                FETCH FIRST 1 ROWS ONLY";
+            await NestedQueryingInMutation(oracleQuery);
         }
 
         [TestMethod]
-        [Ignore("Oracle trigger behavior differs from SQL Server for auto-gen PK scenarios.")]
-        public override async Task InsertMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
+        public async Task TestAliasSupportForGraphQLMutationQueryFields()
         {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('book_id' VALUE id, 'book_title' VALUE title) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE title = 'My New Book' AND publisher_id = 1234
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestAliasSupportForGraphQLMutationQueryFields(oracleQuery);
         }
 
         [TestMethod]
-        [Ignore("Oracle trigger behavior differs from SQL Server for non-auto-gen PK scenarios.")]
-        public override async Task UpdateMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
+        public async Task InsertMutationWithVariables()
         {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('id' VALUE id, 'title' VALUE title) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE title = 'My New Book' AND publisher_id = 1234
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "createbook";
+            string graphQLMutation = @"
+                mutation($title: String!, $publisher_id: Decimal!) {
+                    createbook(item: { title: $title, publisher_id: $publisher_id }) {
+                        id
+                        title
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "title", "My New Book" }, { "publisher_id", 1234 } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
         }
 
         [TestMethod]
-        [Ignore("Oracle trigger behavior differs from SQL Server for auto-gen PK scenarios.")]
-        public override async Task UpdateMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
+        public async Task InsertMutationWithVariablesAndMappings()
         {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 2
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "createGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!, $col2Value: String) {
+                    createGQLmappings(item: { column1: $id, column2: $col2Value }) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 2 }, { "col2Value", "My New Value" } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task UpdateMutationWithVariablesAndMappings()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 3 AND ""__column2"" = 'Updated Value of Mapped Column'
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "updateGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!, $col2Value: String) {
+                    updateGQLmappings(column1: $id, item: { column2: $col2Value }) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 3 }, { "col2Value", "Updated Value of Mapped Column" } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task InsertMutationFailingDatabasePolicy()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM publishers WHERE name = 'New publisher'";
+            await InsertMutationFailingDatabasePolicy(
+                dbQuery: oracleQuery,
+                errorMessage: "Could not insert row with given values for entity: Publisher",
+                roleName: "database_policy_tester",
+                graphQLMutationName: "createPublisher",
+                graphQLMutationPayload: @"
+                mutation {
+                    createPublisher(item: { name: ""New publisher"" }) {
+                        id
+                        name
+                    }
+                }");
+        }
+
+        [TestMethod]
+        public async Task InsertMutationWithDatabasePolicy()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM publishers WHERE name = 'Not New publisher'";
+            await InsertMutationWithDatabasePolicy(
+                dbQuery: oracleQuery,
+                roleName: "database_policy_tester",
+                graphQLMutationName: "createPublisher",
+                graphQLMutationPayload: @"
+                mutation {
+                    createPublisher(item: { name: ""Not New publisher"" }) {
+                        id
+                        name
+                    }
+                }");
+        }
+
+        [TestMethod]
+        public async Task InsertWithInvalidForeignKey()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM books WHERE title = 'My New Book' AND publisher_id = -1";
+            await InsertWithInvalidForeignKey(oracleQuery, "ORA-02291");
+        }
+
+        [TestMethod]
+        public async Task UpdateWithInvalidForeignKey()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM books WHERE id = 1 AND publisher_id = -1";
+            await UpdateWithInvalidForeignKey(oracleQuery, "ORA-02291");
         }
 
         #endregion
@@ -212,94 +385,59 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         #region Negative Tests
 
         [TestMethod]
-        [Ignore("Oracle FK constraint prevents delete without ON DELETE CASCADE (schema needs re-init).")]
         public async Task DeleteMutation()
         {
-            await Task.CompletedTask;
+            string oracleQueryForResult = @"
+                SELECT JSON_OBJECT('title' VALUE title, 'publisher_id' VALUE publisher_id) AS data
+                FROM (SELECT title, publisher_id FROM books WHERE id = 1 FETCH FIRST 1 ROWS ONLY)";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data FROM books WHERE id = 1";
+            await DeleteMutation(oracleQueryForResult, oracleQueryToVerifyDeletion);
         }
 
         [TestMethod]
-        [Ignore("Oracle FK constraint prevents delete without ON DELETE CASCADE (schema needs re-init).")]
         public async Task DeleteFromSimpleView()
         {
-            await Task.CompletedTask;
+            string oracleQueryForResult = @"
+                SELECT JSON_OBJECT('id' VALUE id, 'title' VALUE title) AS data
+                FROM (SELECT id, title FROM books_view_all WHERE id = 1 FETCH FIRST 1 ROWS ONLY)";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data FROM books_view_all WHERE id = 1";
+            await DeleteFromSimpleView(oracleQueryForResult, oracleQueryToVerifyDeletion);
         }
 
         [TestMethod]
-        [Ignore("Oracle FK constraint prevents delete without ON DELETE CASCADE (schema needs re-init).")]
-        public override async Task DeleteMutationWithOnlyTypename()
+        public async Task DeleteMutationWithVariablesAndMappings()
         {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle FK constraint prevents delete without ON DELETE CASCADE (schema needs re-init).")]
-        public override async Task TestParallelDeleteMutations()
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle returns aliased field names from RETURNING clause instead of GraphQL aliases.")]
-        public async Task TestAliasSupportForGraphQLMutationQueryFields()
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle includes nested relationship data in mutation response.")]
-        public async Task NestedQueryingInMutation()
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle type mapping mismatch: is_wholesale_price is Short but expects boolean.")]
-        public async Task MultipleCreateMutationWithOneToOneRelationship()
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle maps integer columns to Decimal in GraphQL, causing variable type mismatches.")]
-        public override async Task InsertMutationWithVariables(string dbQuery)
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle maps integer columns to Decimal in GraphQL, causing variable type mismatches.")]
-        public override async Task InsertMutationWithVariablesAndMappings(string dbQuery)
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle maps integer columns to Decimal in GraphQL, causing variable type mismatches.")]
-        public override async Task UpdateMutationWithVariablesAndMappings(string dbQuery)
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle maps integer columns to Decimal in GraphQL, causing variable type mismatches.")]
-        public override async Task DeleteMutationWithVariablesAndMappings(string dbQuery, string dbQueryToVerifyDeletion)
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle non-GraphQL type table mutation behavior differs from SQL Server.")]
-        public override async Task InsertMutationForNonGraphQLTypeTable(string dbQuery)
-        {
-            await Task.CompletedTask;
-        }
-
-        [TestMethod]
-        [Ignore("Oracle complex view insert behavior differs from SQL Server.")]
-        public override async Task InsertIntoInsertableComplexView(string dbQuery)
-        {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 4
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM GQLmappings WHERE ""__column1"" = 4";
+            string graphQLMutationName = "deleteGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!) {
+                    deleteGQLmappings(column1: $id) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 4 } });
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+            string dbResponse = await GetDatabaseResultAsync(oracleQueryToVerifyDeletion);
+            using JsonDocument result = JsonDocument.Parse(dbResponse);
+            Assert.AreEqual(0, result.RootElement.GetProperty("count").GetInt64());
         }
 
         [TestMethod]
