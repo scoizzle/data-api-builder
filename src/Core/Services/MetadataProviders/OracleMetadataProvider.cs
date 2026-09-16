@@ -1,15 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System;
-using System.Collections.Generic;
 using System.Data;
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
@@ -135,25 +131,178 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Oracle-specific table-name prefix formatting. Oracle stores unquoted identifiers in
-        /// uppercase, so the schema and table names are uppercased before quoting so the generated
-        /// identifier matches the physical object. The base implementation must NOT uppercase for
-        /// every provider - PostgreSQL and MySQL (case-sensitive identifiers) rely on the base
-        /// pass-through behavior.
+        /// Resolve config-authored sources (and FK pair tables) to the local base object
+        /// before FillSchema. Private synonyms in the current schema, then public synonyms
+        /// for unqualified sources. SQL and catalog lookups then use physical names.
+        /// </summary>
+        protected override async Task ResolveCatalogObjectNamesAsync()
+        {
+            Dictionary<(string Owner, string Name), string?> objectTypeCache = new();
+            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> synonymCache = new();
+
+            HashSet<DatabaseObject> seen = new(ReferenceEqualityComparer.Instance);
+            foreach (DatabaseObject databaseObject in EntityToDatabaseObject.Values)
+            {
+                await ResolveDatabaseObjectAsync(databaseObject, seen, objectTypeCache, synonymCache);
+            }
+        }
+
+        private async Task ResolveDatabaseObjectAsync(
+            DatabaseObject databaseObject,
+            HashSet<DatabaseObject> seen,
+            Dictionary<(string Owner, string Name), string?> objectTypeCache,
+            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> synonymCache)
+        {
+            if (!seen.Add(databaseObject))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(databaseObject.SchemaName)
+                || string.IsNullOrWhiteSpace(databaseObject.Name))
+            {
+                return;
+            }
+
+            if (databaseObject is DatabaseStoredProcedure storedProcedure
+                && !string.IsNullOrEmpty(storedProcedure.PackageName))
+            {
+                return;
+            }
+
+            bool allowPublicFallback =
+                databaseObject.SchemaName.Equals(OracleCatalogNameResolver.PublicOwner, StringComparison.OrdinalIgnoreCase)
+                || databaseObject.SchemaName.Equals(GetDefaultSchemaName(), StringComparison.OrdinalIgnoreCase);
+
+            (string resolvedSchema, string resolvedName) = await OracleCatalogNameResolver.ResolveAsync(
+                databaseObject.SchemaName,
+                databaseObject.Name,
+                allowPublicFallback,
+                (owner, name) => GetObjectTypeAsync(owner, name, objectTypeCache),
+                (owner, name) => GetSynonymAsync(owner, name, synonymCache));
+
+            string? resolvedType = await GetObjectTypeAsync(resolvedSchema, resolvedName, objectTypeCache);
+            if (resolvedType is not null)
+            {
+                bool isTableOrView = databaseObject.SourceType is EntitySourceType.Table or EntitySourceType.View;
+                if (isTableOrView && OracleCatalogNameResolver.IsSubprogramLike(resolvedType))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Oracle source {databaseObject.SchemaName}.{databaseObject.Name} resolved to {resolvedType}, which does not match the configured table/view source type.",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                }
+
+                if (databaseObject.SourceType is EntitySourceType.StoredProcedure
+                    && OracleCatalogNameResolver.IsTableLike(resolvedType))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Oracle source {databaseObject.SchemaName}.{databaseObject.Name} resolved to {resolvedType}, which does not match the configured stored-procedure source type.",
+                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                }
+            }
+
+            databaseObject.SchemaName = resolvedSchema;
+            databaseObject.Name = resolvedName;
+
+            if (databaseObject.SourceType is EntitySourceType.Table or EntitySourceType.View
+                && databaseObject.SourceDefinition is not null
+                && databaseObject.SourceDefinition.SourceEntityRelationshipMap.Count > 0)
+            {
+                foreach (RelationshipMetadata relationshipMetadata in databaseObject.SourceDefinition.SourceEntityRelationshipMap.Values)
+                {
+                    foreach (List<ForeignKeyDefinition> foreignKeys in relationshipMetadata.TargetEntityToFkDefinitionMap.Values)
+                    {
+                        foreach (ForeignKeyDefinition foreignKey in foreignKeys)
+                        {
+                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencingDbTable, seen, objectTypeCache, synonymCache);
+                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencedDbTable, seen, objectTypeCache, synonymCache);
+                        }
+                    }
+                }
+            }
+        }
+
+        private async Task<string?> GetObjectTypeAsync(
+            string owner,
+            string name,
+            Dictionary<(string Owner, string Name), string?> cache)
+        {
+            (string Owner, string Name) key = (owner, name);
+            if (cache.TryGetValue(key, out string? cached))
+            {
+                return cached;
+            }
+
+            string? objectType = null;
+            using OracleConnection connection = new(ConnectionString);
+            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
+            await connection.OpenAsync();
+            using OracleCommand command = connection.CreateCommand();
+            command.BindByName = true;
+            command.CommandText =
+                "SELECT OBJECT_TYPE FROM ALL_OBJECTS " +
+                "WHERE OWNER = :owner AND OBJECT_NAME = :object_name " +
+                "AND OBJECT_TYPE IN ('TABLE','VIEW','SYNONYM','PROCEDURE','FUNCTION','PACKAGE','MATERIALIZED VIEW') " +
+                "AND ROWNUM = 1";
+            command.Parameters.Add(new OracleParameter("owner", owner));
+            command.Parameters.Add(new OracleParameter("object_name", name));
+            object? value = await command.ExecuteScalarAsync();
+            if (value is string typeName && !string.IsNullOrWhiteSpace(typeName))
+            {
+                objectType = typeName;
+            }
+
+            cache[key] = objectType;
+            return objectType;
+        }
+
+        private async Task<OracleCatalogNameResolver.SynonymRow?> GetSynonymAsync(
+            string owner,
+            string name,
+            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> cache)
+        {
+            (string Owner, string Name) key = (owner, name);
+            if (cache.TryGetValue(key, out OracleCatalogNameResolver.SynonymRow? cached))
+            {
+                return cached;
+            }
+
+            OracleCatalogNameResolver.SynonymRow? synonym = null;
+            using OracleConnection connection = new(ConnectionString);
+            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
+            await connection.OpenAsync();
+            using OracleCommand command = connection.CreateCommand();
+            command.BindByName = true;
+            command.CommandText =
+                "SELECT OWNER, SYNONYM_NAME, TABLE_OWNER, TABLE_NAME, DB_LINK " +
+                "FROM ALL_SYNONYMS " +
+                "WHERE OWNER = :owner AND SYNONYM_NAME = :synonym_name";
+            command.Parameters.Add(new OracleParameter("owner", owner));
+            command.Parameters.Add(new OracleParameter("synonym_name", name));
+            using OracleDataReader reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                synonym = new OracleCatalogNameResolver.SynonymRow(
+                    Owner: reader.GetString(0),
+                    SynonymName: reader.GetString(1),
+                    TableOwner: reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                    TableName: reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                    DbLink: reader.IsDBNull(4) ? null : reader.GetString(4));
+            }
+
+            cache[key] = synonym;
+            return synonym;
+        }
+
+        /// <summary>
+        /// Unquoted catalog objects are stored UPPERCASE and DAB quotes them, so both parts
+        /// go through <see cref="OracleQueryBuilder.QuoteRelation"/>.
         /// </summary>
         internal override string GetTableNameWithSchemaPrefix(string schemaName, string tableName)
         {
-            IQueryBuilder queryBuilder = GetQueryBuilder();
-            StringBuilder tablePrefix = new();
-
-            if (!string.IsNullOrEmpty(schemaName))
-            {
-                schemaName = queryBuilder.QuoteIdentifier(schemaName.ToUpperInvariant());
-                tablePrefix.Append(schemaName);
-            }
-
-            string queryPrefix = string.IsNullOrEmpty(tablePrefix.ToString()) ? string.Empty : $"{tablePrefix}.";
-            return $"{queryPrefix}{SqlQueryBuilder.QuoteIdentifier(tableName.ToUpperInvariant())}";
+            return ((OracleQueryBuilder)GetQueryBuilder()).QuoteRelation(schemaName, tableName);
         }
 
         /// <summary>
@@ -184,7 +333,7 @@ namespace Azure.DataApiBuilder.Core.Services
             // Oracle only supports 3 restrictions: Owner (schema), Table Name, Column Name
             // Setting database (index 0) causes ORA-50019 error
             string?[] columnRestrictions = new string?[3];
-            
+
             // For Oracle: use the schema name if provided, otherwise null (defaults to current user)
             // Oracle stores identifiers in uppercase when unquoted
             columnRestrictions[0] = string.IsNullOrEmpty(schemaName) ? null : schemaName.ToUpperInvariant();
@@ -252,8 +401,8 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             foreach (DataRow columnInfo in allColumnsInTable.Rows)
             {
-                // Normalize to the same casing used for sourceDefinition.Columns keys
-                // (lowercase via GetPhysicalDatabaseColumnName).
+                // Keys on sourceDefinition.Columns are the catalog spelling (pass-through
+                // GetPhysicalDatabaseColumnName). Match that spelling here.
                 string columnName = GetPhysicalDatabaseColumnName((string)columnInfo["COLUMN_NAME"]);
 
                 if (sourceDefinition.Columns.TryGetValue(columnName, out ColumnDefinition? columnDefinition))
@@ -432,6 +581,57 @@ namespace Azure.DataApiBuilder.Core.Services
         protected override string GetPhysicalDatabaseColumnName(string columnName)
         {
             return columnName;
+        }
+
+        /// <summary>
+        /// Config-authored relationship fields (source.fields / linking fields) commonly use a
+        /// different casing than the catalog. Join predicates quote those names, so they must be
+        /// rewritten to the physical spelling stored on <see cref="SourceDefinition.Columns"/>.
+        /// </summary>
+        protected override void NormalizeForeignKeyColumnNames(ForeignKeyDefinition fkDefinition)
+        {
+            SourceDefinition? referencingDefinition = TryGetSourceDefinitionForDatabaseObject(fkDefinition.Pair.ReferencingDbTable);
+            SourceDefinition? referencedDefinition = TryGetSourceDefinitionForDatabaseObject(fkDefinition.Pair.ReferencedDbTable);
+
+            if (referencingDefinition is not null)
+            {
+                fkDefinition.ReferencingColumns =
+                    [.. fkDefinition.ReferencingColumns.Select(column => ResolvePhysicalColumnName(referencingDefinition, column))];
+            }
+
+            if (referencedDefinition is not null)
+            {
+                fkDefinition.ReferencedColumns =
+                    [.. fkDefinition.ReferencedColumns.Select(column => ResolvePhysicalColumnName(referencedDefinition, column))];
+            }
+        }
+
+        /// <summary>
+        /// The FK pair may hold a distinct <see cref="DatabaseTable"/> instance from the one stored
+        /// in EntityToDatabaseObject (especially linking tables). Match by schema/name when the
+        /// pair's own TableDefinition is empty.
+        /// </summary>
+        private SourceDefinition? TryGetSourceDefinitionForDatabaseObject(DatabaseObject dbObject)
+        {
+            if (dbObject is DatabaseTable table
+                && table.TableDefinition is not null
+                && table.TableDefinition.Columns.Count > 0)
+            {
+                return table.TableDefinition;
+            }
+
+            foreach (DatabaseObject entityObject in EntityToDatabaseObject.Values)
+            {
+                if (entityObject.Equals(dbObject)
+                    && entityObject is DatabaseTable entityTable
+                    && entityTable.TableDefinition is not null
+                    && entityTable.TableDefinition.Columns.Count > 0)
+                {
+                    return entityTable.TableDefinition;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

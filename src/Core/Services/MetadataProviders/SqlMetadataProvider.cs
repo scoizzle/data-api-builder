@@ -339,6 +339,7 @@ namespace Azure.DataApiBuilder.Core.Services
             _runtimeConfigValidator.ValidateEntityAndAutoentityConfigurations(runtimeConfig);
 
             GenerateDatabaseObjectForEntities();
+            await ResolveCatalogObjectNamesAsync();
             await PopulateObjectDefinitionForEntities();
             GenerateExposedToBackingColumnMapsForEntities();
 
@@ -714,6 +715,13 @@ namespace Azure.DataApiBuilder.Core.Services
 
             return parameters;
         }
+
+        /// <summary>
+        /// Provider hook after <see cref="GenerateDatabaseObjectForEntities"/> and before
+        /// catalog FillSchema. The base is a no-op. Oracle resolves synonyms to the local
+        /// base object so later metadata and SQL use physical catalog names.
+        /// </summary>
+        protected virtual Task ResolveCatalogObjectNamesAsync() => Task.CompletedTask;
 
         /// <summary>
         /// Create a DatabaseObject for all the exposed entities.
@@ -1811,7 +1819,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <param name="sourceDefinition">The entity's source definition holding physical column keys.</param>
         /// <param name="configColumnName">The column name as authored in the runtime config.</param>
         /// <returns>The physical column name, or the input when no match is found.</returns>
-        private static string ResolvePhysicalColumnName(SourceDefinition sourceDefinition, string configColumnName)
+        protected static string ResolvePhysicalColumnName(SourceDefinition sourceDefinition, string configColumnName)
         {
             foreach (string physicalName in sourceDefinition.Columns.Keys)
             {
@@ -2217,9 +2225,9 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <summary>
         /// Returns the physical column name as surfaced by the driver's schema table.
         /// Databases store identifiers in different cases (e.g. Oracle stores unquoted
-        /// identifiers in uppercase; PostgreSQL stores them in lowercase). Overriding this
-        /// method lets a provider normalize the name (e.g. Oracle lowercases it) so that the
-        /// exposed REST/GraphQL field names are consistent with the other SQL providers.
+        /// identifiers in uppercase; PostgreSQL stores them in lowercase). Providers may
+        /// override this to pass through or normalize catalog spelling; exposed REST/GraphQL
+        /// names are a separate layer via <see cref="GetExposedColumnName"/>.
         /// </summary>
         /// <param name="columnName">The column name reported by the database driver.</param>
         /// <returns>The column name to use for the exposed schema.</returns>
@@ -2571,6 +2579,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 {
                     if (DoesConfiguredRelationshipOverrideDatabaseFkConstraint(configResolvedFkDefinition))
                     {
+                        NormalizeForeignKeyColumnNames(configResolvedFkDefinition);
                         validatedFKDefinitionsToTarget.Add(configResolvedFkDefinition);
 
                         // Save additional metadata for use when processing requests on self-joined/referencing entities.
@@ -2589,6 +2598,7 @@ namespace Azure.DataApiBuilder.Core.Services
                         // into the configResolvedFkDefinition object.
                         configResolvedFkDefinition.ReferencedColumns = databaseResolvedFkDefinition.ReferencedColumns;
                         configResolvedFkDefinition.ReferencingColumns = databaseResolvedFkDefinition.ReferencingColumns;
+                        NormalizeForeignKeyColumnNames(configResolvedFkDefinition);
                         validatedFKDefinitionsToTarget.Add(configResolvedFkDefinition);
 
                         // Save additional metadata for use when processing requests on self-joined/referencing entities.
@@ -2642,6 +2652,7 @@ namespace Azure.DataApiBuilder.Core.Services
 
                     if (!doesFkExistInDatabase)
                     {
+                        NormalizeForeignKeyColumnNames(configResolvedFkDefinition);
                         validatedFKDefinitionsToTarget.Add(configResolvedFkDefinition);
 
                         // The following operation generates FK metadata for use when processing requests on self-joined/referencing entities.
@@ -2678,6 +2689,16 @@ namespace Azure.DataApiBuilder.Core.Services
         private static bool DoesConfiguredRelationshipOverrideDatabaseFkConstraint(ForeignKeyDefinition configResolvedFkDefinition)
         {
             return configResolvedFkDefinition.ReferencingColumns.Count > 0 && configResolvedFkDefinition.ReferencedColumns.Count > 0;
+        }
+
+        /// <summary>
+        /// Provider hook after a foreign-key definition's column lists are filled from config
+        /// and/or the database. The base implementation is a no-op: MsSql/PostgreSQL/MySQL
+        /// treat backing and API names as the same spelling. Oracle overrides this to rewrite
+        /// config-authored names to catalog (physical) spelling so quoted SQL is valid.
+        /// </summary>
+        protected virtual void NormalizeForeignKeyColumnNames(ForeignKeyDefinition fkDefinition)
+        {
         }
 
         /// <summary>
