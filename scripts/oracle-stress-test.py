@@ -37,9 +37,27 @@ import time
 import urllib.parse
 import urllib.request
 
-BUILT_ENGINE = ("/Users/scoizzle/Projects/data-api-builder/src/out/cli/net10.0/"
-                "Microsoft.DataApiBuilder")
-STAR_TREK_CONFIG = "/Users/scoizzle/Projects/star-trek-api/dab-config.json"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+
+
+def default_engine():
+    built = os.path.join(_REPO_ROOT, "src", "out", "cli", "net10.0", "Microsoft.DataApiBuilder")
+    if os.path.exists(built):
+        return built
+    return shutil.which("dab") or "dab"
+
+
+def default_config():
+    candidates = [
+        os.path.join(os.getcwd(), "dab-config.json"),
+        os.path.join(_REPO_ROOT, "dab-config.json"),
+        os.path.join(os.path.dirname(_REPO_ROOT), "star-trek-api", "dab-config.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return "dab-config.json"
 
 results = []  # (category, name, ok, detail)
 created_ids = []  # characters created by the battery, cleaned up at the end
@@ -90,9 +108,17 @@ def gql_err(r):
     return isinstance(r, dict) and ("errors" in r or "http_error" in r)
 
 
+def stop_engine(engine_proc):
+    if engine_proc is None or engine_proc.poll() is not None:
+        return
+    engine_proc.terminate()
+    try:
+        engine_proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        engine_proc.kill()
+
+
 def run(base, engine, config):
-    subprocess.run(["pkill", "-f", "Microsoft.DataApiBuilder"], capture_output=True)
-    time.sleep(1)
     env = {**os.environ, "ASPNETCORE_URLS": base}
     log = open("/tmp/dab_stress.log", "w")
     engine_proc = subprocess.Popen([engine, "start", "--config", config],
@@ -110,8 +136,8 @@ def run(base, engine, config):
             time.sleep(1)
     if not ready:
         print("ENGINE DID NOT START (see /tmp/dab_stress.log)")
-        engine_proc.kill()
-        return False
+        stop_engine(engine_proc)
+        return False, None
 
     # ---------- GraphQL queries ----------
     r = gql("{ series { items { id name } } }", base)
@@ -402,16 +428,15 @@ def run(base, engine, config):
         if not ok_ and detail:
             line += f"  -> {detail}"
         print(line)
-    return passed == total
+    return passed == total, engine_proc
 
 
 def main():
     parser = argparse.ArgumentParser(description="Oracle DAB stress/demo battery")
-    parser.add_argument("--engine", default=BUILT_ENGINE if os.path.exists(BUILT_ENGINE) else "dab",
+    parser.add_argument("--engine", default=default_engine(),
                         help="DAB CLI binary (default: built CLI or `dab` on PATH)")
-    parser.add_argument("--config",
-                        default=STAR_TREK_CONFIG if os.path.exists(STAR_TREK_CONFIG) else "dab-config.json",
-                        help="DAB runtime config (default: star-trek demo config)")
+    parser.add_argument("--config", default=default_config(),
+                        help="DAB runtime config (default: dab-config.json in CWD/repo, else star-trek demo)")
     parser.add_argument("--port", type=int, default=5001,
                         help="Engine port (default 5001; 5000 can be claimed by macOS Control Center)")
     args = parser.parse_args()
@@ -421,15 +446,17 @@ def main():
     print(f"Config : {args.config}")
     print(f"Base   : {base}")
 
+    engine_proc = None
+    success = False
     try:
-        success = run(base, args.engine, args.config)
+        success, engine_proc = run(base, args.engine, args.config)
     finally:
         for cid in created_ids:
             try:
                 rest("DELETE", f"/api/characters/id/{cid}", base)
             except Exception:
                 pass
-        subprocess.run(["pkill", "-f", "Microsoft.DataApiBuilder"], capture_output=True)
+        stop_engine(engine_proc)
     sys.exit(0 if success else 1)
 
 
