@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.IO;
 using System.IO.Abstractions;
 using System.Net;
@@ -67,6 +68,22 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             bool success = OracleMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
             Assert.AreEqual(expectedSuccess, success);
             Assert.AreEqual(expectedSchema, actual);
+        }
+
+        [DataTestMethod]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow("SELECT hr.books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow(":new.id := books_seq.NEXTVAL;", "id")]
+        [DataRow(":new.id := hr.books_seq.NEXTVAL;", "id")]
+        [DataRow("IF :new.id IS NULL THEN :new.id := books_seq.NEXTVAL; END IF;", "id")]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.\"ID\" FROM dual", "ID")]
+        public void OracleTriggerParserFindsSequenceAssignedColumns(string triggerBody, string expectedColumn)
+        {
+            IReadOnlyList<string> columns = OracleMetadataProvider.FindTriggerAssignedColumnNames(triggerBody);
+            Assert.AreEqual(1, columns.Count, string.Join(",", columns));
+            Assert.IsTrue(
+                columns.Any(column => column.Equals(expectedColumn, StringComparison.OrdinalIgnoreCase)),
+                string.Join(",", columns));
         }
 
         /// <summary>
