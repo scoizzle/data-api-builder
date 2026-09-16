@@ -96,6 +96,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public string QuotePhysicalColumn(string columnName) => QuoteIdentifier(columnName);
 
         /// <summary>
+        /// Quotes a DAB-generated or FROM-clause table alias. Defaults to <see cref="QuoteIdentifier"/>.
+        /// Oracle quotes aliases and is case-sensitive, so it uppercases the alias to match
+        /// FROM/JOIN emission.
+        /// </summary>
+        public string QuoteTableAlias(string alias) => QuoteIdentifier(alias);
+
+        /// <summary>
         /// Adds database specific quotes to the table name when used as part of a
         /// DB Connection Param.
         /// </summary>
