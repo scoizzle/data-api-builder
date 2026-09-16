@@ -163,25 +163,30 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
 
             string subqueryName = QuoteIdentifier($"subq{structure.Counter.Next()}");
+            string jsonDocAlias = QuoteIdentifier("json_doc");
+            string orderAlias = QuoteIdentifier("__dab_ord");
 
             StringBuilder result = new();
             if (structure.IsListQuery)
             {
-                // JSON_ARRAYAGG(JSON_OBJECT(*) RETURNING CLOB) avoids ORA-40478 ("output value too
-                // large, maximum: 4000") when nested/aggregated JSON exceeds 4000 bytes. The empty
-                // fallback JSON_ARRAY() is TO_CLOB-wrapped so COALESCE operands share the CLOB type.
-                result.Append($"SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(*) RETURNING CLOB), TO_CLOB(JSON_ARRAY())) ");
+                // JSON_ARRAYAGG is unordered unless ORDER BY is given. ROWNUM is captured after
+                // the inner ORDER BY/FETCH so cursor pagination matches that sort. FORMAT JSON
+                // keeps the already-built object from being escaped as a string.
+                result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON RETURNING CLOB ORDER BY {orderAlias}), TO_CLOB(JSON_ARRAY())) ");
+                result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
+                result.Append($"SELECT JSON_OBJECT(*) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
+                result.Append(query);
+                result.Append($" ) ) {subqueryName}");
             }
             else
             {
                 // Oracle rejects RETURNING CLOB directly on the wildcard scalar form
                 // JSON_OBJECT(*) (ORA-00923), so wrap it in TO_CLOB instead.
                 result.Append($"SELECT TO_CLOB(JSON_OBJECT(*)) ");
+                result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
+                result.Append(query);
+                result.Append($" ) {subqueryName}");
             }
-
-            result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
-            result.Append(query);
-            result.Append($" ) {subqueryName}");
 
             return result.ToString();
         }
