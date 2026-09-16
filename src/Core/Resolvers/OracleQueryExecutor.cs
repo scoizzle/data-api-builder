@@ -109,18 +109,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             foreach ((string dataSourceName, DataSource dataSource) in oracledbs)
             {
+                // ODP.NET rejects SqlClient's Encryption=true keyword; do not append it when hosted.
                 OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
-
-                if (_runtimeConfigProvider.IsLateConfigured)
-                {
-                    if (!builder.ConnectionString.Contains("Encryption", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string newConnectionString = builder.ConnectionString + 
-                            (builder.ConnectionString.EndsWith(";") ? "" : ";") + "Encryption=true;";
-                        builder = new OracleConnectionStringBuilder(newConnectionString);
-                    }
-                }
-
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
                 _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder);
 

@@ -78,6 +78,39 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void LateConfiguredOracleExecutorDoesNotAppendSqlClientEncryptionKeyword()
+        {
+            RuntimeConfig mockConfig = new(
+               Schema: "",
+               DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", new()),
+               Runtime: new(
+                   Rest: new(),
+                   GraphQL: new(),
+                   Mcp: new(),
+                   Host: new(null, null)
+               ),
+               Entities: new(new Dictionary<string, Entity>())
+            );
+
+            RuntimeConfigProvider provider = TestHelper.GenerateInMemoryRuntimeConfigProvider(mockConfig);
+            provider.IsLateConfigured = true;
+
+            OracleQueryExecutor executor = new(
+                provider,
+                new OracleDbExceptionParser(provider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object);
+
+            Assert.AreEqual(1, executor.ConnectionStringBuilders.Count);
+            foreach (DbConnectionStringBuilder builder in executor.ConnectionStringBuilders.Values)
+            {
+                Assert.IsFalse(
+                    builder.ConnectionString.Contains("Encryption", StringComparison.OrdinalIgnoreCase),
+                    builder.ConnectionString);
+            }
+        }
+
+        [TestMethod]
         public async Task ExecuteQueryOnConnectionAsync_SkipsOpenWhenAlreadyOpen()
         {
             (QueryExecutor<FakeDbConnection> executor, FakeDbConnection conn) = CreateExecutor();
