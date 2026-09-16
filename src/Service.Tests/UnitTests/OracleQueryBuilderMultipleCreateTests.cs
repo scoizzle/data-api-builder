@@ -150,6 +150,21 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             StringAssert.Contains(query, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB ORDER BY \"__dab_ord\")", StringComparison.Ordinal);
             StringAssert.Contains(query, "ROWNUM AS \"__dab_ord\"", StringComparison.Ordinal);
+            StringAssert.Contains(query, "JSON_OBJECT(* RETURNING CLOB)", StringComparison.Ordinal);
+        }
+
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void ScalarQueryJsonObjectReturnsClobInsideCall()
+        {
+            SqlQueryStructure structure = CreateSelectStructure();
+            structure.IsListQuery = false;
+
+            string query = new OracleQueryBuilder().Build(structure);
+
+            StringAssert.Contains(query, "JSON_OBJECT(* RETURNING CLOB)", StringComparison.Ordinal);
+            Assert.IsFalse(query.Contains("TO_CLOB(JSON_OBJECT(*))", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("JSON_ARRAYAGG", StringComparison.Ordinal), query);
         }
 
         private static Predicate PkEquality(string columnName, string param, bool addParenthesis)
