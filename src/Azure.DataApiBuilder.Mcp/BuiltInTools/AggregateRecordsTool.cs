@@ -944,7 +944,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
             DatabaseType databaseType)
         {
             string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
-            string quotedCol = $"{queryBuilder.QuoteIdentifier(structure.SourceAlias)}.{queryBuilder.QuoteIdentifier(backingField)}";
+            string quotedCol = $"{queryBuilder.QuoteTableAlias(structure.SourceAlias)}.{queryBuilder.QuotePhysicalColumn(backingField)}";
             string orderByAggExpr = args.Distinct
                 ? $"{args.Function.ToUpperInvariant()}(DISTINCT {quotedCol})"
                 : $"{args.Function.ToUpperInvariant()}({quotedCol})";
