@@ -200,13 +200,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string tableName = QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name);
             string insertQuery = $"INSERT INTO {tableName} ";
 
-            if (structure.InsertColumns.Any())
+            // Config + derived FK params can resolve to the same physical column. Oracle
+            // rejects duplicate names in INSERT (ORA-00957) and in the policy DUAL subquery
+            // (ORA-00918). Last write wins so an explicit FK is kept over a derived one.
+            (List<string> insertCols, List<string> insertVals) = structure.InsertColumns.Count > 0
+                ? DedupeInsertColumns(structure.InsertColumns, structure.Values)
+                : ([], []);
+
+            if (insertCols.Count > 0)
             {
-                // Config + derived FK params can resolve to the same physical column. Oracle
-                // rejects duplicate names in INSERT (ORA-00957). Last write wins so an explicit
-                // FK value is not dropped in favor of an earlier derived one.
-                (IReadOnlyList<string> insertCols, IReadOnlyList<string> insertVals) =
-                    DedupeInsertColumns(structure.InsertColumns, structure.Values);
                 string insertColumns = BuildColumnList(insertCols);
                 insertQuery += $"({insertColumns}) ";
                 insertQuery += $"VALUES ({string.Join(", ", insertVals)}) ";
@@ -250,7 +252,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // PL/SQL cannot host a scalar subquery in IF (PLS-00103). SELECT COUNT(*) INTO a
                 // NUMBER, then gate the INSERT. Empty cursor (WHERE 1 = 0) surfaces 403, not ORA-01400.
-                string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
+                string namedValues = string.Join(", ", insertCols.Zip(insertVals,
                     (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
                 return $"{outputTypeHints}DECLARE v_dab_insert_count NUMBER; BEGIN " +
                     $"SELECT COUNT(*) INTO v_dab_insert_count FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}; " +
@@ -467,16 +469,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 string? createPolicy = structure.GetDbPolicyForOperation(EntityActionOperation.Create);
                 bool hasCreatePolicy = !string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE);
 
-                string insertColumns = BuildColumnList(structure.InsertColumns);
+                (List<string> insertCols, List<string> insertVals) =
+                    DedupeInsertColumns(structure.InsertColumns, structure.Values);
+                string insertColumns = BuildColumnList(insertCols);
                 string insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
-                    $"VALUES ({string.Join(", ", structure.Values)}) " +
+                    $"VALUES ({string.Join(", ", insertVals)}) " +
                     $"RETURNING {returningColumns} " +
                     $"INTO {bindNames}";
 
                 // Alias each value with its physical column name in a DUAL subquery so a create
                 // policy that references column names (e.g. "OWNERID" = :paramN, emitted via
                 // QuotePhysicalColumn) can resolve them - otherwise ORA-00904 invalid identifier.
-                string namedValues = string.Join(", ", structure.InsertColumns.Zip(structure.Values,
+                string namedValues = string.Join(", ", insertCols.Zip(insertVals,
                     (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
 
                 string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
