@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -35,6 +36,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// identity columns without needing the schema/table name as parameters.
         /// </summary>
         private readonly Dictionary<SourceDefinition, (string SchemaName, string TableName)> _sourceTableMap = new();
+        private string? _defaultSchemaName;
 
         public OracleMetadataProvider(
             RuntimeConfigProvider runtimeConfigProvider,
@@ -48,24 +50,80 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Gets the default schema name for Oracle.
-        /// For Oracle, the default schema is the connected user's schema (USER ID from connection string).
+        /// Gets the default schema name for Oracle (the connected user's schema).
+        /// Prefer User ID from the connection string; if it is missing (wallet / IAM),
+        /// query <c>SELECT USER FROM DUAL</c>. Never fall back to SYSTEM.
         /// </summary>
         public override string GetDefaultSchemaName()
         {
-            // Oracle uses the connected user's schema as default
-            // Extract the User ID from the connection string
+            if (_defaultSchemaName is not null)
+            {
+                return _defaultSchemaName;
+            }
+
+            if (TryGetSchemaFromConnectionString(ConnectionString, out string schemaFromUserId))
+            {
+                _defaultSchemaName = schemaFromUserId;
+                return _defaultSchemaName;
+            }
+
+            _defaultSchemaName = ResolveSchemaFromSessionUser();
+            return _defaultSchemaName;
+        }
+
+        /// <summary>
+        /// Extracts the Oracle schema from a connection-string User ID.
+        /// Returns false when User ID is missing or the string cannot be parsed so callers
+        /// can query SESSION USER instead of assuming SYSTEM.
+        /// </summary>
+        public static bool TryGetSchemaFromConnectionString(string connectionString, out string schema)
+        {
+            schema = string.Empty;
             try
             {
-                var builder = new Oracle.ManagedDataAccess.Client.OracleConnectionStringBuilder(ConnectionString);
-                // User ID is the schema name in Oracle, and Oracle stores it in uppercase
-                return builder.UserID?.ToUpperInvariant() ?? "SYSTEM";
+                OracleConnectionStringBuilder builder = new(connectionString);
+                if (string.IsNullOrWhiteSpace(builder.UserID))
+                {
+                    return false;
+                }
+
+                schema = builder.UserID.ToUpperInvariant();
+                return true;
             }
             catch
             {
-                // If we can't parse the connection string, default to SYSTEM
-                return "SYSTEM";
+                return false;
             }
+        }
+
+        private string ResolveSchemaFromSessionUser()
+        {
+            try
+            {
+                using OracleConnection connection = new(ConnectionString);
+                connection.Open();
+                using OracleCommand command = connection.CreateCommand();
+                command.CommandText = "SELECT USER FROM DUAL";
+                object? result = command.ExecuteScalar();
+                string? user = result?.ToString();
+                if (!string.IsNullOrWhiteSpace(user))
+                {
+                    return user.ToUpperInvariant();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new DataApiBuilderException(
+                    "Unable to determine the Oracle default schema: the connection string has no User ID and SELECT USER FROM DUAL failed.",
+                    HttpStatusCode.ServiceUnavailable,
+                    DataApiBuilderException.SubStatusCodes.ErrorInInitialization,
+                    innerException: ex);
+            }
+
+            throw new DataApiBuilderException(
+                "Unable to determine the Oracle default schema: the connection string has no User ID and SESSION USER was empty.",
+                HttpStatusCode.ServiceUnavailable,
+                DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
         }
 
         /// <summary>

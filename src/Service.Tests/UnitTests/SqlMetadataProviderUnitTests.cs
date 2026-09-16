@@ -57,6 +57,18 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(expected, actual);
         }
 
+        [DataTestMethod]
+        [DataRow("HR", "User Id=hr;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("SYSTEM", "User Id=SYSTEM;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("", "Data Source=localhost:1521/x", false)]
+        [DataRow("", "not-a-connection-string", false)]
+        public void OracleConnectionStringParsingDoesNotFallBackToSystem(string expectedSchema, string connectionString, bool expectedSuccess)
+        {
+            bool success = OracleMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
+            Assert.AreEqual(expectedSuccess, success);
+            Assert.AreEqual(expectedSchema, actual);
+        }
+
         /// <summary>
         /// <code>Do: </code> Fills the table definition with information of the foreign keys
         /// for all the tables based on the entities relationship.
