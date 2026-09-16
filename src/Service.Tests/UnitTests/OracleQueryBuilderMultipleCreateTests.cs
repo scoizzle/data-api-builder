@@ -176,6 +176,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual("\"ID\"", builder.QuotePhysicalColumn("ID"));
         }
 
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void AutoentitiesQueryMatchesCatalogNamesCaseInsensitively()
+        {
+            string query = new OracleQueryBuilder().BuildGetAutoentitiesQuery();
+            StringAssert.Contains(query, "UPPER(a.full_name) LIKE UPPER(exclude_patterns.pattern)", StringComparison.Ordinal);
+            StringAssert.Contains(query, "UPPER(a.full_name) LIKE UPPER(include_patterns.pattern)", StringComparison.Ordinal);
+        }
+
         private static Predicate PkEquality(string columnName, string param, bool addParenthesis)
         {
             return new Predicate(
