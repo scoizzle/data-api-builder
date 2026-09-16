@@ -139,6 +139,19 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, " AS \"id\"", StringComparison.Ordinal);
         }
 
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void ListQueryJsonArrayAggOrdersByRownum()
+        {
+            SqlQueryStructure structure = CreateSelectStructure();
+            structure.IsListQuery = true;
+
+            string query = new OracleQueryBuilder().Build(structure);
+
+            StringAssert.Contains(query, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB ORDER BY \"__dab_ord\")", StringComparison.Ordinal);
+            StringAssert.Contains(query, "ROWNUM AS \"__dab_ord\"", StringComparison.Ordinal);
+        }
+
         private static Predicate PkEquality(string columnName, string param, bool addParenthesis)
         {
             return new Predicate(
