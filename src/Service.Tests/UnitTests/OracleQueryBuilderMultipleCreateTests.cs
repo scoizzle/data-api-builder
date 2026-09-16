@@ -167,6 +167,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(query.Contains("JSON_ARRAYAGG", StringComparison.Ordinal), query);
         }
 
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void QuoteTableAliasViaIQueryBuilderUppercases()
+        {
+            IQueryBuilder builder = new OracleQueryBuilder();
+            Assert.AreEqual("\"TABLE0\"", builder.QuoteTableAlias("table0"));
+            Assert.AreEqual("\"ID\"", builder.QuotePhysicalColumn("ID"));
+        }
+
         private static Predicate PkEquality(string columnName, string param, bool addParenthesis)
         {
             return new Predicate(
