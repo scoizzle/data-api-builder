@@ -126,6 +126,13 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     entityKey: "magazine",
                     entityName: "foo.magazines",
                     keyfields: ["id"]),
+                // Oracle exposes the catalog spelling (UPPERCASE) for unmapped columns, so the
+                // injected test entity maps its columns to the lowercase names the shared suite uses.
+                TestCategory.ORACLE => TestHelper.AddMissingEntitiesToConfig(
+                    config: runtimeConfig,
+                    entityKey: "magazine",
+                    entityName: "foo.magazines",
+                    mappings: new() { { "id", "id" }, { "title", "title" }, { "issue_number", "issue_number" } }),
                 _ => TestHelper.AddMissingEntitiesToConfig(
                     config: runtimeConfig,
                     entityKey: "magazine",
@@ -137,6 +144,12 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
             {
                 // MySql does not handle schema the same as other DB, so this testing entity is not needed
                 TestCategory.MYSQL => runtimeConfig,
+                TestCategory.ORACLE => TestHelper.AddMissingEntitiesToConfig(
+                    config: runtimeConfig,
+                    entityKey: "bar_magazine",
+                    entityName: "bar.magazines",
+                    keyfields: ["upc"],
+                    mappings: new() { { "upc", "upc" }, { "comic_name", "comic_name" }, { "issue", "issue" } }),
                 _ => TestHelper.AddMissingEntitiesToConfig(
                     config: runtimeConfig,
                     entityKey: "bar_magazine",

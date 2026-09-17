@@ -38,7 +38,7 @@ A future implementation must use a valid Oracle application context package and 
 
 ### Autoentities and aggregation
 
-Oracle autoentity discovery is supported: tables with a primary key are discovered through `ALL_TABLES` (Oracle-maintained system schemas are excluded) and materialized as entities according to the include/exclude/name patterns, both at engine startup and through `dab auto-config-simulate`. Generated entity names are lowercased so REST paths and GraphQL names match the lowercase exposed-column convention. The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
+Oracle autoentity discovery is supported: tables with a primary key are discovered through `ALL_TABLES` (Oracle-maintained system schemas are excluded) and materialized as entities according to the include/exclude/name patterns, both at engine startup and through `dab auto-config-simulate`. Generated entity names are lowercased so REST paths and GraphQL type names stay stable regardless of catalog folding; unmapped columns still surface as the catalog spelling (see Identifier casing). The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
 
 ### GraphQL multiple-create
 
@@ -79,8 +79,8 @@ No change to `QuoteRelation` / shared SQL: after resolve, emit the base catalog 
 Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every identifier, so SQL must use the **catalog spelling** (physical backing name). REST/GraphQL/OData names are a separate **exposed** layer.
 
 - Backing names on `SourceDefinition` (columns, primary key, FK column lists) are the catalog spelling: `ID`, `BOOK_ID`, or the exact spelling of a quoted identifier.
-- Exposed names default to lowercase (`id`, `book_id`) via `OracleMetadataProvider.GetExposedColumnName`, unless the entity config supplies a mapping or field alias.
+- Exposed names are the name **as provided to the engine**: the entity config mapping / field alias verbatim when one is configured, otherwise the catalog spelling of the column. Unmapped unquoted columns therefore surface as `ID` / `BOOK_ID`, and quoted columns keep their exact catalog spelling (e.g. `"ID Number"`). There is no lowercase fallback.
 - Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject` (uppercase, quoted). DAB-generated aliases go through `QuoteTableAlias`. Quoted mixed-case *tables* are not covered yet.
-- Unquoted DDL such as `categoryName` is stored as `CATEGORYNAME` and exposed as `categoryname`. Mixed-case GraphQL/REST names require an explicit mapping (the Oracle test config maps `categoryName`, `AccountKey`, and similar columns used by the shared suite).
+- The Oracle test config supplies explicit lowercase mappings for the columns the shared API suite expects (e.g. `publisher_id`, `categoryid`) so the shared contract is preserved; entities injected by the test harness (`magazine`, `bar_magazine`) get the same mappings in `TestHelper.AddMissingEntitiesToConfig`.
 
-Casing translation lives in `OracleMetadataProvider` and `OracleQueryBuilder`. Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle beyond the GraphQL schema converter's default-lowercase fallback for unmapped columns.
+Casing translation lives in `OracleMetadataProvider` (config name → physical backing name) and `OracleQueryBuilder` (physical name → SQL identifier). Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle.
