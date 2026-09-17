@@ -51,15 +51,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2004",     // ORA-02004: invalid column specification
                 "2005",     // ORA-02005: invalid column specification
                 "1018",     // ORA-01018: open cursor forced to close
-                "1019",     // ORA-01019: cannot allocate memory in the user side
-
-                // PL/SQL / SQL statement errors (wrong number or types of arguments when
-                // invoking a stored procedure). Keep in sync with the DatabaseInputError
-                // mapping in GetResultSubStatusCodeForException so REST status (400) matches
-                // the substatus (GraphQL already coerces DatabaseInputError to 400 via
-                // DetermineStatusCodeMiddleware).
-                "6550",     // ORA-06550: line/column in PL/SQL statement
-                "933"       // ORA-00933: SQL command not properly ended
+                "1019"      // ORA-01019: cannot allocate memory in the user side
+                // NOTE: ORA-06550 (PL/SQL compilation unit error) and ORA-00933 (SQL command not
+                // properly ended) are intentionally NOT mapped to 400: they are generic parser
+                // errors that are at least as likely to indicate a defect in DAB-generated SQL as
+                // a client-input error, so they surface as 500 rather than masking server bugs.
             });
 
             TransientExceptionCodes.UnionWith(new List<string>
@@ -186,9 +182,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ORA-12899: value too large for column
             // ORA-01400: cannot insert NULL into column
             // ORA-01438: value larger than specified precision
-            // ORA-06550 / ORA-00933: PL/SQL / SQL statement errors (e.g. wrong number or types of
-            //   arguments when invoking a stored procedure)
-            if (errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438" or "6550" or "933")
+            if (errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438")
             {
                 return DataApiBuilderException.SubStatusCodes.DatabaseInputError;
             }

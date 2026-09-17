@@ -402,7 +402,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // because a PL/SQL anonymous block cannot be prepended to a separate statement in a single
             // OracleCommand. When support is enabled via a future config option, the application context
             // must be created in the database first (CREATE CONTEXT dab_context USING dab_context_pkg;)
-            // and this method should set each claim via DBMS_SESSION.SET_CONTEXT.
+            // and each claim must be set via DBMS_SESSION.SET_CONTEXT inside the same anonymous block as
+            // the main statement. Until that batching mechanism exists, fail loudly rather than emitting
+            // a prepended block that Oracle rejects with ORA-00900.
             if (httpContext is null
                 || !_dataSourceToSessionContextUsage.TryGetValue(dataSourceName, out bool isSessionContextEnabled)
                 || !isSessionContextEnabled)
@@ -410,44 +412,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return string.Empty;
             }
 
-            // Dictionary containing all the claims belonging to the user, to be used as session parameters.
-            Dictionary<string, string> sessionParams = AuthorizationResolver.GetProcessedUserClaims(httpContext);
-
-            // Counter to generate different param name for each of the sessionParam.
-            IncrementingInteger counter = new();
-            const string SESSION_PARAM_NAME = $"{BaseQueryStructure.PARAM_NAME_PREFIX}session_param";
-            StringBuilder sessionMapQuery = new();
-
-            // Oracle uses DBMS_SESSION.SET_CONTEXT to set application context values
-            // Note: This requires creating an application context and a procedure to set values
-            // In production, you'd create: CREATE CONTEXT dab_context USING dab_context_pkg;
-            foreach ((string _, string claimValue) in sessionParams)
-            {
-                string paramName = $"{SESSION_PARAM_NAME}{counter.Next()}";
-                parameters.Add(paramName, new(claimValue));
-
-                // Oracle's native approach is DBMS_SESSION.SET_CONTEXT, which requires a pre-created
-                // application context and an associated PL/SQL package:
-                //   CREATE CONTEXT dab_context USING dab_context_pkg;
-                //   CREATE OR REPLACE PACKAGE dab_context_pkg AS PROCEDURE set_ctx(key VARCHAR2, val VARCHAR2); END;
-                //   CREATE OR REPLACE PACKAGE BODY dab_context_pkg AS
-                //     PROCEDURE set_ctx(key VARCHAR2, val VARCHAR2) AS
-                //     BEGIN DBMS_SESSION.SET_CONTEXT('dab_context', key, val); END;
-                //   END;
-                //
-                // NB: the block emitted below is only valid as the ENTIRE command text. Prepending it in
-                // PrepareDbCommand currently generates invalid SQL (ORA-00900), which is why session
-                // context is disabled until a batch-capable mechanism (e.g. a single anonymous block that
-                // wraps both the session setup and the main statement) is implemented.
-                string statementToSetContext = $"BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO({paramName}); END;";
-                sessionMapQuery.Append(statementToSetContext);
-
-                // Only set one value for CLIENT_INFO (Oracle limitation without custom context)
-                // For multiple claims, requires creating application context in Oracle
-                break; // TODO: Implement full application context support for multiple claims
-            }
-
-            return sessionMapQuery.ToString();
+            throw new DataApiBuilderException(
+                message: "Oracle session context forwarding is not supported: a PL/SQL anonymous block cannot be prepended to a separate statement in a single OracleCommand.",
+                statusCode: HttpStatusCode.InternalServerError,
+                subStatusCode: DataApiBuilderException.SubStatusCodes.NotSupported);
         }
 
         /// <summary>

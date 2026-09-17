@@ -153,5 +153,39 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         #endregion
+
+        #region PrimaryKeyValuesEqual
+
+        [DataTestMethod]
+        // Integer body value vs URL text.
+        [DataRow("1", "1", true)]
+        // Numeric PK supplied as a decimal in the body still matches the URL integer.
+        [DataRow("1.0", "1", true)]
+        [DataRow("1e3", "1000", true)]
+        [DataRow("2", "1", false)]
+        // JSON boolean renders as True/False while the URL carries lowercase.
+        [DataRow("true", "true", true)]
+        [DataRow("false", "false", true)]
+        [DataRow("true", "false", false)]
+        // String PKs compare ordinally (case-sensitive).
+        [DataRow("\"SciFi\"", "SciFi", true)]
+        [DataRow("\"SciFi\"", "scifi", false)]
+        [DataRow("\"01\"", "1", false)]
+        public void PrimaryKeyValuesEqual_MatchesEquivalentRepresentations(
+            string bodyJson, string urlValue, bool expected)
+        {
+            using JsonDocument document = JsonDocument.Parse(bodyJson);
+            Assert.AreEqual(expected, RequestValidator.PrimaryKeyValuesEqual(document.RootElement, urlValue));
+        }
+
+        [TestMethod]
+        public void PrimaryKeyValuesEqual_NullHandling()
+        {
+            Assert.IsTrue(RequestValidator.PrimaryKeyValuesEqual(null, null));
+            Assert.IsFalse(RequestValidator.PrimaryKeyValuesEqual(null, "1"));
+            Assert.IsFalse(RequestValidator.PrimaryKeyValuesEqual("1", null));
+        }
+
+        #endregion
     }
 }
