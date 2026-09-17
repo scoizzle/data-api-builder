@@ -84,3 +84,30 @@ Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every 
 - The Oracle test config supplies explicit lowercase mappings for the columns the shared API suite expects (e.g. `publisher_id`, `categoryid`) so the shared contract is preserved; entities injected by the test harness (`magazine`, `bar_magazine`) get the same mappings in `TestHelper.AddMissingEntitiesToConfig`.
 
 Casing translation lives in `OracleMetadataProvider` (config name → physical backing name) and `OracleQueryBuilder` (physical name → SQL identifier). Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle.
+
+## Cursor usage and ODP.NET statement caching
+
+DAB disposes every `DbDataReader`/`DbCommand` after a result is read, including the REF CURSOR output parameters used by the PL/SQL DML blocks, so it does not leak cursors. However, ODP.NET's client-side statement cache retains one open cursor per **distinct** SQL statement on a connection (measured: the cursor count grows by one per distinct statement and stays flat for repeated statements). On a long-lived pooled session that executes many distinct statements this consumes the account's per-session `open_cursors` limit (Oracle default `300`), surfacing at request time as:
+
+```
+ORA-00604: Error occurred at recursive SQL level 1.
+ORA-01000: maximum open cursors for session exceeded
+```
+
+Handle it either at the database or from the DAB connection string:
+
+- **Size the database limit** for the DAB account/host, e.g. `ALTER SYSTEM SET open_cursors = 1500 SCOPE = BOTH;` (applies to new sessions). Recommended for normal deployments.
+- **Bound or disable the ODP.NET statement cache** by adding ODP.NET attributes to the DAB data-source connection string:
+  - `Self Tuning=false` — stop ODP.NET from auto-sizing the cache by workload.
+  - `Statement Cache Size=<n>` — cap the number of retained statements (honored when `Self Tuning=false`).
+  - `Statement Cache Size=0;Self Tuning=false` — disable caching entirely. Cursor usage then stays flat regardless of `open_cursors`, at the cost of re-parsing each statement.
+
+  DAB preserves these attributes when it builds the ODP.NET connection. Example:
+
+  ```json
+  "connection-string": "Data Source=...;User Id=...;Password=...;Statement Cache Size=50;Self Tuning=false;"
+  ```
+
+### Test database
+
+The Oracle integration suite issues several hundred distinct statements, so it exhausts the default `open_cursors=300` partway through a full `TestCategory=ORACLE` run. The test container must either set `open_cursors=1500` or the test connection string must bound the statement cache; with either in place the full category passes. This is cursor-cache sizing, not a DAB query-path leak: 500 repeated list queries, 400 repeated upserts, and repeated `DatabaseSchema-Oracle.sql` re-initialization all leave the cursor count flat or plateaued.

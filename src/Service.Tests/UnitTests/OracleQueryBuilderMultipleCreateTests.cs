@@ -148,7 +148,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            StringAssert.Contains(query, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB ORDER BY \"__dab_ord\")", StringComparison.Ordinal);
+            StringAssert.Contains(query, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB)", StringComparison.Ordinal);
             StringAssert.Contains(query, "ROWNUM AS \"__dab_ord\"", StringComparison.Ordinal);
             StringAssert.Contains(query, "JSON_OBJECT(* RETURNING CLOB)", StringComparison.Ordinal);
         }

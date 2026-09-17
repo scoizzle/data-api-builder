@@ -179,8 +179,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // JSON_ARRAYAGG is unordered unless ORDER BY is given. ROWNUM is captured after
                 // the inner ORDER BY/FETCH so cursor pagination matches that sort. FORMAT JSON
-                // keeps the already-built object from being escaped as a string.
-                result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON RETURNING CLOB ORDER BY {orderAlias}), TO_CLOB(JSON_ARRAY())) ");
+                // keeps the already-built object from being escaped as a string. Oracle requires
+                // ORDER BY before RETURNING: "FORMAT JSON RETURNING CLOB ORDER BY" raises ORA-02000.
+                result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON ORDER BY {orderAlias} RETURNING CLOB), TO_CLOB(JSON_ARRAY())) ");
                 result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
                 result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
                 result.Append(query);
