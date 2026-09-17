@@ -321,6 +321,32 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Auto-generated linking entities (M:N multiple-create) have no config entity to declare
+        /// exposed names, and Oracle folds unquoted identifiers to uppercase. Without defaults such
+        /// a linking column (e.g. ROYALTY_PERCENTAGE) would surface uppercase in the generated
+        /// multiple-create input type, diverging from the relationship config's authored linking
+        /// field names and the other SQL providers. Seed lowercase mappings for every linking column.
+        /// </summary>
+        protected override void PopulateLinkingEntityExposedNames()
+        {
+            foreach ((string linkingEntityName, Entity linkingEntity) in _linkingEntities)
+            {
+                if (!EntityToDatabaseObject.TryGetValue(linkingEntityName, out DatabaseObject? databaseObject))
+                {
+                    continue;
+                }
+
+                Dictionary<string, string> mappings = new(StringComparer.OrdinalIgnoreCase);
+                foreach (string columnName in databaseObject.SourceDefinition.Columns.Keys)
+                {
+                    mappings[columnName] = columnName.ToLowerInvariant();
+                }
+
+                _linkingEntities[linkingEntityName] = linkingEntity with { Mappings = mappings };
+            }
+        }
+
+        /// <summary>
         /// Oracle-specific implementation to get column metadata.
         /// Oracle only supports 3 restrictions (Owner, Table, Column) in GetSchema for Columns,
         /// unlike SQL Server which supports 4 (Database, Schema, Table, Column).

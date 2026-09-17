@@ -195,7 +195,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         public new async Task TestStringFiltersWithSpecialCharacters(string dynamicFilter, string dbFilterInput)
         {
             string oracleQuery = $@"
-                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('title' VALUE title) RETURNING CLOB), TO_CLOB('[]')) AS data
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('title' VALUE title) ORDER BY title ASC RETURNING CLOB), TO_CLOB('[]')) AS data
                 FROM (
                     SELECT title FROM books
                     WHERE title LIKE '{dbFilterInput}' ESCAPE '\'
