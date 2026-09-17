@@ -341,6 +341,7 @@ namespace Azure.DataApiBuilder.Core.Services
             GenerateDatabaseObjectForEntities();
             await ResolveCatalogObjectNamesAsync();
             await PopulateObjectDefinitionForEntities();
+            PopulateLinkingEntityExposedNames();
             GenerateExposedToBackingColumnMapsForEntities();
 
             // When IsLateConfigured is true we are in a hosted scenario and do not reveal primary key information.
@@ -1626,6 +1627,18 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Optional hook for engines that must default the exposed names of auto-generated linking
+        /// entities (used by M:N multiple-create). Linking entities have no runtime config entity
+        /// to declare mappings, so an engine whose catalog spelling is not the desired API name
+        /// (e.g. Oracle stores unquoted identifiers UPPERCASE) can seed mappings here. Invoked
+        /// after schema inference (so linking entity columns are known) and before the
+        /// exposed-to-backing maps are generated; the default implementation is a no-op.
+        /// </summary>
+        protected virtual void PopulateLinkingEntityExposedNames()
+        {
+        }
+
+        /// <summary>
         /// Queries DB to get the result fields name and type to
         /// populate the result set definition for entities specified as stored procedures
         /// </summary>
@@ -1741,8 +1754,13 @@ namespace Azure.DataApiBuilder.Core.Services
                 Dictionary<string, string> backToExposed = new(StringComparer.OrdinalIgnoreCase);
                 Dictionary<string, string> exposedToBack = new(StringComparer.OrdinalIgnoreCase);
 
-                // Pull definitions.
-                Entities.TryGetValue(entityName, out Entity? entity);
+                // Pull definitions. Linking entities are auto-generated (not present in Entities)
+                // but may carry mappings populated by the provider (see OracleMetadataProvider).
+                if (!Entities.TryGetValue(entityName, out Entity? entity))
+                {
+                    _linkingEntities.TryGetValue(entityName, out entity);
+                }
+
                 SourceDefinition sourceDefinition = GetSourceDefinition(entityName);
 
                 // 1) Prefer new-style fields (backing = physical column, exposed = f.Alias ?? authored f.Name).
