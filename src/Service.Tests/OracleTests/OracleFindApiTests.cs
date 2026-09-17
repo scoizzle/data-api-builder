@@ -649,7 +649,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await Task.CompletedTask;
 
         [TestMethod]
-        [Ignore("Oracle JSON_OBJECT lowercases column aliases with spaces.")]
+        [Ignore("Oracle list-query JSON_ARRAYAGG generation fails with ORA-02000 (pre-existing); keys would otherwise match 'ID Number'.")]
         public override async Task FindTestWithQueryStringSpaceInNamesOrderByAsc() => await Task.CompletedTask;
 
         [TestMethod]
