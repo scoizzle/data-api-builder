@@ -613,9 +613,9 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Put
         }
 
         /// <summary>
-        /// Oracle's metadata exposes unmapped physical columns in lowercase (see
-        /// OracleMetadataProvider.GetExposedColumnName), so the Tree primary key is addressed as
-        /// 'treeid' rather than the 'treeId' the shared engines use.
+        /// The Tree entity maps physical TREEID to the exposed name 'treeid' in
+        /// dab-config.Oracle.json (Oracle catalog folding stores unquoted identifiers
+        /// UPPERCASE; there is no engine-level lowercase fallback).
         /// </summary>
         [TestMethod]
         public override async Task PutOne_Update_With_Mapping_Test()

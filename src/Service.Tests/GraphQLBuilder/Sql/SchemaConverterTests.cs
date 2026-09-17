@@ -83,6 +83,35 @@ namespace Azure.DataApiBuilder.Service.Tests.GraphQLBuilder.Sql
         }
 
         /// <summary>
+        /// Validates that the exposed GraphQL field name is the backing/catalog column name exactly
+        /// as provided to the engine for every database type (Oracle must not lowercase unmapped
+        /// columns, and quoted identifiers keep their exact spelling).
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(DatabaseType.Oracle, "ID")]
+        [DataRow(DatabaseType.Oracle, "ID Number")]
+        [DataRow(DatabaseType.Oracle, "MixedCase")]
+        [DataRow(DatabaseType.MSSQL, "UPPERCASE")]
+        [DataRow(DatabaseType.PostgreSQL, "UPPERCASE")]
+        public void ColumnNameIsNotCasingNormalizedForAnyDatabaseType(DatabaseType databaseType, string columnName)
+        {
+            SourceDefinition table = new();
+            table.Columns.Add(columnName, new ColumnDefinition { SystemType = typeof(string) });
+            DatabaseObject dbObject = new DatabaseTable() { TableDefinition = table };
+
+            ObjectTypeDefinitionNode od = SchemaConverter.GenerateObjectTypeDefinitionForDatabaseObject(
+                "table",
+                dbObject,
+                GenerateEmptyEntity("table"),
+                new(new Dictionary<string, Entity>()),
+                rolesAllowedForEntity: GetRolesAllowedForEntity(),
+                rolesAllowedForFields: GetFieldToRolesMap(columnName: table.Columns.First().Key),
+                databaseType: databaseType);
+
+            Assert.AreEqual(columnName, od.Fields[0].Name.Value);
+        }
+
+        /// <summary>
         /// Tests that an Entity object's mapping configuration is utilized in the schema generator
         /// by checking that mapped column values are used for field names instead of backing column names.
         /// </summary>

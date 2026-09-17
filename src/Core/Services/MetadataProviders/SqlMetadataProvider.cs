@@ -2230,7 +2230,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// names are a separate layer via <see cref="GetExposedColumnName"/>.
         /// </summary>
         /// <param name="columnName">The column name reported by the database driver.</param>
-        /// <returns>The column name to use for the exposed schema.</returns>
+        /// <returns>The physical/catalog column name to store as the backing name.</returns>
         protected virtual string GetPhysicalDatabaseColumnName(string columnName)
         {
             return columnName;
@@ -2238,11 +2238,9 @@ namespace Azure.DataApiBuilder.Core.Services
 
         /// <summary>
         /// Returns the exposed (REST/GraphQL) name to use for a backing column when no explicit
-        /// field or mapping alias is configured. Providers that surface physical identifiers in a
-        /// different case than their API field names (e.g. Oracle stores unquoted identifiers
-        /// uppercase but exposes lowercase field names to match the other SQL providers) override
-        /// this to translate the backing name to the desired exposed casing. The backing (physical)
-        /// name is still emitted verbatim in SQL.
+        /// field or mapping alias is configured. The default is the backing/catalog name verbatim.
+        /// Providers must not silently case-fold here: if an engine needs a different API name,
+        /// that mapping is authored in the entity config.
         /// </summary>
         /// <param name="backingColumnName">The physical backing column name.</param>
         /// <returns>The exposed field name for the column.</returns>

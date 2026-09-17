@@ -910,9 +910,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Oracle-maintained system schemas (SYS dictionary base tables and friends) are excluded
         /// so a privileged connection does not materialize hundreds of system entities, mirroring
         /// the system-object filtering the MSSQL builder performs.
-        /// Entity names are lowercased so generated REST/GraphQL names are consistent with the
-        /// lowercase exposed names Oracle uses for columns; the returned "schema"/"object" values
-        /// keep physical casing for source resolution.
+        /// Entity names are lowercased so generated REST paths and GraphQL type names stay
+        /// stable regardless of catalog folding. Column exposed names are a separate layer
+        /// (catalog spelling unless mapped). The returned "schema"/"object" values keep
+        /// physical casing for source resolution.
         /// Returns rows aliased as "schema", "object", and "entity_name" (the JSON property names
         /// the metadata provider reads when materializing generated entities).
         /// </summary>
