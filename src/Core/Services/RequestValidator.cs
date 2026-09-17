@@ -628,12 +628,15 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Compare a primary-key value from the URL route with the same field in the request body.
-        /// JSON numbers may deserialize as decimal/long/JsonElement, so compare invariant string forms.
+        /// Compares a primary-key value supplied in the request body against the value parsed from
+        /// the URL. URL values are strings; body values are typically <see cref="JsonElement"/> from
+        /// JSON deserialization. Numeric and boolean body values are compared by value so that
+        /// equivalent representations (e.g. <c>1</c> vs <c>1.0</c>, or JSON <c>true</c> vs the URL
+        /// text <c>true</c>) are not reported as mismatches.
         /// </summary>
-        private static bool PrimaryKeyValuesEqual(object? bodyValue, object? urlValue)
+        internal static bool PrimaryKeyValuesEqual(object? bodyValue, object? urlValue)
         {
-            if (Equals(bodyValue, urlValue))
+            if (bodyValue is null && urlValue is null)
             {
                 return true;
             }
@@ -643,13 +646,45 @@ namespace Azure.DataApiBuilder.Core.Services
                 return false;
             }
 
-            string bodyText = bodyValue is JsonElement bodyElement
-                ? bodyElement.ToString()
-                : Convert.ToString(bodyValue, CultureInfo.InvariantCulture) ?? string.Empty;
-            string urlText = urlValue is JsonElement urlElement
-                ? urlElement.ToString()
-                : Convert.ToString(urlValue, CultureInfo.InvariantCulture) ?? string.Empty;
-            return string.Equals(bodyText, urlText, StringComparison.Ordinal);
+            string bodyText = ToComparableText(bodyValue);
+            string urlText = ToComparableText(urlValue);
+
+            // Same textual representation (also covers string PKs such as "SciFi").
+            if (string.Equals(bodyText, urlText, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // JSON numbers/booleans render differently from their URL text form, so fall back to a
+            // typed comparison based on the body's JSON value kind.
+            if (bodyValue is JsonElement bodyElement)
+            {
+                switch (bodyElement.ValueKind)
+                {
+                    case JsonValueKind.Number when
+                        bodyElement.TryGetDecimal(out decimal bodyNumber)
+                        && decimal.TryParse(urlText, NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out decimal urlNumber):
+                        return bodyNumber == urlNumber;
+                    case JsonValueKind.True:
+                    case JsonValueKind.False:
+                        return bool.TryParse(urlText, out bool urlBool)
+                            && urlBool == (bodyElement.ValueKind == JsonValueKind.True);
+                }
+            }
+
+            return false;
+        }
+
+        private static string ToComparableText(object value)
+        {
+            if (value is JsonElement element)
+            {
+                return element.ValueKind == JsonValueKind.String
+                    ? element.GetString() ?? string.Empty
+                    : element.ToString();
+            }
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
         }
     }
 }

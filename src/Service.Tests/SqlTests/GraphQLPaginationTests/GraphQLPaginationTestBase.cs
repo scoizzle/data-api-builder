@@ -1102,6 +1102,10 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLPaginationTests
 
             JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLQuery, graphQLQueryName, isAuthenticated: false);
             Assert.AreEqual(0, actual.GetProperty("items").GetArrayLength());
+
+            // first:0 returns no items, but the connection must still report that more items exist
+            // (the books table is non-empty), matching Relay's hasNextPage semantics.
+            Assert.IsTrue(actual.GetProperty("hasNextPage").GetBoolean());
         }
 
         /// <summary>

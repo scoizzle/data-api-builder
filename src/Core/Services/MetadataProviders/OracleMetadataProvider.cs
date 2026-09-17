@@ -498,6 +498,12 @@ namespace Azure.DataApiBuilder.Core.Services
                 using OracleConnection conn = new();
                 conn.ConnectionString = ConnectionString;
 
+                // Managed-identity/wallet connection strings carry no password, so the access
+                // token must be applied before opening (as GetColumnsAsync does). This metadata
+                // hook is synchronous, so block on the async token acquisition; there is no
+                // SynchronizationContext during metadata init.
+                QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, _dataSourceName).GetAwaiter().GetResult();
+
                 // Synchronous open is acceptable here during metadata init.
                 conn.Open();
 
@@ -522,11 +528,14 @@ namespace Azure.DataApiBuilder.Core.Services
                     ParseTriggerBodyForIdentityColumns(triggerBody, sourceDefinition);
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // If trigger detection fails, fall back to the driver's IsAutoIncrement.
                 // This is non-fatal; the worst case is that trigger-based identity columns
                 // are not detected and the user must supply the value explicitly.
+                _logger.LogWarning(
+                    ex,
+                    "Failed to detect Oracle trigger-based identity columns; falling back to driver IsAutoIncrement metadata.");
             }
         }
 
