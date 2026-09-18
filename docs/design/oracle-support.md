@@ -17,6 +17,22 @@ Data API builder supports Oracle Database 19c and later through
 - Managed identity password-token replacement when configured
 - Oracle metadata lookup through `ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, and related views
 
+## Hosted and managed-identity security
+
+- When the runtime config is late-configured (hosted/DAB-as-a-service scenario) the Oracle
+  provider requires native network encryption process-wide
+  (`OracleConfiguration.SqlNetEncryptionClient = "REQUIRED"`). MSSQL/MySQL/PostgreSQL force
+  connection encryption in the same situation, and ODP.NET rejects the SqlClient
+  `Encryption=true` keyword.
+- Managed identity token replacement rewrites only the password. All other connection-string
+  attributes are round-tripped through `OracleConnectionStringBuilder`, so TLS/wallet options
+  carried in the Data Source descriptor (for example `PROTOCOL=TCPS`,
+  `SECURITY=(MY_WALLET_DIRECTORY=...)(SSL_SERVER_DN_MATCH=TRUE)`) are preserved. Those options
+  are only valid inside the descriptor; standalone `Wallet Location`/`SSL_SERVER_DN_MATCH`
+  keywords are rejected by ODP.NET.
+- Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
+  (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
+
 ## Current Limitations
 
 ### Stored procedures

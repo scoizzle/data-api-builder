@@ -921,6 +921,7 @@ namespace Azure.DataApiBuilder.Core.Services
             DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
 
             string resultQuery;
+            Dictionary<string, DbConnectionParam> resultQueryParameters;
             if (dbSp.IsFunction)
             {
                 // A function's result set is its RETURN value (ALL_ARGUMENTS POSITION 0), regardless
@@ -930,11 +931,22 @@ namespace Azure.DataApiBuilder.Core.Services
                     packageName: dbSp.PackageName,
                     subprogramName: storedProcedureName,
                     isFunction: true);
+                resultQueryParameters = new()
+                {
+                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
+                    { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
+                    { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
+                };
             }
             else if (string.IsNullOrEmpty(dbSp.PackageName))
             {
                 // Standalone procedure - use the shared query built from schema.subprogram.
                 resultQuery = SqlQueryBuilder.BuildStoredProcedureResultDetailsQuery($"{schemaName}.{storedProcedureName}");
+                resultQueryParameters = new()
+                {
+                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
+                    { "@param1", new DbConnectionParam(storedProcedureName, DbType.String) },
+                };
             }
             else
             {
@@ -944,11 +956,17 @@ namespace Azure.DataApiBuilder.Core.Services
                     packageName: dbSp.PackageName,
                     subprogramName: storedProcedureName,
                     isFunction: false);
+                resultQueryParameters = new()
+                {
+                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
+                    { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
+                    { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
+                };
             }
 
             JsonArray? resultArray = await QueryExecutor.ExecuteQueryAsync(
                 sqltext: resultQuery,
-                parameters: null!,
+                parameters: resultQueryParameters,
                 dataReaderHandler: QueryExecutor.GetJsonArrayAsync,
                 dataSourceName: _dataSourceName);
 
