@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.IO;
 using System.IO.Abstractions;
 using System.Net;
@@ -55,6 +56,34 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             PostgreSqlMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
             Assert.AreEqual(expected, actual);
+        }
+
+        [DataTestMethod]
+        [DataRow("HR", "User Id=hr;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("SYSTEM", "User Id=SYSTEM;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("", "Data Source=localhost:1521/x", false)]
+        [DataRow("", "not-a-connection-string", false)]
+        public void OracleConnectionStringParsingDoesNotFallBackToSystem(string expectedSchema, string connectionString, bool expectedSuccess)
+        {
+            bool success = OracleMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
+            Assert.AreEqual(expectedSuccess, success);
+            Assert.AreEqual(expectedSchema, actual);
+        }
+
+        [DataTestMethod]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow("SELECT hr.books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow(":new.id := books_seq.NEXTVAL;", "id")]
+        [DataRow(":new.id := hr.books_seq.NEXTVAL;", "id")]
+        [DataRow("IF :new.id IS NULL THEN :new.id := books_seq.NEXTVAL; END IF;", "id")]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.\"ID\" FROM dual", "ID")]
+        public void OracleTriggerParserFindsSequenceAssignedColumns(string triggerBody, string expectedColumn)
+        {
+            IReadOnlyList<string> columns = OracleMetadataProvider.FindTriggerAssignedColumnNames(triggerBody);
+            Assert.AreEqual(1, columns.Count, string.Join(",", columns));
+            Assert.IsTrue(
+                columns.Any(column => column.Equals(expectedColumn, StringComparison.OrdinalIgnoreCase)),
+                string.Join(",", columns));
         }
 
         /// <summary>
@@ -640,7 +669,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             // Act
             MsSqlMetadataProvider metadataProvider = (MsSqlMetadataProvider)_sqlMetadataProvider;
-            JsonArray resultArray = await metadataProvider.QueryAutoentitiesAsync("autoentity", autoentity);
+            JsonArray resultArray = await metadataProvider.QueryAutoentitiesFromDatabaseAsync("autoentity", autoentity);
 
             // Assert
             Assert.IsNotNull(resultArray);

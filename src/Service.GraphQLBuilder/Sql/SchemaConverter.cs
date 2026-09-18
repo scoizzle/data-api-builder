@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Immutable;
+using System.Data;
 using System.Net;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -415,7 +416,7 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
         /// Helper method to generate the FieldDefinitionNode for a column in a table/view or a result set field in a stored-procedure.
         /// </summary>
         /// <param name="configEntity">Entity's definition (to which the column belongs).</param>
-        /// <param name="columnName">Backing column name.</param>
+        /// <param name="columnName">Backing column name (the physical spelling, e.g. UPPERCASE for Oracle).</param>
         /// <param name="column">Column definition.</param>
         /// <param name="directives">List of directives to be added to the column's field definition.</param>
         /// <param name="roles">List of roles having read permission on the column (for tables/views) or execute permission for stored-procedure.</param>
@@ -427,18 +428,29 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
                 directives.Add(authZDirective!);
             }
 
-            // Determine the exposed column name considering mappings and aliases
+            // The default (unaliased) exposed name is the backing/catalog column name exactly as it
+            // was provided to the engine. Entity mappings/field aliases below override it verbatim;
+            // no database-specific casing normalization is applied.
             string exposedColumnName = columnName;
-            if (configEntity.Mappings is not null && configEntity.Mappings.TryGetValue(key: columnName, out string? columnAlias))
+
+            // Mappings/fields keys are authored in the runtime config and may differ in case from
+            // the physical column name (e.g. Oracle stores unquoted identifiers UPPERCASE), so
+            // both lookups are performed case-insensitively.
+            if (configEntity.Mappings is not null)
             {
-                exposedColumnName = columnAlias;
+                string? columnAlias = configEntity.Mappings
+                    .FirstOrDefault(m => m.Key.Equals(columnName, StringComparison.OrdinalIgnoreCase)).Value;
+                if (!string.IsNullOrWhiteSpace(columnAlias))
+                {
+                    exposedColumnName = columnAlias;
+                }
             }
 
             // Apply alias if present (alias overrides mapping)
             FieldMetadata? fieldMetadata = null;
             if (configEntity.Fields is not null)
             {
-                fieldMetadata = configEntity.Fields.FirstOrDefault(f => f.Name == columnName);
+                fieldMetadata = configEntity.Fields.FirstOrDefault(f => f.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase));
                 if (fieldMetadata != null && !string.IsNullOrEmpty(fieldMetadata.Alias))
                 {
                     exposedColumnName = fieldMetadata.Alias;
@@ -562,6 +574,13 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
             {
                 // Npgsql may report abstract System.Array for unresolved PostgreSQL array columns.
                 // Default to String if the element type hasn't been resolved yet.
+                return STRING_TYPE;
+            }
+            else if (type == typeof(IDataReader))
+            {
+                // Oracle REF CURSOR columns (returned by stored procedures) surface as IDataReader.
+                // DAB treats the procedure's result set as the response; default to String for
+                // schema-generation purposes.
                 return STRING_TYPE;
             }
 

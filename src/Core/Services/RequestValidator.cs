@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
@@ -105,6 +106,26 @@ namespace Azure.DataApiBuilder.Core.Services
                              " requested were not found in the entity definition.",
                     statusCode: HttpStatusCode.BadRequest,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.InvalidIdentifierField);
+            }
+
+            // After ParsePrimaryKey, URL PK values are on the context. If the body also
+            // supplies a PK field, it must match the URL (PUT/PATCH by-route).
+            foreach (string pkBacking in sourceDefinition.PrimaryKey)
+            {
+                if (!sqlMetadataProvider.TryGetExposedColumnName(context.EntityName, pkBacking, out string? exposedName))
+                {
+                    continue;
+                }
+
+                if (context.FieldValuePairsInBody.TryGetValue(exposedName!, out object? bodyPkValue)
+                    && context.PrimaryKeyValuePairs.TryGetValue(exposedName!, out object? urlPkValue)
+                    && !PrimaryKeyValuesEqual(bodyPkValue, urlPkValue))
+                {
+                    throw new DataApiBuilderException(
+                        message: $"The value of primary key field '{exposedName}' in the request body does not match the value in the URL.",
+                        statusCode: HttpStatusCode.BadRequest,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
+                }
             }
         }
 
@@ -604,6 +625,66 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             string dataSourceName = _runtimeConfigProvider.GetConfig().GetDataSourceNameFromEntityName(entityName);
             return _sqlMetadataProviderFactory.GetMetadataProvider(dataSourceName);
+        }
+
+        /// <summary>
+        /// Compares a primary-key value supplied in the request body against the value parsed from
+        /// the URL. URL values are strings; body values are typically <see cref="JsonElement"/> from
+        /// JSON deserialization. Numeric and boolean body values are compared by value so that
+        /// equivalent representations (e.g. <c>1</c> vs <c>1.0</c>, or JSON <c>true</c> vs the URL
+        /// text <c>true</c>) are not reported as mismatches.
+        /// </summary>
+        internal static bool PrimaryKeyValuesEqual(object? bodyValue, object? urlValue)
+        {
+            if (bodyValue is null && urlValue is null)
+            {
+                return true;
+            }
+
+            if (bodyValue is null || urlValue is null)
+            {
+                return false;
+            }
+
+            string bodyText = ToComparableText(bodyValue);
+            string urlText = ToComparableText(urlValue);
+
+            // Same textual representation (also covers string PKs such as "SciFi").
+            if (string.Equals(bodyText, urlText, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // JSON numbers/booleans render differently from their URL text form, so fall back to a
+            // typed comparison based on the body's JSON value kind.
+            if (bodyValue is JsonElement bodyElement)
+            {
+                switch (bodyElement.ValueKind)
+                {
+                    case JsonValueKind.Number when
+                        bodyElement.TryGetDecimal(out decimal bodyNumber)
+                        && decimal.TryParse(urlText, NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out decimal urlNumber):
+                        return bodyNumber == urlNumber;
+                    case JsonValueKind.True:
+                    case JsonValueKind.False:
+                        return bool.TryParse(urlText, out bool urlBool)
+                            && urlBool == (bodyElement.ValueKind == JsonValueKind.True);
+                }
+            }
+
+            return false;
+        }
+
+        private static string ToComparableText(object value)
+        {
+            if (value is JsonElement element)
+            {
+                return element.ValueKind == JsonValueKind.String
+                    ? element.GetString() ?? string.Empty
+                    : element.ToString();
+            }
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
         }
     }
 }

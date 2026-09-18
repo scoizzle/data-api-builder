@@ -2293,6 +2293,15 @@ query {
         {
             RuntimeConfig configuration = SqlTestHelper.InitBasicRuntimeConfigWithNoEntity(dbType, testEnvironment);
 
+            // Oracle exposes the catalog spelling (UPPERCASE) for unmapped columns, so the custom
+            // Club/Player entities explicitly map their columns to the lowercase names this test queries.
+            Dictionary<string, string> oracleClubMappings = dbType is DatabaseType.Oracle
+                ? new() { { "id", "id" }, { "name", "name" } }
+                : null;
+            Dictionary<string, string> oraclePlayerMappings = dbType is DatabaseType.Oracle
+                ? new() { { "id", "id" }, { "name", "name" }, { "current_club_id", "current_club_id" }, { "new_club_id", "new_club_id" } }
+                : null;
+
             Entity clubEntity = new(
                 Source: new("clubs", EntitySourceType.Table, null, null),
                 Fields: null,
@@ -2300,7 +2309,7 @@ query {
                 GraphQL: new("club", "clubs"),
                 Permissions: new[] { ConfigurationTests.GetMinimalPermissionConfig(AuthorizationResolver.ROLE_ANONYMOUS) },
                 Relationships: null,
-                Mappings: null
+                Mappings: oracleClubMappings
             );
 
             Entity playerEntity = new(
@@ -2318,7 +2327,7 @@ query {
                     LinkingSourceFields: null,
                     LinkingTargetFields: null
                 )}},
-                Mappings: null
+                Mappings: oraclePlayerMappings
             );
 
             Dictionary<string, Entity> entities = new(configuration.Entities) {

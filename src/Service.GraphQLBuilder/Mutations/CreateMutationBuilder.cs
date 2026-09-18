@@ -121,7 +121,16 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Mutations
                             // The field can represent a related entity with M:N relationship with the parent.
                             NameNode baseObjectTypeNameForField = new(typeName);
                             typeName = GenerateLinkingNodeName(baseEntityName.Value, typeName);
-                            def = (ObjectTypeDefinitionNode)definitions.FirstOrDefault(d => d.Name.Value.Equals(typeName))!;
+                            def = definitions.FirstOrDefault(d => d.Name.Value.Equals(typeName));
+                            if (def is not ObjectTypeDefinitionNode linkingObjectType)
+                            {
+                                throw new DataApiBuilderException(
+                                    message: $"The linking type {typeName} is not a known GraphQL type, and cannot be used in this schema.",
+                                    statusCode: HttpStatusCode.ServiceUnavailable,
+                                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                            }
+
+                            def = linkingObjectType;
 
                             // Get entity definition for this ObjectTypeDefinitionNode.
                             // Recurse for evaluating input objects for related entities.
