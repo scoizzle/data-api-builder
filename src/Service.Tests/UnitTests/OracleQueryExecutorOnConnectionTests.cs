@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -73,6 +74,28 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 Assert.AreEqual(1, conn.LastCommand.ExecuteReaderCount,
                     "Failed child statement on a local transaction must not Polly-retry.");
             }
+        }
+
+        [TestMethod]
+        public void BuildConnectionStringWithAccessTokenPreservesTlsAndWalletOptions()
+        {
+            // The ODP.NET connection string builder rejects standalone Wallet/TLS keywords such as
+            // "Wallet Location" and "SSL_SERVER_DN_MATCH"; they are only valid inside the Data Source
+            // descriptor. Applying a managed identity token must not drop them.
+            const string connectionString =
+                "User Id=app;Password=placeholder;Pooling=false;" +
+                "Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=db.example.com)(PORT=2484))" +
+                "(CONNECT_DATA=(SERVICE_NAME=svc))(SECURITY=(MY_WALLET_DIRECTORY=/wallet)(SSL_SERVER_DN_MATCH=TRUE)))";
+
+            string updated = OracleQueryExecutor.BuildConnectionStringWithAccessToken(connectionString, "mi-token");
+
+            OracleConnectionStringBuilder builder = new(updated);
+            Assert.AreEqual("mi-token", builder.Password, "The access token must replace the password.");
+            Assert.AreEqual("app", builder.UserID);
+            Assert.IsFalse(builder.Pooling);
+            StringAssert.Contains(builder.DataSource, "PROTOCOL=TCPS", "TCPS protocol must survive token application.");
+            StringAssert.Contains(builder.DataSource, "MY_WALLET_DIRECTORY", "Wallet directory must survive token application.");
+            StringAssert.Contains(builder.DataSource, "SSL_SERVER_DN_MATCH=TRUE", "DN matching must survive token application.");
         }
 
         [TestMethod]

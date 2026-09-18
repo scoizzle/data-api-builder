@@ -10,7 +10,9 @@
       "additionalVersions": "10.0"
     },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-      "version": "latest"
+      // Pin the CLI/engine to the version the Oracle integration workflow is verified against
+      // instead of floating "latest", so devcontainer builds stay reproducible.
+      "version": "29.8.0"
     }
   },
   "customizations": {

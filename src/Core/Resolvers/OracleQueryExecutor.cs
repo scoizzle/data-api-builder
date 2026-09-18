@@ -107,6 +107,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             foreach ((string dataSourceName, DataSource dataSource) in oracledbs)
             {
+                // Hosted/late-configured deployments must not send database traffic in cleartext.
+                // MySQL/PostgreSQL force SslMode=VerifyFull and MSSQL forces Encrypt=true; ODP.NET
+                // rejects SqlClient's "Encryption=true" keyword, so require native network encryption
+                // process-wide instead (covers both TCPS and Oracle native encryption).
+                if (_runtimeConfigProvider.IsLateConfigured)
+                {
+                    OracleConfiguration.SqlNetEncryptionClient = "REQUIRED";
+                }
+
                 // ODP.NET rejects SqlClient's Encryption=true keyword; do not append it when hosted.
                 OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
@@ -302,13 +311,26 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 if (accessToken is not null)
                 {
-                    OracleConnectionStringBuilder newConnectionString = new(sqlConn.ConnectionString)
-                    {
-                        Password = accessToken
-                    };
-                    sqlConn.ConnectionString = newConnectionString.ToString();
+                    sqlConn.ConnectionString = BuildConnectionStringWithAccessToken(sqlConn.ConnectionString, accessToken);
                 }
             }
+        }
+
+        /// <summary>
+        /// Replaces the password in an Oracle connection string with a managed identity access
+        /// token. All other attributes are round-tripped through <see cref="OracleConnectionStringBuilder"/>,
+        /// including the Data Source descriptor, so TLS/wallet options carried in the descriptor
+        /// (e.g. PROTOCOL=TCPS, SECURITY=(MY_WALLET_DIRECTORY=...)) are preserved.
+        /// Exposed as internal to allow a regression test that the security-relevant attributes
+        /// survive token application.
+        /// </summary>
+        internal static string BuildConnectionStringWithAccessToken(string connectionString, string accessToken)
+        {
+            OracleConnectionStringBuilder newConnectionString = new(connectionString)
+            {
+                Password = accessToken
+            };
+            return newConnectionString.ToString();
         }
 
         /// <summary>

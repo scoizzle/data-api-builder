@@ -136,50 +136,60 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     && _runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled()
                     && sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle)
                 {
-                    OracleQueryExecutor oracleExecutor = (OracleQueryExecutor)_queryManagerFactory.GetQueryExecutor(DatabaseType.Oracle);
-                    using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
-                    await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
-                    await conn.OpenAsync();
-                    using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn, dataSourceName);
                     try
                     {
-                        bool isPointMutation = IsPointMutation(context);
-                        List<IDictionary<string, object?>> primaryKeysOfCreatedItems = PerformMultipleCreateOperation(
-                                    entityName,
-                                    context,
-                                    parameters,
-                                    sqlMetadataProvider,
-                                    _runtimeConfigProvider.GetConfig(),
-                                    !isPointMutation,
-                                    conn,
-                                    tx);
-
-                        SqlQueryEngine sqlQueryEngine = (SqlQueryEngine)queryEngine;
-                        if (isPointMutation)
+                        OracleQueryExecutor oracleExecutor = (OracleQueryExecutor)_queryManagerFactory.GetQueryExecutor(DatabaseType.Oracle);
+                        using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
+                        await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
+                        await conn.OpenAsync();
+                        using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn, dataSourceName);
+                        try
                         {
-                            result = await sqlQueryEngine.ExecuteAsync(
+                            bool isPointMutation = IsPointMutation(context);
+                            List<IDictionary<string, object?>> primaryKeysOfCreatedItems = PerformMultipleCreateOperation(
+                                        entityName,
                                         context,
-                                        primaryKeysOfCreatedItems[0],
-                                        dataSourceName,
+                                        parameters,
+                                        sqlMetadataProvider,
+                                        _runtimeConfigProvider.GetConfig(),
+                                        !isPointMutation,
                                         conn,
                                         tx);
-                        }
-                        else
-                        {
-                            result = await sqlQueryEngine.ExecuteMultipleCreateFollowUpQueryAsync(
-                                        context,
-                                        primaryKeysOfCreatedItems,
-                                        dataSourceName,
-                                        conn,
-                                        tx);
-                        }
 
-                        tx.Commit();
+                            SqlQueryEngine sqlQueryEngine = (SqlQueryEngine)queryEngine;
+                            if (isPointMutation)
+                            {
+                                result = await sqlQueryEngine.ExecuteAsync(
+                                            context,
+                                            primaryKeysOfCreatedItems[0],
+                                            dataSourceName,
+                                            conn,
+                                            tx);
+                            }
+                            else
+                            {
+                                result = await sqlQueryEngine.ExecuteMultipleCreateFollowUpQueryAsync(
+                                            context,
+                                            primaryKeysOfCreatedItems,
+                                            dataSourceName,
+                                            conn,
+                                            tx);
+                            }
+
+                            tx.Commit();
+                        }
+                        catch
+                        {
+                            tx.Rollback();
+                            throw;
+                        }
                     }
-                    catch
+                    catch (DbException dbException)
                     {
-                        tx.Rollback();
-                        throw;
+                        // Convert raw provider exceptions (connection open, commit, rollback) into
+                        // production-safe DAB errors so they never reach the GraphQL error filter
+                        // as a raw Oracle message.
+                        throw _queryManagerFactory.GetDbExceptionParser(DatabaseType.Oracle).Parse(dbException);
                     }
                 }
                 else
