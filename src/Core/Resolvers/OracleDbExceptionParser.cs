@@ -46,16 +46,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 // Column and table related
                 "1430",     // ORA-01430: column is not in select list
-                "1717",     // ORA-01717: invalid option for alter session
-                "2003",     // ORA-02003: invalid column specification
-                "2004",     // ORA-02004: invalid column specification
-                "2005",     // ORA-02005: invalid column specification
-                "1018",     // ORA-01018: open cursor forced to close
-                "1019"      // ORA-01019: cannot allocate memory in the user side
-                // NOTE: ORA-06550 (PL/SQL compilation unit error) and ORA-00933 (SQL command not
-                // properly ended) are intentionally NOT mapped to 400: they are generic parser
-                // errors that are at least as likely to indicate a defect in DAB-generated SQL as
-                // a client-input error, so they surface as 500 rather than masking server bugs.
+                "1717"      // ORA-01717: invalid option for alter session
+                // NOTE: ORA-01018/01019 (cursor/memory state), ORA-02003-02005 (USERENV/column
+                // specification), ORA-02443 (invalid trigger name) and ORA-01410-01412 (ROWID)
+                // are intentionally NOT mapped to 400/409: they describe server-side state or
+                // DAB-generated SQL, so they surface as 500 rather than telling clients their
+                // request was fixable.
             });
 
             TransientExceptionCodes.UnionWith(new List<string>
@@ -111,15 +107,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "2292",     // ORA-02292: integrity constraint violated
                 "2293",     // ORA-02293: cannot validate - check constraint violated
                 "2294",     // ORA-02294: duplicate key value
-                "2443",     // ORA-02443: invalid trigger name
-
-                // Lock conflicts
-                "1410",     // ORA-01410: invalid ROWID
-                "1411",     // ORA-01411: invalid row (no valid ROWID)
-                "1412",     // ORA-01412: invalid row sequence
                 "8177"      // ORA-08177: can't serialize access for this transaction
                 // NOTE: ORA-00060 (deadlock) is intentionally NOT here — it is transient and
                 // handled by TransientExceptionCodes for retry logic, not mapped to 409.
+                // ORA-02443 (invalid trigger name) and ORA-01410-01412 (ROWID) are server/state
+                // errors and are left to the 500 fallback rather than reported as conflicts.
             });
         }
 

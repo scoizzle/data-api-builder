@@ -639,6 +639,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 DbPolicyPredicatesForOperations[operation] = GetFilterPredicatesFromOdataClause(dbPolicyClause, visitor);
             }
+            catch (DataApiBuilderException)
+            {
+                // Preserve specific policy errors (e.g. a policy field that does not exist) instead
+                // of replacing them with the generic malformed-policy message.
+                throw;
+            }
             catch (Exception ex)
             {
                 throw new DataApiBuilderException(

@@ -923,7 +923,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <param name="autoentityName">The name of the autoentity definition.</param>
         /// <param name="autoentity">The autoentity definition containing patterns for inclusion, exclusion, and name.</param>
         /// <returns>A JsonArray containing the queried autoentities, or an empty array if none are found.</returns>
-        protected virtual async Task<JsonArray?> QueryAutoentitiesFromDatabaseAsync(string autoentityName, Autoentity autoentity)
+        protected internal virtual async Task<JsonArray?> QueryAutoentitiesFromDatabaseAsync(string autoentityName, Autoentity autoentity)
         {
             string include = string.Join(",", autoentity.Patterns.Include);
             string exclude = string.Join(",", autoentity.Patterns.Exclude);

@@ -1849,18 +1849,20 @@ public class RuntimeConfigValidator : IConfigValidator
 
     /// <summary>
     /// Helper method which takes in field prefixed with @item. directive and check if its
-    /// accessible based on include/exclude fields.
+    /// accessible based on include/exclude fields. Field names are compared case-insensitively
+    /// because runtime exposed-to-backing resolution (TryGetBackingColumn) is case-insensitive
+    /// and engines such as Oracle surface catalog casing (UPPERCASE for unquoted identifiers).
     /// </summary>
     /// <param name="columnNameMatch"></param>
     /// <param name="included">Set of fields which are accessible to the user.</param>
     /// <param name="excluded">Set of fields which are not accessible to the user.</param>
     /// <returns>Boolean value indicating whether the field is accessible or not.</returns>
     /// <exception cref="DataApiBuilderException">Throws exception if the field is not accessible.</exception>
-    private static bool IsFieldAccessible(Match columnNameMatch, HashSet<string>? includedFields, HashSet<string> excludedFields)
+    internal static bool IsFieldAccessible(Match columnNameMatch, HashSet<string>? includedFields, HashSet<string> excludedFields)
     {
         string columnName = columnNameMatch.Value.Substring(AuthorizationResolver.FIELD_PREFIX.Length);
-        if (excludedFields.Contains(columnName!) || excludedFields.Contains(AuthorizationResolver.WILDCARD) ||
-            (includedFields is not null && !includedFields.Contains(AuthorizationResolver.WILDCARD) && !includedFields.Contains(columnName)))
+        if (ContainsFieldIgnoreCase(excludedFields, columnName) || ContainsFieldIgnoreCase(excludedFields, AuthorizationResolver.WILDCARD) ||
+            (includedFields is not null && !ContainsFieldIgnoreCase(includedFields, AuthorizationResolver.WILDCARD) && !ContainsFieldIgnoreCase(includedFields, columnName)))
         {
             // If column is present in excluded OR excluded='*'
             // If column is absent from included and included!=*
@@ -1869,6 +1871,14 @@ public class RuntimeConfigValidator : IConfigValidator
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Case-insensitive membership test for a configured include/exclude field set.
+    /// </summary>
+    private static bool ContainsFieldIgnoreCase(HashSet<string> fields, string fieldName)
+    {
+        return fields.Any(field => string.Equals(field, fieldName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
