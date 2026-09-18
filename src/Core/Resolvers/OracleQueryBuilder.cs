@@ -746,11 +746,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Builds the metadata query for a STANDALONE Oracle subprogram only. The name must be at
-        /// most two parts ("schema.subprogram" or "subprogram"). A three-part name
-        /// ("schema.package.subprogram") must route through the package-aware overload instead;
-        /// <see cref="SchemaNameFrom"/> / <see cref="NameFrom"/> would otherwise silently drop the
-        /// middle package token and resolve against the wrong object.
+        /// Builds the metadata query for a STANDALONE Oracle subprogram only.
+        /// Callers must bind <c>@param0</c> (schema) and <c>@param1</c> (subprogram name); the
+        /// values are compared case-insensitively in the query.
         /// </summary>
         /// <inheritdoc/>
         public string BuildStoredProcedureResultDetailsQuery(string databaseObjectName)
@@ -759,15 +757,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // Oracle doesn't have a direct equivalent to SQL Server's
             // dm_exec_describe_first_result_set_for_object. Instead we query ALL_ARGUMENTS to get
             // OUT / IN OUT arguments that represent the result.
-            // databaseObjectName format: "schema.procedureName" or "procedureName".
+            // databaseObjectName is unused: names are bound as @param0/@param1 (never interpolated)
+            // so a hostile object name cannot alter the query. The signature is fixed by IQueryBuilder.
             string query =
                 $"SELECT " +
                 $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
                 $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
                 $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
-                $"WHERE UPPER(OWNER) = UPPER('{SchemaNameFrom(databaseObjectName).Replace("'", "''")}') " +
-                $"AND UPPER(OBJECT_NAME) = UPPER('{NameFrom(databaseObjectName).Replace("'", "''")}') " +
+                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
+                $"AND UPPER(OBJECT_NAME) = UPPER(@param1) " +
                 $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
                 $"AND ARGUMENT_NAME IS NOT NULL " +
                 $"ORDER BY POSITION";
@@ -780,6 +779,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// inside a package. Unlike standalone subprograms (whose arguments appear in ALL_ARGUMENTS
         /// with an empty PACKAGE_NAME column), packaged subprogram arguments are keyed by the
         /// PACKAGE_NAME column and the bare subprogram name in OBJECT_NAME.
+        /// Callers must bind <c>@param0</c> (schema), <c>@param1</c> (package, unused when the
+        /// package is null/empty) and <c>@param2</c> (subprogram name).
         /// </summary>
         /// <param name="schemaName">Owning schema, e.g. "SYSTEM".</param>
         /// <param name="packageName">Package name, e.g. "PKG_TEST".</param>
@@ -796,9 +797,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ALL_ARGUMENTS keys a standalone subprogram by PACKAGE_NAME IS NULL and a packaged one
             // by PACKAGE_NAME = <package>. (In Oracle an empty string IS NULL, so a plain equality
             // against an empty package name would match nothing.)
+            // Names are bound (never interpolated) so a hostile object name cannot alter the query.
             string packageClause = string.IsNullOrEmpty(packageName)
                 ? "PACKAGE_NAME IS NULL"
-                : $"UPPER(PACKAGE_NAME) = UPPER('{packageName.Replace("'", "''")}')";
+                : "UPPER(PACKAGE_NAME) = UPPER(@param1)";
 
             string query =
                 $"SELECT " +
@@ -806,9 +808,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
                 $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
-                $"WHERE UPPER(OWNER) = UPPER('{schemaName.Replace("'", "''")}') " +
+                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
                 $"AND {packageClause} " +
-                $"AND UPPER(OBJECT_NAME) = UPPER('{subprogramName.Replace("'", "''")}') " +
+                $"AND UPPER(OBJECT_NAME) = UPPER(@param2) " +
                 (isFunction
                     // A function's result set is its RETURN value (POSITION 0, ARGUMENT_NAME null).
                     ? $"AND POSITION = 0 "
@@ -817,29 +819,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"ORDER BY POSITION";
 
             return query;
-        }
-
-        /// <summary>
-        /// Extracts the schema (the first token) from a standalone subprogram name. Callers must
-        /// ensure the name has at most two dot-separated tokens: for "a.b.c" this returns "a" and
-        /// silently ignores the middle token, which is only correct when the caller has already
-        /// routed package-qualified names elsewhere.
-        /// </summary>
-        private static string SchemaNameFrom(string databaseObjectName)
-        {
-            int dot = databaseObjectName.IndexOf('.');
-            return dot < 0 ? databaseObjectName : databaseObjectName[..dot];
-        }
-
-        /// <summary>
-        /// Extracts the object name (the last token) from a standalone subprogram name. Callers must
-        /// ensure the name has at most two dot-separated tokens: for "a.b.c" this returns "c" and
-        /// silently ignores the middle token.
-        /// </summary>
-        private static string NameFrom(string databaseObjectName)
-        {
-            int dot = databaseObjectName.LastIndexOf('.');
-            return dot < 0 ? databaseObjectName : databaseObjectName[(dot + 1)..];
         }
 
         /// <inheritdoc/>

@@ -35,6 +35,10 @@ public class DbResultSetRow
 
     /// <summary>
     /// Represents a result set row in <c>ColumnName: Value</c> format, empty if no row was found.
+    /// Comparisons are ordinal and case-insensitive so drivers that surface identifiers with a
+    /// different case than the exposed field name (e.g. Oracle's uppercase metadata) resolve
+    /// correctly, without the culture-sensitive semantics of
+    /// <see cref="StringComparer.InvariantCultureIgnoreCase"/>.
     /// </summary>
-    public Dictionary<string, object?> Columns { get; private set; } = new(StringComparer.InvariantCultureIgnoreCase);
+    public Dictionary<string, object?> Columns { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
 }
