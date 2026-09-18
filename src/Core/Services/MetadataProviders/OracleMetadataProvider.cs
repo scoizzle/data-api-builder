@@ -107,6 +107,12 @@ namespace Azure.DataApiBuilder.Core.Services
             try
             {
                 using OracleConnection connection = new(ConnectionString);
+
+                // Password-less (wallet/managed-identity) connection strings require the access
+                // token before opening. This hook is synchronous, so block on the async token
+                // acquisition like DetectTriggerBasedIdentityColumns does.
+                QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName).GetAwaiter().GetResult();
+
                 connection.Open();
                 using OracleCommand command = connection.CreateCommand();
                 command.CommandText = "SELECT USER FROM DUAL";

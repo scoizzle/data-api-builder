@@ -85,6 +85,20 @@ Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every 
 
 Casing translation lives in `OracleMetadataProvider` (config name → physical backing name) and `OracleQueryBuilder` (physical name → SQL identifier). Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle.
 
+## Authorization policies
+
+Database policies (`permissions[].actions[].policy.database`) use the shared engine-agnostic pipeline: `AuthorizationPolicyHelpers` resolves the policy for the role/operation (compound upsert operations expand to Update + Create), claim references (`@claims.x`) are replaced with typed bound parameters, `ODataASTVisitor` maps `@item.field` exposed names to physical backing columns and quotes them, and each builder injects the resulting predicate via `GetDbPolicyForOperation`.
+
+Oracle specifics:
+
+- **Predicate placement.** Read/update/delete policies are ANDed into the `WHERE` clause exactly like the other engines. Create (and the insert branch of upsert) cannot use `INSERT … SELECT … WHERE`, so Oracle gates the insert with `SELECT COUNT(*) INTO v FROM (SELECT value AS "COL", … FROM DUAL) WHERE <policy>` and opens an empty REF CURSOR when the policy is unsatisfied, which surfaces as HTTP 403.
+- **Inserts with no column values.** When the request body supplies no insertable columns, the policy cannot be evaluated against a row, so the request is rejected with HTTP 400 `DatabasePolicyFailure` instead of falling back to a `DEFAULT VALUES` insert (this is enforced for all engines; the other engines previously bypassed the create policy in that case).
+- **Empty string is NULL.** Oracle cannot store `''` distinctly from `NULL`, so a policy comparing a column to `''` is rewritten to the equivalent `IS NULL` / `IS NOT NULL` predicate (`@item.col eq ''` → `"COL" IS NULL`, `@item.col ne ''` → `"COL" IS NOT NULL`). Other engines compare against a real empty string.
+- **String comparison is case-sensitive** under Oracle's default binary collation.
+- **Numeric comparisons** bind policy literals for `NUMBER` columns as `decimal`; boolean-style predicates against `NUMBER(1)` columns are not supported.
+- **Invalid policy fields** (a field the entity does not expose) are rejected while processing the policy with a clear authorization error, rather than producing a malformed predicate.
+- **Multiple-create** applies the read policy of each created/related entity, combined with the OR'd primary-key predicate, in the same way as MSSQL.
+
 ## Cursor usage and ODP.NET statement caching
 
 DAB disposes every `DbDataReader`/`DbCommand` after a result is read, including the REF CURSOR output parameters used by the PL/SQL DML blocks, so it does not leak cursors. However, ODP.NET's client-side statement cache retains one open cursor per **distinct** SQL statement on a connection (measured: the cursor count grows by one per distinct statement and stays flat for repeated statements). On a long-lived pooled session that executes many distinct statements this consumes the account's per-session `open_cursors` limit (Oracle default `300`), surfacing at request time as:
