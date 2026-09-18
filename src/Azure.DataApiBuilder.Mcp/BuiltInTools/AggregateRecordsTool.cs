@@ -987,11 +987,18 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                     int rowsOnlyIdx = sql.IndexOf(rowsOnly, offsetIdx, StringComparison.OrdinalIgnoreCase);
                     if (rowsOnlyIdx > offsetIdx)
                     {
-                        int endIdx = rowsOnlyIdx + rowsOnly.Length;
-                        string replacement = args.First.HasValue
-                            ? orderByClause + BuildPaginationClause(args, structure)
-                            : orderByClause;
-                        return sql.Remove(offsetIdx, endIdx - offsetIdx).Insert(offsetIdx, replacement);
+                        if (args.First.HasValue)
+                        {
+                            int endIdx = rowsOnlyIdx + rowsOnly.Length;
+                            string replacement = orderByClause + BuildPaginationClause(args, structure);
+                            return sql.Remove(offsetIdx, endIdx - offsetIdx).Insert(offsetIdx, replacement);
+                        }
+
+                        // No explicit page size: keep the query builder's default
+                        // "OFFSET 0 ROWS FETCH NEXT <n> ROWS ONLY" row cap and inject only the
+                        // ORDER BY before it (mirrors MSSQL's retained TOP and PostgreSQL's
+                        // retained LIMIT).
+                        return sql.Insert(offsetIdx, orderByClause);
                     }
                 }
 
