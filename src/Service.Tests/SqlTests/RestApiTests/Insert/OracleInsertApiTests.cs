@@ -397,7 +397,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Insert
         }
 
         [TestMethod]
-        public new async Task InsertOneInViewBadRequestTest()
+        public async Task InsertOneInViewBadRequestTest()
         {
             string requestBody = @"
             {

@@ -525,7 +525,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         [TestMethod]
         [Ignore("Oracle sorts strings with binary collation, producing different order than SQL Server.")]
-        public new async Task TestGetNullIntFields()
+        public async Task TestGetNullIntFields()
         {
             await Task.CompletedTask;
         }
