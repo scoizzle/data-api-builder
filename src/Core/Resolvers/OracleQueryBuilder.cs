@@ -318,16 +318,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// (ORA-00900), so the subprogram is invoked from within a PL/SQL anonymous block.
         /// Oracle subprograms return result sets through a SYS_REFCURSOR (a procedure's OUT
         /// parameter, or a function's RETURN value), which ODP.NET does NOT surface in the
-        /// DbDataReader on its own. We therefore pass a trailing ":dab_result" OUT bind
-        /// (registered as a RefCursor by <see cref="OracleBindRegistrar"/>) whose rows ODP.NET
-        /// exposes as the reader result set - the same mechanism the DML paths rely on.
+        /// DbDataReader on its own. We therefore bind ":dab_result" (registered as a RefCursor by
+        /// <see cref="OracleBindRegistrar"/>) whose rows ODP.NET exposes as the reader result set.
         ///
-        /// This also supports subprograms that live inside a package (source "schema.package.sub")
-        /// and standalone or packaged FUNCTIONS:
-        ///  - Package procedure:  BEGIN "S"."P"."SUB"(:p0, :dab_result); END;
-        ///  - Package function returning a cursor:
-        ///      BEGIN :dab_result := "S"."P"."SUB"(:p0); END;
-        ///  - Scalar function (no cursor): invoked through SELECT ... FROM DUAL and read as a row.
+        /// Arguments use named association so a REF CURSOR that is not the last parameter, and a
+        /// skipped optional argument, cannot shift later binds. A function's RETURN is assigned,
+        /// not named:
+        ///  - Procedure: BEGIN "S"."P"("ID" => :param0, "P_CUR" => :dab_result); END;
+        ///  - Function returning a cursor: BEGIN :dab_result := "S"."P"("ID" => :param0); END;
+        ///  - Scalar function: SELECT "S"."P"("ID" => :param0) AS "value" FROM DUAL
         /// </summary>
         public string Build(SqlExecuteStructure structure)
         {
@@ -344,51 +343,74 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ? QuoteRelation(sp.SchemaName, sp.Name)
                 : $"{QuoteRelation(sp.SchemaName, sp.PackageName)}.{QuoteCatalogObject(sp.Name)}";
 
-            // ProcedureParameters maps each subprogram argument NAME (no prefix, e.g. "id") to the
-            // engine-generated bind reference (e.g. "@param0"). The actual bindable values live in
-            // structure.Parameters keyed by those "@paramN" names, so the call must reference the
-            // VALUES (not the keys). Emitting the keys (":id") would produce binds with no matching
-            // DbConnectionParam, causing PrepareDbCommand to silently drop the real parameters and
-            // Oracle to raise ORA-01008 (not all variables bound).
-            List<string> callArgs = structure.ProcedureParameters.Values
-                .Select(v => $":{v.ToString()!.TrimStart('@')}")
-                .ToList();
-
-            // StoredProcedureDefinition.Columns holds the result-set definition, populated from the
-            // subprogram's OUT/IN_OUT arguments / RETURN value (see BuildStoredProcedureResultDetailsQuery).
-            // A non-empty Columns dictionary signals that the subprogram yields a REF CURSOR result
-            // set we must capture by appending/assigning the shared RefCursor OUT bind.
+            // ProcedureParameters maps each subprogram argument NAME (catalog spelling) to the
+            // engine-generated bind reference (e.g. "@param0"). The call must reference the VALUES.
+            // Emitting the keys (":id") would produce binds with no matching DbConnectionParam.
+            // StoredProcedureDefinition.Columns holds OUT/RETURN metadata. An IDataReader column is
+            // the REF CURSOR argument (procedures) or the function RETURN (functions).
             bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Values
                 .Any(column => column.SystemType == typeof(IDataReader));
+            List<string> callArgs = BuildNamedCallArguments(structure, includeRefCursor: !sp.IsFunction && returnsCursor);
 
             if (sp.IsFunction)
             {
                 // A function's result (even if it is a REF CURSOR) is expressed as its RETURN
-                // value, so it cannot be called as a bare statement. Assign the RETURN into either
-                // the REF CURSOR output bind (result-set function) or a scalar bind (scalar function).
+                // value, so it cannot be called as a bare statement.
                 if (returnsCursor)
                 {
-                    // BEGIN :dab_result := "S"."P"."SUB"(:p0); END;
                     return $"BEGIN :{RESULT_CURSOR_PARAM_NAME} := {qualifiedName}({JoinArgs(callArgs)}); END;";
                 }
 
-                // Scalar function - select its value from DUAL so the reader yields one row:
-                // SELECT "S"."P"."SUB"(:p0) AS VALUE FROM DUAL;
                 string select = $"SELECT {qualifiedName}({JoinArgs(callArgs)}) AS {QuoteIdentifier("value")} FROM DUAL";
                 return select;
             }
 
-            // Stored procedure (standalone or packaged).
-            if (returnsCursor)
-            {
-                callArgs.Add($":{RESULT_CURSOR_PARAM_NAME}");
-            }
-
-            // Procedures with no arguments are invoked without parentheses:
-            //   BEGIN schema.proc; END;
+            // Procedures with no arguments are invoked without parentheses.
             string args = callArgs.Count > 0 ? $"({string.Join(", ", callArgs)})" : string.Empty;
 
             return $"BEGIN {qualifiedName}{args}; END;";
+        }
+
+        /// <summary>
+        /// Named PL/SQL associations (<c>"ARG" => :paramN</c>). The REF CURSOR is bound to its
+        /// actual argument name when this is a procedure; a function RETURN is not an argument.
+        /// </summary>
+        private List<string> BuildNamedCallArguments(SqlExecuteStructure structure, bool includeRefCursor)
+        {
+            List<string> callArgs = new();
+            foreach ((string argumentName, object bind) in structure.ProcedureParameters)
+            {
+                string bindName = bind.ToString()!.TrimStart('@');
+                callArgs.Add($"{QuoteIdentifier(argumentName)} => :{bindName}");
+            }
+
+            if (!includeRefCursor)
+            {
+                return callArgs;
+            }
+
+            string? cursorArgument = null;
+            foreach ((string columnName, ColumnDefinition column) in structure.GetUnderlyingSourceDefinition().Columns)
+            {
+                if (column.SystemType == typeof(IDataReader))
+                {
+                    cursorArgument = columnName;
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(cursorArgument))
+            {
+                callArgs.Add($"{QuoteIdentifier(cursorArgument)} => :{RESULT_CURSOR_PARAM_NAME}");
+            }
+            else
+            {
+                // Result metadata did not record the cursor argument name. Keep a bind so the
+                // executor still opens a reader, rather than dropping the result set.
+                callArgs.Add($":{RESULT_CURSOR_PARAM_NAME}");
+            }
+
+            return callArgs;
         }
 
         private static string JoinArgs(List<string> callArgs)
@@ -554,7 +576,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 .Select((column, index) =>
                 {
                     sourceDefinition.Columns.TryGetValue(column.ColumnName, out ColumnDefinition? definition);
-                    return $"{OUTPUT_BIND_PREFIX}{index}={GetOracleOutputType(definition)}";
+                    OracleDbType outputType = GetOracleOutputType(definition);
+                    if (outputType == OracleDbType.Raw)
+                    {
+                        // SQL RAW is at most 2000 bytes; PL/SQL RAW is at most 32767.
+                        // Size 0 makes ODP.NET RETURNING INTO fail or return empty bytes.
+                        int length = definition?.Length is int columnLength and > 0 ? columnLength : 2000;
+                        int size = Math.Min(Math.Max(length, 2000), 32767);
+                        return $"{OUTPUT_BIND_PREFIX}{index}={outputType}:{size}";
+                    }
+
+                    return $"{OUTPUT_BIND_PREFIX}{index}={outputType}";
                 });
 
             return $"/* DAB_ORACLE_OUTPUT_TYPES:{string.Join(",", hints)} */ ";
@@ -567,7 +599,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             if (systemType == typeof(byte[]))
             {
-                return OracleDbType.Raw;
+                // BLOB/LONG RAW do not fit in a RAW bind (PL/SQL RAW max is 32767 bytes).
+                // NCLOB is a string flagged IsClob and must not take this binary path.
+                return definition?.IsBlob == true ? OracleDbType.Blob : OracleDbType.Raw;
             }
 
             if (systemType == typeof(DateTimeOffset))
@@ -767,6 +801,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"FROM ALL_ARGUMENTS " +
                 $"WHERE UPPER(OWNER) = UPPER(@param0) " +
                 $"AND UPPER(OBJECT_NAME) = UPPER(@param1) " +
+                $"AND OVERLOAD IS NULL " +
                 $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
                 $"AND ARGUMENT_NAME IS NOT NULL " +
                 $"ORDER BY POSITION";
@@ -792,7 +827,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string schemaName,
             string? packageName,
             string subprogramName,
-            bool isFunction)
+            bool isFunction,
+            string? overload = null)
         {
             // ALL_ARGUMENTS keys a standalone subprogram by PACKAGE_NAME IS NULL and a packaged one
             // by PACKAGE_NAME = <package>. (In Oracle an empty string IS NULL, so a plain equality
@@ -801,6 +837,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string packageClause = string.IsNullOrEmpty(packageName)
                 ? "PACKAGE_NAME IS NULL"
                 : "UPPER(PACKAGE_NAME) = UPPER(@param1)";
+            // A null overload means the subprogram is not overloaded. Filtering to one OVERLOAD
+            // value keeps packaged overloads from mixing their parameters into one positional list.
+            string overloadClause = string.IsNullOrEmpty(overload)
+                ? "AND OVERLOAD IS NULL "
+                : "AND OVERLOAD = @param3 ";
 
             string query =
                 $"SELECT " +
@@ -811,6 +852,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"WHERE UPPER(OWNER) = UPPER(@param0) " +
                 $"AND {packageClause} " +
                 $"AND UPPER(OBJECT_NAME) = UPPER(@param2) " +
+                overloadClause +
                 (isFunction
                     // A function's result set is its RETURN value (POSITION 0, ARGUMENT_NAME null).
                     ? $"AND POSITION = 0 "

@@ -91,7 +91,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public OracleTransaction BeginLocalReadCommittedTransaction(OracleConnection conn, string dataSourceName)
         {
             QueryExecutorLogger.LogDebug(
-                "{correlationId} Using local OracleTransaction for multiple-create on data source {dataSourceName} ({oracleDataSource}); skipping ambient TransactionScope.",
+                "{correlationId} Using local OracleTransaction for mutation on data source {dataSourceName} ({oracleDataSource}); skipping ambient TransactionScope.",
                 HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
                 dataSourceName,
                 conn.DataSource);
@@ -563,7 +563,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public static void RegisterPlSqlOutputBinds(OracleCommand cmd, string translatedSql)
         {
             HashSet<string> existing = new(StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, OracleDbType> outputTypes = ExtractOutputTypeHints(translatedSql);
+            Dictionary<string, OutputTypeHint> outputTypes = ExtractOutputTypeHints(translatedSql);
             foreach (OracleParameter p in cmd.Parameters)
             {
                 existing.Add(p.ParameterName);
@@ -588,18 +588,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     continue;
                 }
 
-                OracleDbType outputType = outputTypes.TryGetValue(bindName, out OracleDbType hintedType)
-                    ? hintedType
-                    : OracleDbType.Varchar2;
+                OutputTypeHint hint = outputTypes.TryGetValue(bindName, out OutputTypeHint hinted)
+                    ? hinted
+                    : new OutputTypeHint(OracleDbType.Varchar2, Size: null);
+                OracleDbType outputType = hint.Type;
                 OracleParameter output = new(bindName, outputType)
                 {
                     Direction = ParameterDirection.Output,
                 };
 
-                // Variable-length outputs need an explicit size or ODP.NET can return an empty value.
+                // Variable-length outputs need an explicit size or ODP.NET returns empty
+                // or raises. RAW left at Size 0 fails every mutation that returns the column.
                 if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char)
                 {
                     output.Size = 4000;
+                }
+                else if (outputType == OracleDbType.Raw)
+                {
+                    output.Size = hint.Size is > 0 ? hint.Size.Value : 2000;
                 }
 
                 cmd.Parameters.Add(output);
@@ -610,9 +616,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         [GeneratedRegex(@"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
         private static partial Regex ReturnIntoRegex();
 
-        private static Dictionary<string, OracleDbType> ExtractOutputTypeHints(string sqlText)
+        private readonly record struct OutputTypeHint(OracleDbType Type, int? Size);
+
+        private static Dictionary<string, OutputTypeHint> ExtractOutputTypeHints(string sqlText)
         {
-            Dictionary<string, OracleDbType> result = new(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, OutputTypeHint> result = new(StringComparer.OrdinalIgnoreCase);
             const string marker = "DAB_ORACLE_OUTPUT_TYPES:";
             int start = sqlText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
             if (start < 0)
@@ -630,9 +638,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             foreach (string hint in sqlText[start..end].Split(',', StringSplitOptions.RemoveEmptyEntries))
             {
                 string[] parts = hint.Split('=', 2, StringSplitOptions.TrimEntries);
-                if (parts.Length == 2 && Enum.TryParse(parts[1], ignoreCase: true, out OracleDbType oracleType))
+                if (parts.Length != 2)
                 {
-                    result[parts[0]] = oracleType;
+                    continue;
+                }
+
+                string typeToken = parts[1];
+                int? size = null;
+                int sizeSeparator = typeToken.IndexOf(':');
+                if (sizeSeparator > 0
+                    && int.TryParse(typeToken[(sizeSeparator + 1)..], out int parsedSize))
+                {
+                    size = parsedSize;
+                    typeToken = typeToken[..sizeSeparator];
+                }
+
+                if (Enum.TryParse(typeToken, ignoreCase: true, out OracleDbType oracleType))
+                {
+                    result[parts[0]] = new OutputTypeHint(oracleType, size);
                 }
             }
 

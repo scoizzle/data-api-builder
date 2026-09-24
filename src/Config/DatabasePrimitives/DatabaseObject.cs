@@ -124,6 +124,12 @@ public class DatabaseStoredProcedure : DatabaseObject
     /// statement inside a PL/SQL block.
     /// </summary>
     public bool IsFunction { get; set; }
+
+    /// <summary>
+    /// Oracle ALL_ARGUMENTS.OVERLOAD of the single overload this entity is bound to.
+    /// Null when the subprogram is not overloaded.
+    /// </summary>
+    public string? Overload { get; set; }
 }
 
 public class StoredProcedureDefinition : SourceDefinition
@@ -316,6 +322,13 @@ public class ColumnDefinition
     /// </summary>
     [JsonIgnore]
     public bool IsClob { get; set; }
+
+    /// <summary>
+    /// True when the physical column is BLOB or LONG RAW. RETURNING binds for these values must
+    /// use a LOB type; bounded RAW columns stay on OracleDbType.Raw with an explicit size.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsBlob { get; set; }
 
     public ColumnDefinition() { }
 

@@ -473,10 +473,18 @@ namespace Azure.DataApiBuilder.Core.Services
 
                     if (physicalType is not null
                         && (physicalType.Equals("RAW", StringComparison.OrdinalIgnoreCase)
-                            || physicalType.Equals("BLOB", StringComparison.OrdinalIgnoreCase)))
+                            || physicalType.Equals("BLOB", StringComparison.OrdinalIgnoreCase)
+                            || physicalType.Equals("LONG RAW", StringComparison.OrdinalIgnoreCase)))
                     {
                         columnDefinition.SystemType = typeof(byte[]);
                         columnDefinition.DbType = DbType.Binary;
+                        // RAW is a bounded binary type. BLOB and LONG RAW need a LOB output bind.
+                        columnDefinition.IsBlob = !physicalType.Equals("RAW", StringComparison.OrdinalIgnoreCase);
+                        if (!columnDefinition.IsBlob)
+                        {
+                            columnDefinition.Length = TryReadOracleColumnLength(columnInfo, allColumnsInTable);
+                        }
+
                         continue;
                     }
 
@@ -753,14 +761,15 @@ namespace Azure.DataApiBuilder.Core.Services
                 ? "PACKAGE_NAME IS NULL"
                 : "PACKAGE_NAME = :package_name";
             string argumentsQuery =
-                "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION " +
+                "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION, OVERLOAD " +
                 "FROM ALL_ARGUMENTS " +
                 "WHERE OWNER = :owner " +
                 "AND OBJECT_NAME = :object_name " +
                 $"AND {packageClause} " +
-                "ORDER BY POSITION";
+                "ORDER BY OVERLOAD, POSITION";
 
             bool isFunction = false;
+            List<OracleArgumentRow> argumentRows = new();
             using (OracleCommand command = conn.CreateCommand())
             {
                 command.BindByName = true;
@@ -773,45 +782,56 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
 
                 using OracleDataReader reader = await command.ExecuteReaderAsync(cancellationToken);
-                if (reader.HasRows)
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    while (await reader.ReadAsync(cancellationToken))
-                    {
-                        int position = Convert.ToInt32(reader.GetValue(3));
-                        if (position == 0)
-                        {
-                            // POSITION 0 is a function's RETURN value, not an input argument.
-                            isFunction = true;
-                            continue;
-                        }
-
-                        if (reader.IsDBNull(0))
-                        {
-                            continue;
-                        }
-
-                        string argumentName = reader.GetString(0);
-                        string dataType = reader.GetString(1);
-                        string inOut = reader.IsDBNull(2) ? "IN" : reader.GetString(2);
-                        Type systemType = SqlToCLRType(dataType);
-                        // REF CURSOR is the result path (bound as :dab_result), not a client input.
-                        // Pure OUT scalars are not bound as IN parameters.
-                        if (systemType == typeof(IDataReader) ||
-                            inOut.Equals("OUT", StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
-
-                        storedProcedureDefinition.Parameters.TryAdd(
-                            argumentName.TrimStart('@', ':'),
-                            new ParameterDefinition
-                            {
-                                SystemType = systemType,
-                                DbType = TypeHelper.GetDbTypeFromSystemType(systemType)
-                            });
-                    }
+                    argumentRows.Add(new OracleArgumentRow(
+                        Name: reader.IsDBNull(0) ? null : reader.GetString(0),
+                        DataType: reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                        InOut: reader.IsDBNull(2) ? "IN" : reader.GetString(2),
+                        Position: Convert.ToInt32(reader.GetValue(3)),
+                        Overload: reader.IsDBNull(4) ? null : reader.GetString(4)));
                 }
-                else if (!await OracleSubprogramExistsAsync(conn, schemaFilter, dbSp, objectFilter, cancellationToken))
+            }
+
+            if (argumentRows.Count > 0)
+            {
+                IEnumerable<string>? configuredNames = procedureEntity.Source.Parameters?.Select(parameter => parameter.Name);
+                List<OracleArgumentRow> selected = SelectOracleOverload(argumentRows, configuredNames);
+                dbSp.Overload = selected.Count > 0 ? selected[0].Overload : null;
+
+                foreach (OracleArgumentRow row in selected.OrderBy(argument => argument.Position))
+                {
+                    if (row.Position == 0)
+                    {
+                        // POSITION 0 is a function's RETURN value, not an input argument.
+                        isFunction = true;
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(row.Name))
+                    {
+                        continue;
+                    }
+
+                    Type systemType = SqlToCLRType(row.DataType);
+                    // REF CURSOR is the result path (bound as :dab_result), not a client input.
+                    // Pure OUT scalars are not bound as IN parameters.
+                    if (systemType == typeof(IDataReader) ||
+                        row.InOut.Equals("OUT", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    storedProcedureDefinition.Parameters.TryAdd(
+                        row.Name.TrimStart('@', ':'),
+                        new ParameterDefinition
+                        {
+                            SystemType = systemType,
+                            DbType = TypeHelper.GetDbTypeFromSystemType(systemType)
+                        });
+                }
+            }
+            else if (!await OracleSubprogramExistsAsync(conn, schemaFilter, dbSp, objectFilter, cancellationToken))
                 {
                     // No ALL_ARGUMENTS rows: either a parameterless subprogram (valid) or a
                     // non-existent object (error). Distinguish via ALL_PROCEDURES.
@@ -829,7 +849,6 @@ namespace Azure.DataApiBuilder.Core.Services
                     {
                         throw notFoundException;
                     }
-                }
             }
 
             dbSp.IsFunction = isFunction;
@@ -929,48 +948,23 @@ namespace Azure.DataApiBuilder.Core.Services
             StoredProcedureDefinition storedProcedureDefinition = (StoredProcedureDefinition)sourceDefinition;
             DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
 
-            string resultQuery;
-            Dictionary<string, DbConnectionParam> resultQueryParameters;
-            if (dbSp.IsFunction)
+            // One query shape for standalone and packaged subprograms so OVERLOAD is applied
+            // the same way arguments were chosen in FillSchemaForStoredProcedureAsync.
+            string resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
+                schemaName: schemaName,
+                packageName: dbSp.PackageName,
+                subprogramName: storedProcedureName,
+                isFunction: dbSp.IsFunction,
+                overload: dbSp.Overload);
+            Dictionary<string, DbConnectionParam> resultQueryParameters = new()
             {
-                // A function's result set is its RETURN value (ALL_ARGUMENTS POSITION 0), regardless
-                // of it being standalone (package name null) or packaged.
-                resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
-                    schemaName: schemaName,
-                    packageName: dbSp.PackageName,
-                    subprogramName: storedProcedureName,
-                    isFunction: true);
-                resultQueryParameters = new()
-                {
-                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
-                    { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
-                    { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
-                };
-            }
-            else if (string.IsNullOrEmpty(dbSp.PackageName))
+                { "@param0", new DbConnectionParam(schemaName, DbType.String) },
+                { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
+                { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
+            };
+            if (!string.IsNullOrEmpty(dbSp.Overload))
             {
-                // Standalone procedure - use the shared query built from schema.subprogram.
-                resultQuery = SqlQueryBuilder.BuildStoredProcedureResultDetailsQuery($"{schemaName}.{storedProcedureName}");
-                resultQueryParameters = new()
-                {
-                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
-                    { "@param1", new DbConnectionParam(storedProcedureName, DbType.String) },
-                };
-            }
-            else
-            {
-                // Packaged procedure - its OUT cursor parameter(s) define the result set.
-                resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
-                    schemaName: schemaName,
-                    packageName: dbSp.PackageName,
-                    subprogramName: storedProcedureName,
-                    isFunction: false);
-                resultQueryParameters = new()
-                {
-                    { "@param0", new DbConnectionParam(schemaName, DbType.String) },
-                    { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
-                    { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
-                };
+                resultQueryParameters.Add("@param3", new DbConnectionParam(dbSp.Overload, DbType.String));
             }
 
             JsonArray? resultArray = await QueryExecutor.ExecuteQueryAsync(
@@ -1117,6 +1111,80 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             return parameters;
+        }
+
+        internal readonly record struct OracleArgumentRow(
+            string? Name,
+            string DataType,
+            string InOut,
+            int Position,
+            string? Overload);
+
+        /// <summary>
+        /// ALL_ARGUMENTS returns every overload of a packaged subprogram. Keep one overload so
+        /// named calls and result-set metadata are not built from a mix of signatures.
+        /// Configured parameter names pick the matching overload; otherwise the lowest OVERLOAD
+        /// number is used. A null OVERLOAD means the subprogram is not overloaded.
+        /// </summary>
+        internal static List<OracleArgumentRow> SelectOracleOverload(
+            IReadOnlyList<OracleArgumentRow> rows,
+            IEnumerable<string>? configuredParameterNames)
+        {
+            List<IGrouping<string, OracleArgumentRow>> groups = rows
+                .GroupBy(row => row.Overload ?? string.Empty, StringComparer.Ordinal)
+                .ToList();
+            if (groups.Count <= 1)
+            {
+                return rows.ToList();
+            }
+
+            if (configuredParameterNames is not null)
+            {
+                List<string> wanted = configuredParameterNames
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .ToList();
+                if (wanted.Count > 0)
+                {
+                    List<IGrouping<string, OracleArgumentRow>> matches = groups
+                        .Where(group => wanted.All(name => group.Any(row =>
+                            row.Name is not null
+                            && row.Name.Equals(name, StringComparison.OrdinalIgnoreCase))))
+                        .ToList();
+                    if (matches.Count > 0)
+                    {
+                        groups = matches;
+                    }
+                }
+            }
+
+            IGrouping<string, OracleArgumentRow> chosen = groups
+                .OrderBy(group => ParseOverloadNumber(group.Key))
+                .ThenBy(group => group.Key, StringComparer.Ordinal)
+                .First();
+            return chosen.ToList();
+        }
+
+        private static int ParseOverloadNumber(string overload)
+        {
+            return int.TryParse(overload, out int number) ? number : int.MaxValue;
+        }
+
+        private static int? TryReadOracleColumnLength(DataRow columnInfo, DataTable table)
+        {
+            foreach (string columnName in new[] { "DATA_LENGTH", "LENGTH" })
+            {
+                if (!table.Columns.Contains(columnName) || columnInfo[columnName] is DBNull)
+                {
+                    continue;
+                }
+
+                if (int.TryParse(columnInfo[columnName]?.ToString(), out int length) && length > 0)
+                {
+                    return length;
+                }
+            }
+
+            return null;
         }
     }
 }
