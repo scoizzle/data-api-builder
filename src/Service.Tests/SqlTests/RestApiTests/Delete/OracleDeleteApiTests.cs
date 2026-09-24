@@ -31,7 +31,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Delete
 
         [TestMethod]
         [Ignore("Negative test asserting a delete against a multi-table view is rejected. Oracle permits DELETE on books_publishers_view_composite (the key-preserved base-table row is deleted and the response is 204), so the expected bad-request never occurs; MySQL also skips this test (its multi-table views are read-only).")]
-        public new async Task DeleteOneInViewBadRequestTest()
+        public async Task DeleteOneInViewBadRequestTest()
         {
             await SetupAndRunRestApiTest(
                 primaryKeyRoute: "id/1/pub_id/1234",
