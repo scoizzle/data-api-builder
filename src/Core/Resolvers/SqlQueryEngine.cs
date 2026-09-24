@@ -198,7 +198,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // <summary>
         // Given the FindRequestContext, obtains the query text and executes it against the backend. Useful for REST API scenarios.
         // </summary>
-        public async Task<JsonDocument?> ExecuteAsync(FindRequestContext context)
+        public Task<JsonDocument?> ExecuteAsync(FindRequestContext context)
+        {
+            return ExecuteAsync(context, dbConnection: null, dbTransaction: null);
+        }
+
+        /// <summary>
+        /// REST find on an already-open connection. Oracle mutations pass the local transaction
+        /// so a policy read sees the uncommitted write without opening a second connection.
+        /// </summary>
+        public async Task<JsonDocument?> ExecuteAsync(
+            FindRequestContext context,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
         {
             string dataSourceName = _runtimeConfigProvider.GetConfig().GetDataSourceNameFromEntityName(context.EntityName);
 
@@ -210,7 +222,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 _runtimeConfigProvider,
                 _gQLFilterParser,
                 _httpContextAccessor.HttpContext!);
-            return await ExecuteAsync(structure, dataSourceName);
+            return await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: false, dbConnection, dbTransaction);
         }
 
         /// <summary>

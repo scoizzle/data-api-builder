@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -33,9 +34,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         /// <summary>
         /// A procedure with an IN parameter and a SYS_REFCURSOR OUT parameter must be invoked
-        /// as <c>BEGIN "SYSTEM"."GET_BOOK_BY_ID"(:param0, :dab_result); END;</c>: the IN bind
-        /// references the engine parameter value (not the argument name) and the cursor is
-        /// captured through the shared REF CURSOR OUT bind.
+        /// with named association: <c>BEGIN "SYSTEM"."GET_BOOK_BY_ID"("id" => :param0, "cursor" => :dab_result); END;</c>.
+        /// The IN bind references the engine parameter value, and the cursor is bound to its argument name.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -67,14 +67,14 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(
                 query.Contains(":id", StringComparison.Ordinal),
                 $"The IN bind MUST NOT reference the SP argument name. Query: {query}");
-            Assert.IsTrue(
-                query.Contains($":{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal),
-                $"A result-returning procedure MUST append the REF CURSOR OUT bind. Query: {query}");
+            Assert.AreEqual(
+                $"BEGIN \"SYSTEM\".\"GET_BOOK_BY_ID\"(\"id\" => :param0, \"cursor\" => :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}); END;",
+                query);
         }
 
         /// <summary>
         /// A procedure with only a SYS_REFCURSOR OUT parameter (no IN parameters) must be invoked
-        /// as <c>BEGIN "SYSTEM"."GET_BOOKS"(:dab_result); END;</c>.
+        /// as <c>BEGIN "SYSTEM"."GET_BOOKS"("cursor" => :dab_result); END;</c>.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -89,8 +89,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            Assert.IsTrue(query.Contains($":{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal), $"Query: {query}");
-            Assert.IsFalse(query.Contains(":param", StringComparison.Ordinal), $"No IN binds expected. Query: {query}");
+            Assert.AreEqual(
+                $"BEGIN \"SYSTEM\".\"GET_BOOKS\"(\"cursor\" => :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}); END;",
+                query);
         }
 
         [TestMethod]
@@ -168,16 +169,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            Assert.IsTrue(query.Contains(":param0", StringComparison.Ordinal), $"Query: {query}");
-            Assert.IsTrue(query.Contains(":param1", StringComparison.Ordinal), $"Query: {query}");
-            Assert.IsFalse(
-                query.Contains($":{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal),
-                $"A no-result procedure MUST NOT append the REF CURSOR bind. Query: {query}");
+            Assert.AreEqual(
+                "BEGIN \"SYSTEM\".\"INSERT_BOOK\"(\"title\" => :param0, \"publisher_id\" => :param1); END;",
+                query);
         }
 
         /// <summary>
         /// A procedure inside a package (source "schema.package.subprogram") must be invoked with the
-        /// package qualifier: <c>BEGIN "SYSTEM"."PKG_TEST"."GET_BOOK_BY_ID"(:param0, :dab_result); END;</c>.
+        /// package qualifier and named arguments:
+        /// <c>BEGIN "SYSTEM"."PKG_TEST"."GET_BOOK_BY_ID"("id" => :param0, "cursor" => :dab_result); END;</c>.
         /// </summary>
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
@@ -199,16 +199,74 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(structure);
 
-            Assert.IsTrue(
-                query.Contains("\"SYSTEM\".\"PKG_TEST\".\"GET_BOOK_BY_ID\"", StringComparison.Ordinal),
-                $"Expected the package-qualified subprogram name. Query: {query}");
-            Assert.IsTrue(query.Contains(":param0", StringComparison.Ordinal), $"Query: {query}");
-            Assert.IsTrue(
-                query.Contains($":{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}", StringComparison.Ordinal),
-                $"Query: {query}");
-            Assert.IsTrue(
-                query.StartsWith("BEGIN ", StringComparison.Ordinal) && query.EndsWith("END;", StringComparison.Ordinal),
-                $"Expected a PL/SQL block. Query: {query}");
+            Assert.AreEqual(
+                $"BEGIN \"SYSTEM\".\"PKG_TEST\".\"GET_BOOK_BY_ID\"(\"id\" => :param0, \"cursor\" => :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}); END;",
+                query);
+        }
+
+        /// <summary>
+        /// A cursor that is not the last argument must be bound by name. Supplying only a later
+        /// optional argument must not shift that value onto the cursor.
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleExecuteBindsRefCursorByNameWhenItIsNotLast()
+        {
+            StoredProcedureDefinition spDef = new();
+            spDef.Parameters.Add("p_id", new ParameterDefinition
+            {
+                SystemType = typeof(decimal),
+                DbType = DbType.Decimal
+            });
+            spDef.Columns.Add("p_cur", new ColumnDefinition { SystemType = typeof(IDataReader) });
+
+            SqlExecuteStructure structure = CreateExecuteStructure(
+                spDef,
+                requestParams: new Dictionary<string, object?> { { "p_id", 7 } },
+                name: "get_by_cursor_first");
+
+            string query = new OracleQueryBuilder().Build(structure);
+
+            Assert.AreEqual(
+                $"BEGIN \"SYSTEM\".\"GET_BY_CURSOR_FIRST\"(\"p_id\" => :param0, \"p_cur\" => :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME}); END;",
+                query);
+        }
+
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleOverloadSelectionKeepsOnlyTheMatchingSignature()
+        {
+            List<OracleMetadataProvider.OracleArgumentRow> rows = new()
+            {
+                new("p_id", "NUMBER", "IN", 1, "1"),
+                new("p_cur", "REF CURSOR", "OUT", 2, "1"),
+                new("p_name", "VARCHAR2", "IN", 1, "2"),
+                new("p_id", "NUMBER", "IN", 2, "2"),
+            };
+
+            List<OracleMetadataProvider.OracleArgumentRow> selected =
+                OracleMetadataProvider.SelectOracleOverload(rows, configuredParameterNames: new[] { "p_name" });
+
+            Assert.AreEqual(2, selected.Count);
+            Assert.IsTrue(selected.All(row => row.Overload == "2"));
+        }
+
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleOverloadSelectionUsesLowestNumberWhenConfigDoesNotMatch()
+        {
+            List<OracleMetadataProvider.OracleArgumentRow> rows = new()
+            {
+                new("p_b", "NUMBER", "IN", 1, "2"),
+                new("p_a", "NUMBER", "IN", 1, "1"),
+            };
+
+            List<OracleMetadataProvider.OracleArgumentRow> selected =
+                OracleMetadataProvider.SelectOracleOverload(rows, configuredParameterNames: null);
+
+            Assert.AreEqual(1, selected.Count);
+            Assert.AreEqual("p_a", selected[0].Name);
+            Assert.AreEqual("1", selected[0].Overload);
         }
 
         /// <summary>
@@ -237,7 +295,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string query = new OracleQueryBuilder().Build(structure);
 
             Assert.AreEqual(
-                $"BEGIN :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME} := \"SYSTEM\".\"PKG_TEST\".\"GET_BOOKS\"(:param0); END;",
+                $"BEGIN :{OracleQueryBuilder.RESULT_CURSOR_PARAM_NAME} := \"SYSTEM\".\"PKG_TEST\".\"GET_BOOKS\"(\"id\" => :param0); END;",
                 query);
         }
 
@@ -292,7 +350,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string query = new OracleQueryBuilder().Build(structure);
 
             Assert.IsTrue(
-                query.Contains("SELECT \"SYSTEM\".\"PKG_TEST\".\"GET_COUNT\"(:param0) AS \"value\" FROM DUAL", StringComparison.Ordinal),
+                query.Contains("SELECT \"SYSTEM\".\"PKG_TEST\".\"GET_COUNT\"(\"id\" => :param0) AS \"value\" FROM DUAL", StringComparison.Ordinal),
                 $"Query: {query}");
         }
 

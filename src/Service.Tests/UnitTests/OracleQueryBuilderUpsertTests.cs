@@ -533,6 +533,27 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// RAW output binds need an explicit size. BLOB must not be registered as RAW.
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleOutputBindRegistrarSetsRawSizeAndBlobType()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:rawcol=Raw:32,blobcol=Blob,unsized=Raw */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"RAWCOL\", \"BLOBCOL\", \"UNSIZED\" INTO :rawcol, :blobcol, :unsized; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(OracleDbType.Raw, command.Parameters["rawcol"].OracleDbType);
+            Assert.AreEqual(32, command.Parameters["rawcol"].Size);
+            Assert.AreEqual(OracleDbType.Blob, command.Parameters["blobcol"].OracleDbType);
+            Assert.AreEqual(OracleDbType.Raw, command.Parameters["unsized"].OracleDbType);
+            Assert.AreEqual(2000, command.Parameters["unsized"].Size);
+        }
+
+        /// <summary>
         /// Builds a minimal <see cref="SqlUpsertQueryStructure"/> for the test entity using a mocked
         /// metadata provider so no live database is required.
         /// </summary>
