@@ -2595,6 +2595,11 @@ namespace Azure.DataApiBuilder.Core.Services
             List<string> tableNames)
         {
             Dictionary<string, SourceDefinition> sourceNameToSourceDefinition = new();
+            // Tracks the (schema, table) pairs already collected. Adding the same table once per
+            // relationship would otherwise emit duplicate bind parameters in the foreign key
+            // metadata query. schemaNames and tableNames are indexed in parallel by the query
+            // builder, so they must both be updated for the same pair.
+            HashSet<(string SchemaName, string TableName)> foreignKeyReferencingTables = new();
             foreach ((string entityName, DatabaseObject dbObject) in EntityToDatabaseObject)
             {
                 // Ensure we're only doing this on tables, not stored procedures which have no table definition,
@@ -2616,8 +2621,13 @@ namespace Azure.DataApiBuilder.Core.Services
                             {
                                 foreach (ForeignKeyDefinition fk in fkDefinitionsForTargetEntity)
                                 {
-                                    schemaNames.Add(fk.Pair.ReferencingDbTable.SchemaName);
-                                    tableNames.Add(fk.Pair.ReferencingDbTable.Name);
+                                    DatabaseTable referencingTable = fk.Pair.ReferencingDbTable;
+                                    if (foreignKeyReferencingTables.Add((referencingTable.SchemaName, referencingTable.Name)))
+                                    {
+                                        schemaNames.Add(referencingTable.SchemaName);
+                                        tableNames.Add(referencingTable.Name);
+                                    }
+
                                     sourceNameToSourceDefinition.TryAdd(dbObject.Name, sourceDefinition);
                                 }
                             }
