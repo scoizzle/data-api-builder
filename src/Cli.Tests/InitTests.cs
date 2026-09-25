@@ -420,10 +420,10 @@ namespace Cli.Tests
         /// <summary>
         /// Test to validate the contents of the config file generated when init command is used with --graphql.multiple-mutations.create.enabled flag option for different database types.
         ///
-        /// 1. For database types other than MsSQL:
+        /// 1. For database types other than MsSQL and Oracle:
         ///      - Irrespective of whether the --graphql.multiple-mutations.create.enabled option is used or not, fields related to multiple-create will NOT be written to the config file.
         ///
-        /// 2. For MsSQL database type:
+        /// 2. For MsSQL and Oracle database types:
         ///      a. When --graphql.multiple-mutations.create.enabled option is used
         ///           - In this case, the fields related to multiple mutation and multiple create operations will be written to the config file.
         ///                "multiple-mutations": {
@@ -446,6 +446,9 @@ namespace Cli.Tests
         [DataRow(DatabaseType.MySQL, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for MySQL database type")]
         [DataRow(DatabaseType.MySQL, CliBool.False, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for MySQL database type")]
         [DataRow(DatabaseType.MySQL, CliBool.None, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for MySQL database type")]
+        [DataRow(DatabaseType.Oracle, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for Oracle database type")]
+        [DataRow(DatabaseType.Oracle, CliBool.False, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for Oracle database type")]
+        [DataRow(DatabaseType.Oracle, CliBool.None, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for Oracle database type")]
         [DataRow(DatabaseType.CosmosDB_NoSQL, CliBool.True, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled true' for CosmosDB_NoSQL database type")]
         [DataRow(DatabaseType.CosmosDB_NoSQL, CliBool.False, DisplayName = "Init command with '--graphql.multiple-mutations.create.enabled false' for CosmosDB_NoSQL database type")]
         [DataRow(DatabaseType.CosmosDB_NoSQL, CliBool.None, DisplayName = "Init command without '--graphql.multiple-mutations.create.enabled' option for CosmosDB_NoSQL database type")]

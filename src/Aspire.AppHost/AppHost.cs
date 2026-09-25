@@ -88,8 +88,35 @@ switch (aspireDB)
         }
 
         break;
+    case "oracle":
+        // Oracle doesn't have native Aspire support yet, so use external connection string
+        // Developers should set ASPIRE_DATABASE_CONNECTION_STRING with Oracle connection details
+        // Example: "Data Source=localhost:1521/FREEPDB1;User Id=system;Password=oracle;"
+        
+        if (string.IsNullOrEmpty(databaseConnectionString))
+        {
+            throw new Exception("Oracle requires ASPIRE_DATABASE_CONNECTION_STRING environment variable to be set. " +
+                "Example: Data Source=localhost:1521/FREEPDB1;User Id=system;Password=oracle; " +
+                "You can start an Oracle container with: docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle gvenzl/oracle-free:latest");
+        }
+
+        var oracleService = builder.AddProject<Projects.Azure_DataApiBuilder_Service>("oracle-service", "Development")
+            .WithArgs("-f", "net10.0")
+            .WithEndpoint(endpointName: "https", (e) => e.Port = 1234)
+            .WithEndpoint(endpointName: "http", (e) => e.Port = 2345)
+            .WithEnvironment("db-type", "oracle")
+            .WithEnvironment("DAB_CONNSTRING", databaseConnectionString)
+            .WithUrls((e) =>
+            {
+                e.Urls.Clear();
+                e.Urls.Add(new() { Url = "/swagger", DisplayText = "🔒Swagger", Endpoint = e.GetEndpoint("https") });
+                e.Urls.Add(new() { Url = "/graphql", DisplayText = "🔒GraphQL", Endpoint = e.GetEndpoint("https") });
+            })
+            .WithHttpHealthCheck("/health");
+
+        break;
     default:
-        throw new Exception("Please set the ASPIRE_DATABASE environment variable to either 'mssql' or 'postgresql'.");
+        throw new Exception("Please set the ASPIRE_DATABASE environment variable to 'mssql', 'postgresql', or 'oracle'.");
 }
 
 builder.Build().Run();

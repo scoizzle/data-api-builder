@@ -6,6 +6,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Transactions;
+using Oracle.ManagedDataAccess.Client;
 using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -127,128 +128,40 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             try
             {
-                // Creating an implicit transaction
-                using (TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider))
+                // A second ODP.NET Open inside one TransactionScope promotes to XA/MSDTC, which
+                // .NET does not support. Every Oracle GraphQL mutation (create, update, delete)
+                // shares one local transaction so the write and the follow-up read use one connection.
+                if (sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle)
                 {
-                    if (mutationOperation is EntityActionOperation.Delete)
+                    await ExecuteInOracleLocalTransactionAsync(dataSourceName, async (conn, tx) =>
                     {
-                        // When read permission is not configured, an error response is returned. So, the mutation result needs to
-                        // be computed only when the read permission is configured.
-                        if (isReadPermissionConfigured)
-                        {
-                            // For cases we only require a result summarizing the operation (DBOperationResult),
-                            // we can skip getting the impacted records.
-                            if (context.Selection.Type.TypeName() != GraphQLUtils.DB_OPERATION_RESULT_TYPE)
-                            {
-                                // compute the mutation result before removing the element,
-                                // since typical GraphQL delete mutations return the metadata of the deleted item.
-                                result = await queryEngine.ExecuteAsync(
-                                            context,
-                                            GetBackingColumnsFromCollection(entityName: entityName, parameters: parameters, sqlMetadataProvider: sqlMetadataProvider),
-                                            dataSourceName);
-                            }
-                        }
-
-                        Dictionary<string, object>? resultProperties =
-                            await PerformDeleteOperation(
-                                entityName,
-                                parameters,
-                                sqlMetadataProvider);
-
-                        // If the number of records affected by DELETE were zero,
-                        if (resultProperties is not null
-                            && resultProperties.TryGetValue(nameof(DbDataReader.RecordsAffected), out object? value)
-                            && Convert.ToInt32(value) == 0)
-                        {
-                            // the result was not null previously, it indicates this DELETE lost
-                            // a concurrent request race. Hence, empty the non-null result.
-                            if (result is not null && result.Item1 is not null)
-                            {
-
-                                result = new Tuple<JsonDocument?, IMetadata?>(
-                                    default(JsonDocument),
-                                    PaginationMetadata.MakeEmptyPaginationMetadata());
-                            }
-                            else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
-                            {
-                                // no record affected but db call ran successfully.
-                                result = GetDbOperationResultJsonDocument("item not found");
-                            }
-                        }
-                        else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
-                        {
-                            result = GetDbOperationResultJsonDocument("success");
-                        }
-                    }
-                    // This code block contains logic for handling multiple create mutation operations.
-                    else if (mutationOperation is EntityActionOperation.Create && _runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled())
-                    {
-                        bool isPointMutation = IsPointMutation(context);
-
-                        List<IDictionary<string, object?>> primaryKeysOfCreatedItems = PerformMultipleCreateOperation(
-                                    entityName,
-                                    context,
-                                    parameters,
-                                    sqlMetadataProvider,
-                                    _runtimeConfigProvider.GetConfig(),
-                                    !isPointMutation);
-
-                        // For point create multiple mutation operation, a single item is created in the
-                        // table backing the top level entity. So, the PK of the created item is fetched and
-                        // used when calling the query engine to process the selection set.
-                        // For many type multiple create operation, one or more than one item are created
-                        // in the table backing the top level entity. So, the PKs of the created items are
-                        // fetched and used when calling the query engine to process the selection set.
-                        // Point multiple create mutation and many type multiple create mutation are calling different
-                        // overloaded method ("ExecuteAsync") of the query engine to process the selection set.
-                        if (isPointMutation)
-                        {
-                            result = await queryEngine.ExecuteAsync(
-                                        context,
-                                        primaryKeysOfCreatedItems[0],
-                                        dataSourceName);
-                        }
-                        else
-                        {
-                            result = await queryEngine.ExecuteMultipleCreateFollowUpQueryAsync(
-                                        context,
-                                        primaryKeysOfCreatedItems,
-                                        dataSourceName);
-                        }
-                    }
-                    else
-                    {
-                        DbResultSetRow? mutationResultRow =
-                            await PerformMutationOperation(
-                                entityName,
-                                mutationOperation,
-                                parameters,
-                                sqlMetadataProvider,
-                                context);
-
-                        // When read permission is not configured, an error response is returned. So, the mutation result needs to
-                        // be computed only when the read permission is configured.
-                        if (isReadPermissionConfigured)
-                        {
-                            if (mutationResultRow is not null && mutationResultRow.Columns.Count > 0
-                                && !context.Selection.Type.IsScalarType())
-                            {
-                                // Because the GraphQL mutation result set columns were exposed (mapped) column names,
-                                // the column names must be converted to backing (source) column names so the
-                                // PrimaryKeyPredicates created in the SqlQueryStructure created by the query engine
-                                // represent database column names.
-                                result = await queryEngine.ExecuteAsync(
-                                            context,
-                                            GetBackingColumnsFromCollection(entityName: entityName, parameters: mutationResultRow.Columns, sqlMetadataProvider: sqlMetadataProvider),
-                                            dataSourceName);
-                            }
-                            else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
-                            {
-                                result = GetDbOperationResultJsonDocument("success");
-                            }
-                        }
-                    }
-
+                        result = await ExecuteGraphQLMutationCoreAsync(
+                            context,
+                            parameters,
+                            dataSourceName,
+                            entityName,
+                            sqlMetadataProvider,
+                            queryEngine,
+                            mutationOperation,
+                            isReadPermissionConfigured,
+                            conn,
+                            tx);
+                    });
+                }
+                else
+                {
+                    using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
+                    result = await ExecuteGraphQLMutationCoreAsync(
+                        context,
+                        parameters,
+                        dataSourceName,
+                        entityName,
+                        sqlMetadataProvider,
+                        queryEngine,
+                        mutationOperation,
+                        isReadPermissionConfigured,
+                        dbConnection: null,
+                        dbTransaction: null);
                     transactionScope.Complete();
                 }
 
@@ -595,8 +508,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                     if (!isKeylessUpsert && (context.OperationType is EntityActionOperation.Upsert || context.OperationType is EntityActionOperation.UpsertIncremental))
                     {
-                        DbResultSet? upsertOperationResult;
-                        DbResultSetRow upsertOperationResultSetRow;
+                        DbResultSet? upsertOperationResult = null;
+                        DbResultSetRow upsertOperationResultSetRow = new();
 
                         // This variable indicates whether the upsert resulted in an update operation. If true, then the upsert resulted in an update operation.
                         // If false, the upsert resulted in an insert operation.
@@ -604,19 +517,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         try
                         {
-                            // Creating an implicit transaction
-                            using (TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider))
+                            // A read policy issues a second command. On Oracle that must share the
+                            // write's connection; TransactionScope would promote the second Open.
+                            bool useOracleLocalTransaction = sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle
+                                && isDatabasePolicyDefinedForReadAction;
+
+                            async Task RunUpsertAsync(DbConnection? conn, DbTransaction? tx)
                             {
                                 upsertOperationResult = await PerformUpsertOperation(
                                                                     parameters: parameters,
                                                                     context: context,
-                                                                    sqlMetadataProvider: sqlMetadataProvider);
+                                                                    sqlMetadataProvider: sqlMetadataProvider,
+                                                                    dbConnection: conn,
+                                                                    dbTransaction: tx);
 
                                 if (upsertOperationResult is null)
                                 {
-                                    // Ideally this case should not happen, however may occur due to unexpected reasons,
-                                    // like the DbDataReader being null. We throw an exception
-                                    // which will be returned as an InternalServerError with UnexpectedError substatus code.
                                     throw new DataApiBuilderException(
                                         message: "An unexpected error occurred while trying to execute the query.",
                                         statusCode: HttpStatusCode.InternalServerError,
@@ -628,19 +544,25 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                 if (upsertOperationResultSetRow.Columns.Count > 0 &&
                                     upsertOperationResult.ResultProperties.TryGetValue(IS_UPDATE_RESULT_SET, out object? isUpdateResultSetValue))
                                 {
-
                                     hasPerformedUpdate = Convert.ToBoolean(isUpdateResultSetValue);
                                 }
 
-                                // The role with which the REST request is executed can have a database policy defined for the read action.
-                                // In such a case, to get the results back, a select query which honors the database policy is executed.
                                 if (isDatabasePolicyDefinedForReadAction)
                                 {
                                     FindRequestContext findRequestContext = ConstructFindRequestContext(context, upsertOperationResultSetRow, roleName, sqlMetadataProvider);
                                     IQueryEngine queryEngine = _queryEngineFactory.GetQueryEngine(sqlMetadataProvider.GetDatabaseType());
-                                    selectOperationResponse = await queryEngine.ExecuteAsync(findRequestContext);
+                                    selectOperationResponse = await ExecuteFindOnSameConnectionAsync(queryEngine, findRequestContext, conn, tx);
                                 }
+                            }
 
+                            if (useOracleLocalTransaction)
+                            {
+                                await ExecuteInOracleLocalTransactionAsync(dataSourceName, (conn, tx) => RunUpsertAsync(conn, tx));
+                            }
+                            else
+                            {
+                                using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
+                                await RunUpsertAsync(conn: null, tx: null);
                                 transactionScope.Complete();
                             }
                         }
@@ -706,15 +628,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         try
                         {
-                            // Creating an implicit transaction
-                            using (TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider))
+                            bool useOracleLocalTransaction = sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle
+                                && isDatabasePolicyDefinedForReadAction;
+
+                            async Task RunMutationAsync(DbConnection? conn, DbTransaction? tx)
                             {
                                 mutationResultRow =
                                         await PerformMutationOperation(
                                             entityName: context.EntityName,
                                             operationType: effectiveOperationType,
                                             parameters: parameters,
-                                            sqlMetadataProvider: sqlMetadataProvider);
+                                            sqlMetadataProvider: sqlMetadataProvider,
+                                            dbConnection: conn,
+                                            dbTransaction: tx);
 
                                 if (mutationResultRow is null)
                                 {
@@ -722,9 +648,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                         ? HttpStatusCode.InternalServerError
                                         : HttpStatusCode.NotFound;
 
-                                    // Ideally this case should not happen, however may occur due to unexpected reasons,
-                                    // like the DbDataReader being null. We throw an exception
-                                    // which will be returned as an UnexpectedError.
                                     throw new DataApiBuilderException(
                                         message: "An unexpected error occurred while trying to execute the query.",
                                         statusCode: statusCode,
@@ -742,23 +665,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                             );
                                     }
 
-                                    // This code block is reached when Update or UpdateIncremental operation does not successfully find the record to
-                                    // update. An exception is thrown which will be returned as a 404 NotFound response.
                                     throw new DataApiBuilderException(message: "No Update could be performed, record not found",
                                                                         statusCode: HttpStatusCode.NotFound,
                                                                         subStatusCode: DataApiBuilderException.SubStatusCodes.EntityNotFound);
                                 }
 
-                                // The role with which the REST request is executed can have database policies defined for the read action.
-                                // When the database policy is defined for the read action, a select query that honors the database policy
-                                // is executed to fetch the results.
                                 if (isDatabasePolicyDefinedForReadAction)
                                 {
                                     FindRequestContext findRequestContext = ConstructFindRequestContext(context, mutationResultRow, roleName, sqlMetadataProvider);
                                     IQueryEngine queryEngine = _queryEngineFactory.GetQueryEngine(sqlMetadataProvider.GetDatabaseType());
-                                    selectOperationResponse = await queryEngine.ExecuteAsync(findRequestContext);
+                                    selectOperationResponse = await ExecuteFindOnSameConnectionAsync(queryEngine, findRequestContext, conn, tx);
                                 }
+                            }
 
+                            if (useOracleLocalTransaction)
+                            {
+                                await ExecuteInOracleLocalTransactionAsync(dataSourceName, (conn, tx) => RunMutationAsync(conn, tx));
+                            }
+                            else
+                            {
+                                using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
+                                await RunMutationAsync(conn: null, tx: null);
                                 transactionScope.Complete();
                             }
                         }
@@ -877,6 +804,220 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Runs one Oracle mutation on a single connection and local transaction.
+        /// ODP.NET promotes a second connection opened inside TransactionScope, and that
+        /// promotion is unsupported on .NET.
+        /// </summary>
+        private async Task ExecuteInOracleLocalTransactionAsync(
+            string dataSourceName,
+            Func<OracleConnection, OracleTransaction, Task> action)
+        {
+            OracleQueryExecutor oracleExecutor = (OracleQueryExecutor)_queryManagerFactory.GetQueryExecutor(DatabaseType.Oracle);
+            using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
+            await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
+            try
+            {
+                await conn.OpenAsync();
+                using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn, dataSourceName);
+                try
+                {
+                    await action(conn, tx);
+                    tx.Commit();
+                }
+                catch
+                {
+                    tx.Rollback();
+                    throw;
+                }
+            }
+            catch (DbException dbException)
+            {
+                throw _queryManagerFactory.GetDbExceptionParser(DatabaseType.Oracle).Parse(dbException);
+            }
+        }
+
+        /// <summary>
+        /// GraphQL create, update, and delete. When <paramref name="dbConnection"/> is set, the
+        /// DML and the follow-up selection-set read share that connection.
+        /// </summary>
+        private async Task<Tuple<JsonDocument?, IMetadata?>?> ExecuteGraphQLMutationCoreAsync(
+            IMiddlewareContext context,
+            IDictionary<string, object?> parameters,
+            string dataSourceName,
+            string entityName,
+            ISqlMetadataProvider sqlMetadataProvider,
+            IQueryEngine queryEngine,
+            EntityActionOperation mutationOperation,
+            bool isReadPermissionConfigured,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
+        {
+            Tuple<JsonDocument?, IMetadata?>? result = null;
+            if (mutationOperation is EntityActionOperation.Delete)
+            {
+                if (isReadPermissionConfigured)
+                {
+                    if (context.Selection.Type.TypeName() != GraphQLUtils.DB_OPERATION_RESULT_TYPE)
+                    {
+                        result = await ExecuteSelectionSetAsync(
+                            queryEngine,
+                            context,
+                            GetBackingColumnsFromCollection(entityName: entityName, parameters: parameters, sqlMetadataProvider: sqlMetadataProvider),
+                            dataSourceName,
+                            dbConnection,
+                            dbTransaction);
+                    }
+                }
+
+                Dictionary<string, object>? resultProperties =
+                    await PerformDeleteOperation(
+                        entityName,
+                        parameters,
+                        sqlMetadataProvider,
+                        dbConnection,
+                        dbTransaction);
+
+                if (resultProperties is not null
+                    && resultProperties.TryGetValue(nameof(DbDataReader.RecordsAffected), out object? value)
+                    && Convert.ToInt32(value) == 0)
+                {
+                    if (result is not null && result.Item1 is not null)
+                    {
+                        result = new Tuple<JsonDocument?, IMetadata?>(
+                            default(JsonDocument),
+                            PaginationMetadata.MakeEmptyPaginationMetadata());
+                    }
+                    else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
+                    {
+                        result = GetDbOperationResultJsonDocument("item not found");
+                    }
+                }
+                else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
+                {
+                    result = GetDbOperationResultJsonDocument("success");
+                }
+            }
+            else if (mutationOperation is EntityActionOperation.Create && _runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled())
+            {
+                bool isPointMutation = IsPointMutation(context);
+                List<IDictionary<string, object?>> primaryKeysOfCreatedItems = PerformMultipleCreateOperation(
+                    entityName,
+                    context,
+                    parameters,
+                    sqlMetadataProvider,
+                    _runtimeConfigProvider.GetConfig(),
+                    !isPointMutation,
+                    dbConnection,
+                    dbTransaction);
+
+                if (isPointMutation)
+                {
+                    result = await ExecuteSelectionSetAsync(
+                        queryEngine,
+                        context,
+                        primaryKeysOfCreatedItems[0],
+                        dataSourceName,
+                        dbConnection,
+                        dbTransaction);
+                }
+                else
+                {
+                    result = await ExecuteMultipleCreateSelectionSetAsync(
+                        queryEngine,
+                        context,
+                        primaryKeysOfCreatedItems,
+                        dataSourceName,
+                        dbConnection,
+                        dbTransaction);
+                }
+            }
+            else
+            {
+                DbResultSetRow? mutationResultRow =
+                    await PerformMutationOperation(
+                        entityName,
+                        mutationOperation,
+                        parameters,
+                        sqlMetadataProvider,
+                        context,
+                        dbConnection,
+                        dbTransaction);
+
+                if (isReadPermissionConfigured)
+                {
+                    if (mutationResultRow is not null && mutationResultRow.Columns.Count > 0
+                        && !context.Selection.Type.IsScalarType())
+                    {
+                        result = await ExecuteSelectionSetAsync(
+                            queryEngine,
+                            context,
+                            GetBackingColumnsFromCollection(entityName: entityName, parameters: mutationResultRow.Columns, sqlMetadataProvider: sqlMetadataProvider),
+                            dataSourceName,
+                            dbConnection,
+                            dbTransaction);
+                    }
+                    else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
+                    {
+                        result = GetDbOperationResultJsonDocument("success");
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static Task<Tuple<JsonDocument?, IMetadata?>> ExecuteSelectionSetAsync(
+            IQueryEngine queryEngine,
+            IMiddlewareContext context,
+            IDictionary<string, object?> parameters,
+            string dataSourceName,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
+        {
+            if (dbConnection is null)
+            {
+                return queryEngine.ExecuteAsync(context, parameters, dataSourceName);
+            }
+
+            return ((SqlQueryEngine)queryEngine).ExecuteAsync(context, parameters, dataSourceName, dbConnection, dbTransaction);
+        }
+
+        private static Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateSelectionSetAsync(
+            IQueryEngine queryEngine,
+            IMiddlewareContext context,
+            List<IDictionary<string, object?>> parameters,
+            string dataSourceName,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
+        {
+            if (dbConnection is null)
+            {
+                return queryEngine.ExecuteMultipleCreateFollowUpQueryAsync(context, parameters, dataSourceName);
+            }
+
+            return ((SqlQueryEngine)queryEngine).ExecuteMultipleCreateFollowUpQueryAsync(
+                context,
+                parameters,
+                dataSourceName,
+                dbConnection,
+                dbTransaction);
+        }
+
+        private static Task<JsonDocument?> ExecuteFindOnSameConnectionAsync(
+            IQueryEngine queryEngine,
+            FindRequestContext context,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
+        {
+            if (dbConnection is null)
+            {
+                return queryEngine.ExecuteAsync(context);
+            }
+
+            return ((SqlQueryEngine)queryEngine).ExecuteAsync(context, dbConnection, dbTransaction);
+        }
+
+        /// <summary>
         /// Performs the given REST and GraphQL mutation operation of type
         /// Insert, Create, Update, UpdateIncremental, UpdateGraphQL
         /// on the source backing the given entity.
@@ -893,7 +1034,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 EntityActionOperation operationType,
                 IDictionary<string, object?> parameters,
                 ISqlMetadataProvider sqlMetadataProvider,
-                IMiddlewareContext? context = null)
+                IMiddlewareContext? context = null,
+                DbConnection? dbConnection = null,
+                DbTransaction? dbTransaction = null)
         {
             IQueryBuilder queryBuilder = _queryManagerFactory.GetQueryBuilder(sqlMetadataProvider.GetDatabaseType());
             IQueryExecutor queryExecutor = _queryManagerFactory.GetQueryExecutor(sqlMetadataProvider.GetDatabaseType());
@@ -996,13 +1139,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // When no exposed column names were resolved, it is safe to provide
                 // backing column names (sourceDefinition.Primary) as a list of arguments.
                 dbResultSet =
-                    await queryExecutor.ExecuteQueryAsync(
+                    await ExecuteMutationQueryAsync(
+                        queryExecutor,
                         queryString,
                         queryParameters,
                         queryExecutor.ExtractResultSetFromDbDataReaderAsync,
                         dataSourceName,
-                        GetHttpContext(),
-                        primaryKeyExposedColumnNames.Count > 0 ? primaryKeyExposedColumnNames : sourceDefinition.PrimaryKey);
+                        primaryKeyExposedColumnNames.Count > 0 ? primaryKeyExposedColumnNames : sourceDefinition.PrimaryKey,
+                        dbConnection,
+                        dbTransaction);
 
                 dbResultSetRow = dbResultSet is not null ?
                     (dbResultSet.Rows.FirstOrDefault() ?? new DbResultSetRow()) : null;
@@ -1040,12 +1185,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // This is the scenario for all REST mutation operations covered by this function
                 // and the case when the Selection Type is a scalar for GraphQL.
                 dbResultSet =
-                    await queryExecutor.ExecuteQueryAsync(
-                        sqltext: queryString,
-                        parameters: queryParameters,
-                        dataReaderHandler: queryExecutor.ExtractResultSetFromDbDataReaderAsync,
-                        httpContext: GetHttpContext(),
-                        dataSourceName: dataSourceName);
+                    await ExecuteMutationQueryAsync(
+                        queryExecutor,
+                        queryString,
+                        queryParameters,
+                        queryExecutor.ExtractResultSetFromDbDataReaderAsync,
+                        dataSourceName,
+                        args: null,
+                        dbConnection,
+                        dbTransaction);
                 dbResultSetRow = dbResultSet is not null ? (dbResultSet.Rows.FirstOrDefault() ?? new()) : null;
             }
 
@@ -1068,7 +1216,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 IDictionary<string, object?> mutationInputParamsFromGQLContext,
                 ISqlMetadataProvider sqlMetadataProvider,
                 RuntimeConfig runtimeConfig,
-                bool isMultipleInputType = false)
+                bool isMultipleInputType = false,
+                DbConnection? dbConnection = null,
+                DbTransaction? dbTransaction = null)
         {
             // rootFieldName can be either "item" or "items" depending on whether the operation
             // is point multiple create or many-type multiple create.
@@ -1170,7 +1320,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
+                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
 
                     // Ideally the CurrentEntityCreatedValues should not be null. CurrentEntityCreatedValues being null indicates that the create operation
                     // has failed and that will result in an exception being thrown.
@@ -1220,7 +1370,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     parentEntityName: entityName,
                     inputMutParams: parsedInputFields);
 
-                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
+                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
 
                 if (multipleCreateStructure.CurrentEntityCreatedValues is not null)
                 {
@@ -1245,7 +1395,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             object? unparsedInputFields,
             ISqlMetadataProvider sqlMetadataProvider,
             MultipleCreateStructure multipleCreateStructure,
-            int nestingLevel)
+            int nestingLevel,
+            DbConnection? dbConnection = null,
+            DbTransaction? dbTransaction = null)
         {
 
             if (multipleCreateStructure.InputMutParams is null || unparsedInputFields is null)
@@ -1288,7 +1440,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel);
+                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel, dbConnection, dbTransaction);
                     parsedInputItemIndex++;
                 }
             }
@@ -1319,7 +1471,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     string relatedEntityName = GraphQLUtils.GetRelationshipTargetEntityName(entity, entityName, relationshipName);
                     MultipleCreateStructure referencedRelationshipMultipleCreateStructure = new(entityName: relatedEntityName, parentEntityName: entityName, inputMutParams: relationshipFieldValue);
                     IValueNode node = GraphQLUtils.GetFieldNodeForGivenFieldName(parameterNodes, relationshipName);
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
 
                     if (sqlMetadataProvider.TryGetFKDefinition(
                                                     sourceEntityName: entityName,
@@ -1346,7 +1498,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                           parameters: multipleCreateStructure.CurrentEntityParams!,
                                                                           sourceDefinition: currentEntitySourceDefinition,
                                                                           isLinkingEntity: false,
-                                                                          nestingLevel: nestingLevel);
+                                                                          nestingLevel: nestingLevel,
+                                                                          dbConnection: dbConnection,
+                                                                          dbTransaction: dbTransaction);
 
                 //Perform an insertion in the linking table if required
                 if (multipleCreateStructure.IsLinkingTableInsertionRequired)
@@ -1389,7 +1543,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             parameters: multipleCreateStructure.LinkingTableParams!,
                             sourceDefinition: linkingTableSourceDefinition,
                             isLinkingEntity: true,
-                            nestingLevel: nestingLevel);
+                            nestingLevel: nestingLevel,
+                            dbConnection: dbConnection,
+                            dbTransaction: dbTransaction);
                 }
 
                 // Process referencing relationships
@@ -1426,7 +1582,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             entityName: entityName);
                     }
 
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
                 }
             }
         }
@@ -1449,7 +1605,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                            IDictionary<string, object?> parameters,
                                                                            SourceDefinition sourceDefinition,
                                                                            bool isLinkingEntity,
-                                                                           int nestingLevel)
+                                                                           int nestingLevel,
+                                                                           DbConnection? dbConnection = null,
+                                                                           DbTransaction? dbTransaction = null)
         {
             SqlInsertStructure sqlInsertStructure = new(
                                                      entityName: entityName,
@@ -1475,16 +1633,46 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 exposedColumnNames = exposedFieldToBackingFieldMap.Keys.ToList();
             }
+            else if (sqlMetadataProvider.TryGetBackingFieldToExposedFieldMap(entityName, out IReadOnlyDictionary<string, string>? backingFieldToExposedFieldMap))
+            {
+                // Non-throwing fallback: the values of the backing->exposed map are the exposed names.
+                exposedColumnNames = backingFieldToExposedFieldMap.Values.ToList();
+            }
+            else
+            {
+                // Last-resort fallback (both maps absent): use the physical column keys so the
+                // result extraction degrades gracefully instead of throwing.
+                exposedColumnNames = sourceDefinition.Columns.Keys.ToList();
+            }
 
             DbResultSet? dbResultSet;
             DbResultSetRow? dbResultSetRow;
-            dbResultSet = queryExecutor.ExecuteQuery(
-                queryString,
-                queryParameters,
-                queryExecutor.ExtractResultSetFromDbDataReader,
-                GetHttpContext(),
-                EnumerableUtilities.IsNullOrEmpty(exposedColumnNames) ? sourceDefinition.Columns.Keys.ToList() : exposedColumnNames,
-                dataSourceName);
+            List<string> resultColumns = EnumerableUtilities.IsNullOrEmpty(exposedColumnNames)
+                ? sourceDefinition.Columns.Keys.ToList()
+                : exposedColumnNames;
+
+            if (dbConnection is not null)
+            {
+                dbResultSet = queryExecutor.ExecuteQueryOnConnection(
+                    dbConnection,
+                    queryString,
+                    queryParameters,
+                    queryExecutor.ExtractResultSetFromDbDataReader,
+                    GetHttpContext(),
+                    resultColumns,
+                    dataSourceName,
+                    dbTransaction);
+            }
+            else
+            {
+                dbResultSet = queryExecutor.ExecuteQuery(
+                    queryString,
+                    queryParameters,
+                    queryExecutor.ExtractResultSetFromDbDataReader,
+                    GetHttpContext(),
+                    resultColumns,
+                    dataSourceName);
+            }
 
             dbResultSetRow = dbResultSet is not null ? (dbResultSet.Rows.FirstOrDefault() ?? new DbResultSetRow()) : null;
             if (dbResultSetRow is null || dbResultSetRow.Columns.Count == 0)
@@ -1977,7 +2165,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             PerformDeleteOperation(
                 string entityName,
                 IDictionary<string, object?> parameters,
-                ISqlMetadataProvider sqlMetadataProvider)
+                ISqlMetadataProvider sqlMetadataProvider,
+                DbConnection? dbConnection = null,
+                DbTransaction? dbTransaction = null)
         {
             IQueryBuilder queryBuilder = _queryManagerFactory.GetQueryBuilder(sqlMetadataProvider.GetDatabaseType());
             IQueryExecutor queryExecutor = _queryManagerFactory.GetQueryExecutor(sqlMetadataProvider.GetDatabaseType());
@@ -1995,12 +2185,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             queryParameters = deleteStructure.Parameters;
 
             Dictionary<string, object>?
-                resultProperties = await queryExecutor.ExecuteQueryAsync(
-                    sqltext: queryString,
-                    parameters: queryParameters,
-                    dataReaderHandler: queryExecutor.GetResultPropertiesAsync,
-                    httpContext: GetHttpContext(),
-                    dataSourceName: dataSourceName);
+                resultProperties = await ExecuteMutationQueryAsync(
+                    queryExecutor,
+                    queryString,
+                    queryParameters,
+                    queryExecutor.GetResultPropertiesAsync,
+                    dataSourceName,
+                    args: null,
+                    dbConnection,
+                    dbTransaction);
 
             return resultProperties;
         }
@@ -2018,7 +2211,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             PerformUpsertOperation(
                 IDictionary<string, object?> parameters,
                 RestRequestContext context,
-                ISqlMetadataProvider sqlMetadataProvider)
+                ISqlMetadataProvider sqlMetadataProvider,
+                DbConnection? dbConnection = null,
+                DbTransaction? dbTransaction = null)
         {
             string queryString;
             Dictionary<string, DbConnectionParam> queryParameters;
@@ -2059,13 +2254,47 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 kv_pair => $"{kv_pair.Key}: {kv_pair.Value}"
                 )) + ">";
 
-            return await queryExecutor.ExecuteQueryAsync(
+            return await ExecuteMutationQueryAsync(
+                       queryExecutor,
                        queryString,
                        queryParameters,
                        queryExecutor.GetMultipleResultSetsIfAnyAsync,
                        dataSourceName,
-                       GetHttpContext(),
-                       new List<string> { prettyPrintPk, entityName });
+                       new List<string> { prettyPrintPk, entityName },
+                       dbConnection,
+                       dbTransaction);
+        }
+
+        private Task<TResult?> ExecuteMutationQueryAsync<TResult>(
+            IQueryExecutor queryExecutor,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            Func<DbDataReader, List<string>?, Task<TResult>> dataReaderHandler,
+            string dataSourceName,
+            List<string>? args,
+            DbConnection? dbConnection,
+            DbTransaction? dbTransaction)
+        {
+            if (dbConnection is not null)
+            {
+                return queryExecutor.ExecuteQueryOnConnectionAsync(
+                    dbConnection,
+                    sqltext,
+                    parameters,
+                    dataReaderHandler,
+                    dataSourceName,
+                    dbTransaction,
+                    GetHttpContext(),
+                    args);
+            }
+
+            return queryExecutor.ExecuteQueryAsync(
+                sqltext,
+                parameters,
+                dataReaderHandler,
+                dataSourceName,
+                GetHttpContext(),
+                args);
         }
 
         private Dictionary<string, object?> PrepareParameters(RestRequestContext context)

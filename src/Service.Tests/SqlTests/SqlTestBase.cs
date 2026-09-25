@@ -37,6 +37,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 using MySqlConnector;
 using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 using ZiggyCreatures.Caching.Fusion;
 using static Azure.DataApiBuilder.Core.AuthenticationHelpers.AppServiceAuthentication;
 
@@ -125,6 +126,13 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     entityKey: "magazine",
                     entityName: "foo.magazines",
                     keyfields: ["id"]),
+                // Oracle exposes the catalog spelling (UPPERCASE) for unmapped columns, so the
+                // injected test entity maps its columns to the lowercase names the shared suite uses.
+                TestCategory.ORACLE => TestHelper.AddMissingEntitiesToConfig(
+                    config: runtimeConfig,
+                    entityKey: "magazine",
+                    entityName: "foo.magazines",
+                    mappings: new() { { "id", "id" }, { "title", "title" }, { "issue_number", "issue_number" } }),
                 _ => TestHelper.AddMissingEntitiesToConfig(
                     config: runtimeConfig,
                     entityKey: "magazine",
@@ -136,6 +144,12 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
             {
                 // MySql does not handle schema the same as other DB, so this testing entity is not needed
                 TestCategory.MYSQL => runtimeConfig,
+                TestCategory.ORACLE => TestHelper.AddMissingEntitiesToConfig(
+                    config: runtimeConfig,
+                    entityKey: "bar_magazine",
+                    entityName: "bar.magazines",
+                    keyfields: ["upc"],
+                    mappings: new() { { "upc", "upc" }, { "comic_name", "comic_name" }, { "issue", "issue" } }),
                 _ => TestHelper.AddMissingEntitiesToConfig(
                     config: runtimeConfig,
                     entityKey: "bar_magazine",
@@ -287,6 +301,11 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     string mySqlDbName = new MySqlConnectionStringBuilder(connectionString).Database;
                     DatabaseName = !string.IsNullOrEmpty(mySqlDbName) ? mySqlDbName : string.Empty;
                     break;
+                case TestCategory.ORACLE:
+                    // use UserID as default name for Oracle, uppercased
+                    OracleConnectionStringBuilder oracleBuilder = new(connectionString);
+                    DatabaseName = !string.IsNullOrEmpty(oracleBuilder.UserID) ? oracleBuilder.UserID.ToUpper() : "SYSTEM";
+                    break;
             }
         }
 
@@ -380,6 +399,27 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
 
                     _sqlMetadataProvider =
                          new MsSqlMetadataProvider(
+                             runtimeConfigProvider,
+                             runtimeConfigValidator,
+                             _queryManagerFactory.Object,
+                             _sqlMetadataLogger,
+                             dataSourceName);
+                    break;
+                case TestCategory.ORACLE:
+                    Mock<ILogger<OracleQueryExecutor>> oracleQueryExecutorLogger = new();
+                    _queryBuilder = new OracleQueryBuilder();
+                    _defaultSchemaName = "SYSTEM";
+                    _dbExceptionParser = new OracleDbExceptionParser(runtimeConfigProvider);
+                    _queryExecutor = new OracleQueryExecutor(
+                        runtimeConfigProvider,
+                        _dbExceptionParser,
+                        oracleQueryExecutorLogger.Object,
+                        httpContextAccessor.Object);
+                    _queryManagerFactory.Setup(x => x.GetQueryBuilder(It.IsAny<DatabaseType>())).Returns(_queryBuilder);
+                    _queryManagerFactory.Setup(x => x.GetQueryExecutor(It.IsAny<DatabaseType>())).Returns(_queryExecutor);
+
+                    _sqlMetadataProvider =
+                         new OracleMetadataProvider(
                              runtimeConfigProvider,
                              runtimeConfigValidator,
                              _queryManagerFactory.Object,

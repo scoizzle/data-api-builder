@@ -3959,7 +3959,7 @@ type Moon {
                 HttpMethod httpMethod = SqlTestHelper.ConvertRestMethodToHttpMethod(SupportedHttpVerb.Post);
                 string requestBody = @"{
                         ""title"": ""Harry Potter and the Order of Phoenix"",
-                        ""publisher_id"": 1234 ";
+                        ""publisher_id"": 1234 }";
 
                 if (includeExtraneousFieldInRequestBody)
                 {

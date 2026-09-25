@@ -1,0 +1,996 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System.Data;
+using System.Data.Common;
+using System.Text;
+using System.Text.RegularExpressions;
+using Azure.DataApiBuilder.Config.DatabasePrimitives;
+using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Service.Exceptions;
+using Oracle.ManagedDataAccess.Client;
+
+namespace Azure.DataApiBuilder.Core.Resolvers
+{
+    /// <summary>
+    /// Modifies a query that returns regular rows to return JSON for Oracle
+    /// </summary>
+    public class OracleQueryBuilder : BaseSqlQueryBuilder, IQueryBuilder
+    {
+        public const string UPSERT_IDENTIFIER_COLUMN_NAME = "___upsert_op___";
+        private const string INSERT_UPSERT = "inserted";
+        private const string UPDATE_UPSERT = "updated";
+        private const string ORACLE_ESCAPE_CHAR = "\\";
+        /// <summary>
+        /// Indicator emitted by the fallback-to-update branch when the target row does not exist
+        /// (no row matched the primary key, and no update policy exists to explain a no-match).
+        /// The executor maps it to 404 ItemNotFound, mirroring the other database engines.
+        /// </summary>
+        public const string MISSING_UPSERT = "missing";
+        public const string COUNT_ROWS_WITH_GIVEN_PK = "cnt_rows_to_update";
+        public const string IS_FALLBACK_TO_UPDATE = "is_fallback_to_update";
+
+        // DML RETURNING INTO fills output binds, not the DbDataReader. Wrap DML in a PL/SQL block
+        // that opens :dab_result so ExtractResultSetFromDbDataReaderAsync can consume one row.
+        // Literals cannot appear in RETURNING (upsert indicators go on the REF CURSOR SELECT).
+        internal const string RESULT_CURSOR_PARAM_NAME = "dab_result";
+
+        // Exposed column labels are not guaranteed to be valid Oracle bind-variable names: a column
+        // mapping can expose a label containing spaces, punctuation, or non-ASCII characters
+        // (e.g. "Scientific Name", "United State's Region", "始計"). Oracle parses ':Scientific
+        // Name' as bind ':Scientific' followed by identifier 'Name', which corrupts the PL/SQL block.
+        // RETURNING ... INTO therefore uses generated safe bind names; the REF CURSOR still aliases
+        // them back to the exposed labels so the mutation response is unchanged.
+        private const string OUTPUT_BIND_PREFIX = "dab_out_";
+
+        private static DbCommandBuilder _builder = new OracleCommandBuilder();
+
+        /// <inheritdoc />
+        public override string QuoteIdentifier(string ident)
+        {
+            return _builder.QuoteIdentifier(ident);
+        }
+
+        /// <summary>
+        /// Quotes a physical column reference for use in raw SQL fragments (OData filters,
+        /// predicate operands). Callers pass names already resolved to the PHYSICAL backing
+        /// casing preserved from Oracle metadata, so no case transformation is applied - a
+        /// quoted lowercase/mixed-case column resolves exactly as Oracle stores it.
+        /// </summary>
+        /// <inheritdoc />
+        public override string QuotePhysicalColumn(string columnName)
+        {
+            return QuoteIdentifier(columnName);
+        }
+
+        /// <summary>
+        /// Unquoted catalog objects (schema, table, package, procedure) are stored UPPERCASE.
+        /// Always quoted here, so they must be emitted UPPERCASE.
+        /// </summary>
+        private string QuoteCatalogObject(string objectName)
+        {
+            return QuoteIdentifier(objectName.ToUpperInvariant());
+        }
+
+        /// <summary>
+        /// Quotes a schema-qualified catalog object. Empty schema yields a bare quoted object.
+        /// </summary>
+        internal string QuoteRelation(string? schemaName, string objectName)
+        {
+            string quotedObject = QuoteCatalogObject(objectName);
+            if (string.IsNullOrWhiteSpace(schemaName))
+            {
+                return quotedObject;
+            }
+
+            return $"{QuoteCatalogObject(schemaName)}.{quotedObject}";
+        }
+
+        /// <summary>
+        /// DAB-generated aliases start as table{N}. They are quoted, so FROM/JOIN and column
+        /// prefixes must share one spelling. Uppercase is that spelling.
+        /// </summary>
+        public string QuoteTableAlias(string alias)
+        {
+            return QuoteCatalogObject(alias);
+        }
+
+        /// <summary>
+        /// Helper method to add ESCAPE clause to the LIKE clauses in the query.
+        /// </summary>
+        private static string AddEscapeToLikeClauses(string predicate)
+        {
+            const string escapeClause = $" ESCAPE '{ORACLE_ESCAPE_CHAR}'";
+            // Regex to find LIKE clauses and append ESCAPE
+            return Regex.Replace(predicate, @"(LIKE\s+@[\w\d]+)", $"$1{escapeClause}", RegexOptions.IgnoreCase);
+        }
+
+        /// <summary>
+        /// Overrides the base EXISTS-subquery builder used for predicates that filter on a nested
+        /// relationship (e.g. <c>characters(filter: { actor: { name: { eq: ... } } })</c>). The base
+        /// emits <c>FROM schema.table AS "alias"</c> which Oracle rejects: the AS keyword is not
+        /// accepted for table aliases (ORA-00907/ORA-02000) and quoted identifiers are
+        /// case-sensitive, so the alias and table/schema names must be emitted UPPERCASE to match
+        /// the references produced by <see cref="Build(Column)"/>.
+        /// </summary>
+        /// <inheritdoc />
+        public override string Build(BaseSqlQueryStructure structure)
+        {
+            string predicates = new(JoinPredicateStrings(
+                       structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                       Build(structure.Predicates)));
+
+            string query = $"SELECT 1 " +
+                   $"FROM {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                   $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)} " +
+                   $"WHERE {predicates}";
+
+            return query;
+        }
+
+        /// <inheritdoc />
+        public string Build(SqlQueryStructure structure)
+        {
+            // Schema/table and DAB aliases go through QuoteRelation / QuoteTableAlias (uppercase,
+            // quoted). Column names are physical backing names and are emitted verbatim.
+            string fromSql = $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                             $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
+            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteTableAlias(x.Key)} ON (1=1)"));
+
+            string predicates;
+            if (structure.IsMultipleCreateOperation)
+            {
+                predicates = JoinPredicateStrings(
+                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                                    structure.FilterPredicates,
+                                    Build(structure.Predicates, " OR ", isMultipleCreateOperation: true),
+                                    Build(structure.PaginationMetadata.PaginationPredicate));
+            }
+            else
+            {
+                predicates = JoinPredicateStrings(
+                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                                    structure.FilterPredicates,
+                                    Build(structure.Predicates),
+                                    Build(structure.PaginationMetadata.PaginationPredicate));
+            }
+
+            // Add ESCAPE clause to LIKE predicates so that % and _ wildcards in the
+            // search pattern are properly escaped when used as literal characters.
+            predicates = AddEscapeToLikeClauses(predicates);
+
+            string aggregations = BuildAggregationColumns(structure);
+
+            string query = $"SELECT {MakeSelectColumns(structure)}{aggregations}"
+                + $" FROM {fromSql}"
+                + $" WHERE {predicates}"
+                + BuildGroupBy(structure)
+                + BuildHaving(structure)
+                + BuildOrderBy(structure)
+                + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
+
+            string subqueryName = QuoteIdentifier($"subq{structure.Counter.Next()}");
+            string jsonDocAlias = QuoteIdentifier("json_doc");
+            string orderAlias = QuoteIdentifier("__dab_ord");
+
+            StringBuilder result = new();
+            if (structure.IsListQuery)
+            {
+                // JSON_ARRAYAGG is unordered unless ORDER BY is given. ROWNUM is captured after
+                // the inner ORDER BY/FETCH so cursor pagination matches that sort. FORMAT JSON
+                // keeps the already-built object from being escaped as a string. Oracle requires
+                // ORDER BY before RETURNING: "FORMAT JSON RETURNING CLOB ORDER BY" raises ORA-02000.
+                result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON ORDER BY {orderAlias} RETURNING CLOB), TO_CLOB(JSON_ARRAY())) ");
+                result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
+                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
+                result.Append(query);
+                result.Append($" ) ) {subqueryName}");
+            }
+            else
+            {
+                // RETURNING CLOB must sit inside JSON_OBJECT(...) (outside the parens is ORA-00923)
+                // to lift the VARCHAR2 4000-byte cap. TO_CLOB(JSON_OBJECT(*)) does not.
+                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) ");
+                result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
+                result.Append(query);
+                result.Append($" ) {subqueryName}");
+            }
+
+            return result.ToString();
+        }
+
+        /// <inheritdoc />
+        public string Build(SqlInsertStructure structure)
+        {
+            string dbPolicyPredicates = JoinPredicateStrings(structure.GetDbPolicyForOperation(EntityActionOperation.Create));
+            SourceDefinition sourceDefinition = structure.GetUnderlyingSourceDefinition();
+
+            string tableName = QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name);
+            string insertQuery = $"INSERT INTO {tableName} ";
+
+            // Config + derived FK params can resolve to the same physical column. Oracle
+            // rejects duplicate names in INSERT (ORA-00957) and in the policy DUAL subquery
+            // (ORA-00918). Last write wins so an explicit FK is kept over a derived one.
+            (List<string> insertCols, List<string> insertVals) = structure.InsertColumns.Count > 0
+                ? DedupeInsertColumns(structure.InsertColumns, structure.Values)
+                : ([], []);
+
+            if (insertCols.Count > 0)
+            {
+                string insertColumns = BuildColumnList(insertCols);
+                insertQuery += $"({insertColumns}) ";
+                insertQuery += $"VALUES ({string.Join(", ", insertVals)}) ";
+            }
+            else
+            {
+                // Oracle does not support the SQL Server/PostgreSQL DEFAULT VALUES syntax.
+                // Insert one defaulted or identity column explicitly instead.
+                // (An insert with no columns and a create database policy is rejected earlier by
+                // SqlInsertStructure, because there would be no row values for the policy to scope.)
+                string? defaultColumn = sourceDefinition.Columns
+                    .Where(pair => pair.Value.HasDefault || pair.Value.IsAutoGenerated)
+                    .Select(pair => pair.Key)
+                    .FirstOrDefault();
+
+                if (defaultColumn is null)
+                {
+                    throw new DataApiBuilderException(
+                        "INSERT requires at least one defaulted or identity column when no values are provided",
+                        System.Net.HttpStatusCode.BadRequest,
+                        DataApiBuilderException.SubStatusCodes.DatabaseInputError);
+                }
+
+                insertQuery += $"({QuoteIdentifier(defaultColumn)}) VALUES (DEFAULT) ";
+            }
+
+            // RETURNING rejects aliases (ORA-00925); emit bare physical column names.
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, sourceDefinition);
+
+            bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
+            if (hasCreatePolicy)
+            {
+                // PL/SQL cannot host a scalar subquery in IF (PLS-00103). SELECT COUNT(*) INTO a
+                // NUMBER, then gate the INSERT. Empty cursor (WHERE 1 = 0) surfaces 403, not ORA-01400.
+                string namedValues = string.Join(", ", insertCols.Zip(insertVals,
+                    (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
+                return $"{outputTypeHints}DECLARE v_dab_insert_count NUMBER; BEGIN " +
+                    $"SELECT COUNT(*) INTO v_dab_insert_count FROM (SELECT {namedValues} FROM DUAL) WHERE {dbPolicyPredicates}; " +
+                    $"IF v_dab_insert_count > 0 THEN " +
+                    $"{insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
+                    $"ELSE " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL WHERE 1 = 0; " +
+                    $"END IF; " +
+                    $"END;";
+            }
+
+            return $"{outputTypeHints}BEGIN {insertQuery} RETURNING {returningColumns} INTO {bindNames}; " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; END;";
+        }
+
+        /// <inheritdoc />
+        public string Build(SqlUpdateStructure structure)
+        {
+            string predicates = JoinPredicateStrings(
+                                   structure.GetDbPolicyForOperation(EntityActionOperation.Update),
+                                   Build(structure.Predicates));
+
+            // The RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
+            // exact physical casing preserved from Oracle metadata.
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
+            string updateQuery = $"UPDATE {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                    $"SET {Build(structure.UpdateOperations, ", ")} " +
+                    $"WHERE {predicates} " +
+                    $"RETURNING {returningColumns} INTO {bindNames}";
+
+            // When the UPDATE matches no row (record absent, or the update database policy blocks it),
+            // RETURNING INTO never fires and the output binds stay NULL. Opening the cursor
+            // unconditionally would fabricate a row of all-NULL columns, which the mutation engine
+            // treats as a successful update. Mirror the upsert builder: open an EMPTY cursor when
+            // SQL%ROWCOUNT is 0 so a no-match update surfaces as "item not found" (or a policy
+            // failure), matching the behavior of the other database engines.
+            return $"{outputTypeHints}BEGIN {updateQuery}; " +
+                $"IF SQL%ROWCOUNT > 0 THEN " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL; " +
+                $"ELSE " +
+                $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {selectFromBinds} FROM DUAL WHERE 1 = 0; " +
+                $"END IF; " +
+                $"END;";
+        }
+
+        /// <inheritdoc />
+        public string Build(SqlDeleteStructure structure)
+        {
+            string predicates = JoinPredicateStrings(
+                       structure.GetDbPolicyForOperation(EntityActionOperation.Delete),
+                       Build(structure.Predicates));
+
+            return $"DELETE FROM {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                    $"WHERE {predicates}";
+        }
+
+        /// <summary>
+        /// Builds an Oracle-compatible stored procedure execution query.
+        /// "EXEC" is SQL*Plus client syntax and is invalid for ODP.NET CommandType.Text
+        /// (ORA-00900), so the subprogram is invoked from within a PL/SQL anonymous block.
+        /// Oracle subprograms return result sets through a SYS_REFCURSOR (a procedure's OUT
+        /// parameter, or a function's RETURN value), which ODP.NET does NOT surface in the
+        /// DbDataReader on its own. We therefore bind ":dab_result" (registered as a RefCursor by
+        /// <see cref="OracleBindRegistrar"/>) whose rows ODP.NET exposes as the reader result set.
+        ///
+        /// Arguments use named association so a REF CURSOR that is not the last parameter, and a
+        /// skipped optional argument, cannot shift later binds. A function's RETURN is assigned,
+        /// not named:
+        ///  - Procedure: BEGIN "S"."P"("ID" => :param0, "P_CUR" => :dab_result); END;
+        ///  - Function returning a cursor: BEGIN :dab_result := "S"."P"("ID" => :param0); END;
+        ///  - Scalar function: SELECT "S"."P"("ID" => :param0) AS "value" FROM DUAL
+        /// </summary>
+        public string Build(SqlExecuteStructure structure)
+        {
+            DatabaseStoredProcedure sp = (DatabaseStoredProcedure)structure.DatabaseObject;
+
+            // NOTE: sp.IsFunction is NOT parsed from config; it is populated during metadata
+            // discovery (OracleMetadataProvider.FillSchemaForStoredProcedureAsync detects the
+            // ALL_ARGUMENTS POSITION 0 row that marks a function's RETURN value). This Build method
+            // therefore relies on that discovery having completed first - an ordering invariant of
+            // the startup pipeline. If it were ever skipped, IsFunction would remain false and a
+            // function would be emitted as a bare `BEGIN schema.func(:p0); END;` statement, which
+            // is invalid PL/SQL for a function.
+            string qualifiedName = string.IsNullOrEmpty(sp.PackageName)
+                ? QuoteRelation(sp.SchemaName, sp.Name)
+                : $"{QuoteRelation(sp.SchemaName, sp.PackageName)}.{QuoteCatalogObject(sp.Name)}";
+
+            // ProcedureParameters maps each subprogram argument NAME (catalog spelling) to the
+            // engine-generated bind reference (e.g. "@param0"). The call must reference the VALUES.
+            // Emitting the keys (":id") would produce binds with no matching DbConnectionParam.
+            // StoredProcedureDefinition.Columns holds OUT/RETURN metadata. An IDataReader column is
+            // the REF CURSOR argument (procedures) or the function RETURN (functions).
+            bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Values
+                .Any(column => column.SystemType == typeof(IDataReader));
+            List<string> callArgs = BuildNamedCallArguments(structure, includeRefCursor: !sp.IsFunction && returnsCursor);
+
+            if (sp.IsFunction)
+            {
+                // A function's result (even if it is a REF CURSOR) is expressed as its RETURN
+                // value, so it cannot be called as a bare statement.
+                if (returnsCursor)
+                {
+                    return $"BEGIN :{RESULT_CURSOR_PARAM_NAME} := {qualifiedName}({JoinArgs(callArgs)}); END;";
+                }
+
+                string select = $"SELECT {qualifiedName}({JoinArgs(callArgs)}) AS {QuoteIdentifier("value")} FROM DUAL";
+                return select;
+            }
+
+            // Procedures with no arguments are invoked without parentheses.
+            string args = callArgs.Count > 0 ? $"({string.Join(", ", callArgs)})" : string.Empty;
+
+            return $"BEGIN {qualifiedName}{args}; END;";
+        }
+
+        /// <summary>
+        /// Named PL/SQL associations (<c>"ARG" => :paramN</c>). The REF CURSOR is bound to its
+        /// actual argument name when this is a procedure; a function RETURN is not an argument.
+        /// </summary>
+        private List<string> BuildNamedCallArguments(SqlExecuteStructure structure, bool includeRefCursor)
+        {
+            List<string> callArgs = new();
+            foreach ((string argumentName, object bind) in structure.ProcedureParameters)
+            {
+                string bindName = bind.ToString()!.TrimStart('@');
+                callArgs.Add($"{QuoteIdentifier(argumentName)} => :{bindName}");
+            }
+
+            if (!includeRefCursor)
+            {
+                return callArgs;
+            }
+
+            string? cursorArgument = null;
+            foreach ((string columnName, ColumnDefinition column) in structure.GetUnderlyingSourceDefinition().Columns)
+            {
+                if (column.SystemType == typeof(IDataReader))
+                {
+                    cursorArgument = columnName;
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(cursorArgument))
+            {
+                callArgs.Add($"{QuoteIdentifier(cursorArgument)} => :{RESULT_CURSOR_PARAM_NAME}");
+            }
+            else
+            {
+                // Result metadata did not record the cursor argument name. Keep a bind so the
+                // executor still opens a reader, rather than dropping the result set.
+                callArgs.Add($":{RESULT_CURSOR_PARAM_NAME}");
+            }
+
+            return callArgs;
+        }
+
+        private static string JoinArgs(List<string> callArgs)
+        {
+            return callArgs.Count > 0 ? string.Join(", ", callArgs) : string.Empty;
+        }
+
+        public string Build(SqlUpsertQueryStructure structure)
+        {
+            // Oracle upserts are built as a SINGLE PL/SQL anonymous block because:
+            //  1. ODP.NET does not accept multiple ';'-separated statements in one command
+            //     (ORA-03405), so the Postgres-style "COUNT; UPDATE; INSERT;" batch is impossible.
+            //  2. MERGE cannot return per-branch data (RETURNING only supports a single column
+            //     expression list and cannot include literals).
+            //  3. UPDATE/INSERT ... RETURNING delivers values through output binds, not the reader.
+            //
+            // The block performs the UPDATE first; if it matched no rows (SQL%ROWCOUNT = 0) it
+            // performs a guarded INSERT. Each branch emits the resulting columns - plus an
+            // ___upsert_op___ indicator literal - through a REF CURSOR result set that the executor
+            // reads to distinguish update (200) from insert (201) and to surface policy failures.
+            string tableName = QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name);
+            string pkPredicates = Build(structure.Predicates);
+
+            string updatePredicates = JoinPredicateStrings(pkPredicates, structure.GetDbPolicyForOperation(EntityActionOperation.Update));
+            // RETURNING column list must be bare (no aliases - ORA-00925); column names carry the
+            // exact physical casing preserved from Oracle metadata.
+            (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
+                BuildOutputBindings(structure.OutputColumns, structure.GetUnderlyingSourceDefinition());
+            string updateQuery = $"UPDATE {tableName} " +
+                $"SET {Build(structure.UpdateOperations, ", ")} " +
+                $"WHERE {updatePredicates} " +
+                $"RETURNING {returningColumns} " +
+                $"INTO {bindNames}";
+
+            if (structure.IsFallbackToUpdate)
+            {
+                // Update-only flow (e.g. autogenerated PK): no INSERT branch. When no row matched
+                // the primary key + update policy, distinguish "row exists but the update policy
+                // blocked it" (403, empty cursor - non-leaky) from "row absent" (404) by probing
+                // row existence, mirroring PostgreSQL/MSSQL:
+                //  - row exists: the UPDATE was blocked by the policy -> EMPTY cursor (403).
+                //  - row absent: emit a 'missing' indicator row so the executor surfaces 404.
+                // PL/SQL cannot evaluate a scalar subquery in an IF condition (PLS-00103), so the
+                // existence probe uses SELECT COUNT(*) INTO a declared variable.
+                string pkExistencePredicates = Build(structure.Predicates);
+                string fallbackIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+                string missingIndicator = $"{selectFromBinds}, '{MISSING_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+                return $"{outputTypeHints}DECLARE v_dab_upsert_count NUMBER; BEGIN {updateQuery}; " +
+                    $"IF SQL%ROWCOUNT > 0 THEN " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {fallbackIndicator} FROM DUAL; " +
+                    $"ELSE " +
+                    $"SELECT COUNT(*) INTO v_dab_upsert_count FROM {tableName} WHERE {pkExistencePredicates}; " +
+                    $"IF v_dab_upsert_count > 0 THEN " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {fallbackIndicator} FROM DUAL WHERE 1 = 0; " +
+                    $"ELSE " +
+                    $"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {missingIndicator} FROM DUAL; " +
+                    $"END IF; " +
+                    $"END IF; " +
+                    $"END;";
+            }
+            else
+            {
+                // INSERT only runs when the UPDATE matched no row. Two cases:
+                //   1. The row EXISTS but the update policy blocked it → return 403 via an empty
+                //      cursor, without leaking whether the row exists (matches Postgres/MSSQL).
+                //   2. The row is ABSENT → attempt INSERT, gated by the create policy.
+                // When the create policy blocks the insert, an empty cursor surfaces 403.
+                //
+                // Race safety: concurrent upserts for the same missing PK serialize on the primary
+                // key; the loser hits ORA-00001 (unique constraint) which the exception parser maps
+                // to HTTP 409, matching the behavior of the other engines' non-atomic upserts.
+                string? createPolicy = structure.GetDbPolicyForOperation(EntityActionOperation.Create);
+                bool hasCreatePolicy = !string.IsNullOrEmpty(createPolicy) && !createPolicy.Equals(BASE_PREDICATE);
+
+                (List<string> insertCols, List<string> insertVals) =
+                    DedupeInsertColumns(structure.InsertColumns, structure.Values);
+                string insertColumns = BuildColumnList(insertCols);
+                string insertQuery = $"INSERT INTO {tableName} ({insertColumns}) " +
+                    $"VALUES ({string.Join(", ", insertVals)}) " +
+                    $"RETURNING {returningColumns} " +
+                    $"INTO {bindNames}";
+
+                // Alias each value with its physical column name in a DUAL subquery so a create
+                // policy that references column names (e.g. "OWNERID" = :paramN, emitted via
+                // QuotePhysicalColumn) can resolve them - otherwise ORA-00904 invalid identifier.
+                string namedValues = string.Join(", ", insertCols.Zip(insertVals,
+                    (col, val) => $"{val} AS {QuoteIdentifier(col)}"));
+
+                string insertIndicator = $"{selectFromBinds}, '{INSERT_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+                string updateIndicator = $"{selectFromBinds}, '{UPDATE_UPSERT}' AS {QuoteIdentifier(UPSERT_IDENTIFIER_COLUMN_NAME)}";
+
+                StringBuilder block = new();
+                block.Append($"{outputTypeHints}DECLARE v_dab_upsert_count NUMBER; BEGIN ");
+                block.Append($"{updateQuery}; ");
+                block.Append($"IF SQL%ROWCOUNT > 0 THEN ");
+                block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL; ");
+                block.Append($"ELSE ");
+                // Distinguish "row exists but update policy blocked" (403) from "row absent" (insert).
+                // PL/SQL cannot evaluate a scalar subquery in an IF condition (PLS-00103), so the
+                // existence probe uses SELECT COUNT(*) INTO a declared variable.
+                block.Append($"SELECT COUNT(*) INTO v_dab_upsert_count FROM {tableName} WHERE {pkPredicates}; ");
+                block.Append($"IF v_dab_upsert_count > 0 THEN ");
+                block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {updateIndicator} FROM DUAL WHERE 1 = 0; ");
+                block.Append($"ELSE ");
+                if (hasCreatePolicy)
+                {
+                    // Gate the INSERT on the create policy: when blocked, open an empty cursor
+                    // so the executor surfaces 403 rather than ORA-01400 (400).
+                    block.Append($"SELECT COUNT(*) INTO v_dab_upsert_count FROM (SELECT {namedValues} FROM DUAL) WHERE {createPolicy}; ");
+                    block.Append($"IF v_dab_upsert_count > 0 THEN ");
+                    block.Append($"{insertQuery}; ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
+                    block.Append($"ELSE ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL WHERE 1 = 0; ");
+                    block.Append($"END IF; ");
+                }
+                else
+                {
+                    block.Append($"{insertQuery}; ");
+                    block.Append($"OPEN :{RESULT_CURSOR_PARAM_NAME} FOR SELECT {insertIndicator} FROM DUAL; ");
+                }
+
+                block.Append($"END IF; ");
+                block.Append($"END IF; ");
+                block.Append($"END;");
+                return block.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Builds the four correlated fragments a RETURNING ... INTO DML block needs:
+        /// the bare physical RETURNING column list, the generated safe INTO bind names,
+        /// the REF CURSOR SELECT that aliases each bind back to its exposed label, and the
+        /// type-hint comment consumed by <see cref="OracleQueryExecutor"/>.
+        /// Exposed labels are used only as cursor aliases - never as bind names, because they
+        /// may contain characters Oracle rejects in a bind variable.
+        /// </summary>
+        private (string ReturningColumns, string BindNames, string SelectFromBinds, string OutputTypeHints)
+            BuildOutputBindings(
+                IReadOnlyList<LabelledColumn> outputColumns,
+                SourceDefinition sourceDefinition)
+        {
+            // RETURNING rejects aliases (ORA-00925); emit bare physical column names.
+            string returningColumns = string.Join(", ", outputColumns.Select(c => QuoteIdentifier(c.ColumnName)));
+            string bindNames = string.Join(", ", outputColumns.Select((_, index) => $":{OUTPUT_BIND_PREFIX}{index}"));
+            string selectFromBinds = string.Join(", ", outputColumns.Select(
+                (column, index) => $":{OUTPUT_BIND_PREFIX}{index} AS {QuoteIdentifier(column.Label)}"));
+            string outputTypeHints = BuildOutputTypeHints(outputColumns, sourceDefinition);
+
+            return (returningColumns, bindNames, selectFromBinds, outputTypeHints);
+        }
+
+        /// <summary>
+        /// Prefixes the PL/SQL block with a comment listing RETURNING bind types so the
+        /// executor can register output parameters with the correct OracleDbType. The keys are
+        /// the generated safe bind names emitted by <see cref="BuildOutputBindings"/>.
+        /// </summary>
+        private static string BuildOutputTypeHints(
+            IReadOnlyList<LabelledColumn> outputColumns,
+            SourceDefinition sourceDefinition)
+        {
+            IEnumerable<string> hints = outputColumns
+                .Select((column, index) =>
+                {
+                    sourceDefinition.Columns.TryGetValue(column.ColumnName, out ColumnDefinition? definition);
+                    OracleDbType outputType = GetOracleOutputType(definition);
+                    if (outputType == OracleDbType.Raw)
+                    {
+                        // SQL RAW is at most 2000 bytes; PL/SQL RAW is at most 32767.
+                        // Size 0 makes ODP.NET RETURNING INTO fail or return empty bytes.
+                        int length = definition?.Length is int columnLength and > 0 ? columnLength : 2000;
+                        int size = Math.Min(Math.Max(length, 2000), 32767);
+                        return $"{OUTPUT_BIND_PREFIX}{index}={outputType}:{size}";
+                    }
+
+                    return $"{OUTPUT_BIND_PREFIX}{index}={outputType}";
+                });
+
+            return $"/* DAB_ORACLE_OUTPUT_TYPES:{string.Join(",", hints)} */ ";
+        }
+
+        private static OracleDbType GetOracleOutputType(ColumnDefinition? definition)
+        {
+            Type? systemType = definition?.SystemType;
+            DbType? dbType = definition?.DbType;
+
+            if (systemType == typeof(byte[]))
+            {
+                // BLOB/LONG RAW do not fit in a RAW bind (PL/SQL RAW max is 32767 bytes).
+                // NCLOB is a string flagged IsClob and must not take this binary path.
+                return definition?.IsBlob == true ? OracleDbType.Blob : OracleDbType.Raw;
+            }
+
+            if (systemType == typeof(DateTimeOffset))
+            {
+                return OracleDbType.TimeStampTZ;
+            }
+
+            if (systemType == typeof(DateTime))
+            {
+                return OracleDbType.TimeStamp;
+            }
+
+            // CLOB/NCLOB columns must bind as Clob (not Varchar2, which truncates at 4000 bytes
+            // with ORA-06502) in RETURNING ... INTO output parameters.
+            if (definition?.IsClob is true)
+            {
+                return OracleDbType.Clob;
+            }
+
+            return dbType switch
+            {
+                DbType.Boolean => OracleDbType.Boolean,
+                DbType.Byte => OracleDbType.Byte,
+                DbType.Int16 => OracleDbType.Int16,
+                DbType.Int32 => OracleDbType.Int32,
+                DbType.Int64 => OracleDbType.Int64,
+                DbType.Single => OracleDbType.Single,
+                DbType.Double => OracleDbType.Double,
+                DbType.Decimal => OracleDbType.Decimal,
+                _ => OracleDbType.Varchar2,
+            };
+        }
+
+        protected override string Build(Column column)
+        {
+            // OracleMetadataProvider.GetPhysicalDatabaseColumnName preserves the exact physical
+            // casing stored in Oracle metadata: UPPERCASE for unquoted identifiers (e.g. ID,
+            // TITLE) and original case for quoted ones (e.g. __column1, data). Emit the name
+            // verbatim so quoted identifiers resolve correctly (Oracle is case-sensitive for
+            // quoted identifiers: "DATA" != "data", "__column1" != "__COLUMN1").
+            if (!string.IsNullOrEmpty(column.TableAlias))
+            {
+                return $"{QuoteTableAlias(column.TableAlias)}.{QuoteIdentifier(column.ColumnName)}";
+            }
+            // If there is no table alias we return [{Column}]
+            else
+            {
+                return $"{QuoteIdentifier(column.ColumnName)}";
+            }
+        }
+
+        /// <summary>
+        /// Override to emit the INNER JOIN alias WITHOUT the AS keyword - Oracle does not accept
+        /// "AS" for table aliases in the FROM/JOIN clause (unlike column aliases) and rejects it
+        /// with ORA-02000 "missing ON or USING keyword". The alias is uppercased to match the
+        /// uppercase alias emitted by <see cref="Build(Column)"/> (Oracle is case-sensitive for
+        /// quoted identifiers).
+        /// </summary>
+        protected override string Build(SqlJoinStructure join)
+        {
+            if (join is null)
+            {
+                throw new ArgumentNullException(nameof(join));
+            }
+
+            return $" INNER JOIN {QuoteRelation(join.DbObject.SchemaName, join.DbObject.Name)} " +
+                   $"{QuoteTableAlias(join.TableAlias)} " +
+                   $"ON {Build(join.Predicates)}";
+        }
+
+        /// <summary>
+        /// Builds an aggregation column (e.g. MAX("TABLE0"."ID")) for the SELECT list and
+        /// HAVING clauses. Reuses <see cref="Build(Column)"/> so alias and column casing stay
+        /// consistent. Aggregation functions (COUNT/SUM/AVG/MIN/MAX) are case-insensitive.
+        /// </summary>
+        protected override string Build(AggregationColumn column, bool useAlias = false)
+        {
+            string columnName = Build(column as Column);
+            columnName = column.IsDistinct ? $"DISTINCT ({columnName})" : columnName;
+            string appendAlias = useAlias ? $" AS {QuoteIdentifier(column.OperationAlias)}" : string.Empty;
+            return $"{column.Type.ToString().ToUpperInvariant()}({columnName}) {appendAlias}";
+        }
+
+        /// <summary>
+        /// Builds a comma-separated, individually-quoted column list for INSERT column lists.
+        /// Column names carry the exact physical casing preserved from Oracle metadata (uppercase
+        /// for unquoted identifiers, exact case for quoted ones), so they are emitted verbatim.
+        /// </summary>
+        private string BuildColumnList(IEnumerable<string> columnNames)
+        {
+            return string.Join(", ", columnNames.Select(c => QuoteIdentifier(c)));
+        }
+
+        /// <summary>
+        /// Collapses insert column/value pairs that share a physical name (ignore-case).
+        /// Later values replace earlier ones so an explicit FK is kept over a derived one.
+        /// </summary>
+        private static (List<string> Columns, List<string> Values) DedupeInsertColumns(
+            IReadOnlyList<string> columns,
+            IReadOnlyList<string> values)
+        {
+            Dictionary<string, (string Column, string Value)> unique = new(StringComparer.OrdinalIgnoreCase);
+            int count = Math.Min(columns.Count, values.Count);
+            for (int i = 0; i < count; i++)
+            {
+                unique[columns[i]] = (columns[i], values[i]);
+            }
+
+            return ([.. unique.Values.Select(pair => pair.Column)], [.. unique.Values.Select(pair => pair.Value)]);
+        }
+
+        /// <summary>
+        /// Looks into the upsert result returned by Oracle and returns
+        /// whether the upsert was executed as an insert.
+        /// This function also removes the metadata column that Oracle
+        /// returns to indicate how UPSERT is executed.
+        /// </summary>
+        public static bool IsInsert(IDictionary<string, object?> upsertResult)
+        {
+            if (!upsertResult.ContainsKey(UPSERT_IDENTIFIER_COLUMN_NAME))
+            {
+                throw new ArgumentException($"Upsert result must have a {UPSERT_IDENTIFIER_COLUMN_NAME} column.");
+            }
+
+            object? opType = upsertResult[UPSERT_IDENTIFIER_COLUMN_NAME];
+            upsertResult.Remove(UPSERT_IDENTIFIER_COLUMN_NAME);
+
+            if (opType != null && opType is string opTypeStr)
+            {
+                switch (opTypeStr)
+                {
+                    case INSERT_UPSERT:
+                        return true;
+                    case UPDATE_UPSERT:
+                        return false;
+                }
+            }
+
+            throw new ArgumentException($"Invalid {UPSERT_IDENTIFIER_COLUMN_NAME} column value.");
+        }
+
+        /// <summary>
+        /// Encode byte array columns to base64 strings instead of hex strings
+        /// when parsing the results into json
+        /// </summary>
+        private string MakeSelectColumns(SqlQueryStructure structure)
+        {
+            List<string> builtColumns = new();
+
+            // go through columns to find columns with type byte[]
+            foreach (LabelledColumn column in structure.Columns)
+            {
+                // columns which contain the json of a nested type are called SqlQueryStructure.DATA_IDENT
+                // and they are not actual columns of the underlying table so don't check for column type
+                // in that scenario
+                if (column.ColumnName != SqlQueryStructure.DATA_IDENT &&
+                    structure.GetColumnSystemType(column.ColumnName) == typeof(byte[]))
+                {
+                    // Oracle RAW/BLOB is not stored as base64 so a conversion is made before
+                    // producing the json result since HotChocolate handles ByteArray as base64.
+                    // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261 "bad argument", so NULL byte
+                    // columns must pass through unmodified (CASE WHEN ... IS NULL THEN NULL).
+                    string refColumn = Build(column as Column);
+                    builtColumns.Add(
+                        $"CASE WHEN {refColumn} IS NULL THEN NULL " +
+                        $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({refColumn})) END " +
+                        $"AS {QuoteIdentifier(column.Label)}");
+                }
+                else
+                {
+                    builtColumns.Add(Build(column as LabelledColumn));
+                }
+            }
+
+            return string.Join(", ", builtColumns);
+        }
+
+        /// <summary>
+        /// Builds the metadata query for a STANDALONE Oracle subprogram only.
+        /// Callers must bind <c>@param0</c> (schema) and <c>@param1</c> (subprogram name); the
+        /// values are compared case-insensitively in the query.
+        /// </summary>
+        /// <inheritdoc/>
+        public string BuildStoredProcedureResultDetailsQuery(string databaseObjectName)
+        {
+            // Oracle 19c implementation for retrieving stored procedure result set metadata.
+            // Oracle doesn't have a direct equivalent to SQL Server's
+            // dm_exec_describe_first_result_set_for_object. Instead we query ALL_ARGUMENTS to get
+            // OUT / IN OUT arguments that represent the result.
+            // databaseObjectName is unused: names are bound as @param0/@param1 (never interpolated)
+            // so a hostile object name cannot alter the query. The signature is fixed by IQueryBuilder.
+            string query =
+                $"SELECT " +
+                $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
+                $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
+                $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
+                $"FROM ALL_ARGUMENTS " +
+                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
+                $"AND UPPER(OBJECT_NAME) = UPPER(@param1) " +
+                $"AND OVERLOAD IS NULL " +
+                $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
+                $"AND ARGUMENT_NAME IS NOT NULL " +
+                $"ORDER BY POSITION";
+
+            return query;
+        }
+
+        /// <summary>
+        /// Builds an Oracle query that retrieves result set metadata for a subprogram that lives
+        /// inside a package. Unlike standalone subprograms (whose arguments appear in ALL_ARGUMENTS
+        /// with an empty PACKAGE_NAME column), packaged subprogram arguments are keyed by the
+        /// PACKAGE_NAME column and the bare subprogram name in OBJECT_NAME.
+        /// Callers must bind <c>@param0</c> (schema), <c>@param1</c> (package, unused when the
+        /// package is null/empty) and <c>@param2</c> (subprogram name).
+        /// </summary>
+        /// <param name="schemaName">Owning schema, e.g. "SYSTEM".</param>
+        /// <param name="packageName">Package name, e.g. "PKG_TEST".</param>
+        /// <param name="subprogramName">Bare subprogram name within the package, e.g. "GET_BOOKS".</param>
+        /// <param name="isFunction">True when the subprogram is a function. A function's result set
+        /// is its RETURN value, which appears in ALL_ARGUMENTS as an OUT argument at POSITION 0 with
+        /// a NULL ARGUMENT_NAME.</param>
+        public string BuildStoredProcedureResultDetailsQuery(
+            string schemaName,
+            string? packageName,
+            string subprogramName,
+            bool isFunction,
+            string? overload = null)
+        {
+            // ALL_ARGUMENTS keys a standalone subprogram by PACKAGE_NAME IS NULL and a packaged one
+            // by PACKAGE_NAME = <package>. (In Oracle an empty string IS NULL, so a plain equality
+            // against an empty package name would match nothing.)
+            // Names are bound (never interpolated) so a hostile object name cannot alter the query.
+            string packageClause = string.IsNullOrEmpty(packageName)
+                ? "PACKAGE_NAME IS NULL"
+                : "UPPER(PACKAGE_NAME) = UPPER(@param1)";
+            // A null overload means the subprogram is not overloaded. Filtering to one OVERLOAD
+            // value keeps packaged overloads from mixing their parameters into one positional list.
+            string overloadClause = string.IsNullOrEmpty(overload)
+                ? "AND OVERLOAD IS NULL "
+                : "AND OVERLOAD = @param3 ";
+
+            string query =
+                $"SELECT " +
+                $"ARGUMENT_NAME AS {QuoteIdentifier(STOREDPROC_COLUMN_NAME)}, " +
+                $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
+                $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
+                $"FROM ALL_ARGUMENTS " +
+                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
+                $"AND {packageClause} " +
+                $"AND UPPER(OBJECT_NAME) = UPPER(@param2) " +
+                overloadClause +
+                (isFunction
+                    // A function's result set is its RETURN value (POSITION 0, ARGUMENT_NAME null).
+                    ? $"AND POSITION = 0 "
+                    // A procedure's result set is its cursor OUT parameter(s).
+                    : $"AND IN_OUT IN ('OUT', 'IN/OUT') AND ARGUMENT_NAME IS NOT NULL ") +
+                $"ORDER BY POSITION";
+
+            return query;
+        }
+
+        /// <inheritdoc/>
+        public override string BuildForeignKeyInfoQuery(int numberOfParameters)
+        {
+            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
+            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
+
+            // Oracle uses :param syntax instead of @param
+            string tableSchemaParamsForInClause = string.Join(", :", schemaNameParams);
+            string tableNameParamsForInClause = string.Join(", :", tableNameParams);
+
+            // Oracle uses its data dictionary views instead of INFORMATION_SCHEMA
+            // ALL_CONSTRAINTS contains constraint information (CONSTRAINT_TYPE = 'R' for foreign keys)
+            // ALL_CONS_COLUMNS contains column mappings for constraints
+            // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
+            string foreignKeyQuery = $@"
+                SELECT
+                    RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
+                    RefCons.OWNER {QuoteIdentifier($"Referencing{nameof(DatabaseObject.SchemaName)}")},
+                    RefCons.TABLE_NAME {QuoteIdentifier($"Referencing{nameof(SourceDefinition)}")},
+                    RefConsCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencingColumns))},
+                    RefConsPk.OWNER {QuoteIdentifier($"Referenced{nameof(DatabaseObject.SchemaName)}")},
+                    RefConsPk.TABLE_NAME {QuoteIdentifier($"Referenced{nameof(SourceDefinition)}")},
+                    RefConsPkCol.COLUMN_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition.ReferencedColumns))}
+                FROM
+                    ALL_CONSTRAINTS RefCons
+                    INNER JOIN
+                    ALL_CONS_COLUMNS RefConsCol
+                        ON RefCons.OWNER = RefConsCol.OWNER
+                        AND RefCons.CONSTRAINT_NAME = RefConsCol.CONSTRAINT_NAME
+                    INNER JOIN
+                    ALL_CONSTRAINTS RefConsPk
+                        ON RefCons.R_OWNER = RefConsPk.OWNER
+                        AND RefCons.R_CONSTRAINT_NAME = RefConsPk.CONSTRAINT_NAME
+                    INNER JOIN
+                    ALL_CONS_COLUMNS RefConsPkCol
+                        ON RefConsPk.OWNER = RefConsPkCol.OWNER
+                        AND RefConsPk.CONSTRAINT_NAME = RefConsPkCol.CONSTRAINT_NAME
+                        AND RefConsCol.POSITION = RefConsPkCol.POSITION
+                WHERE
+                    RefCons.CONSTRAINT_TYPE = 'R'
+                    AND UPPER(RefCons.OWNER) IN (:{tableSchemaParamsForInClause})
+                    AND UPPER(RefCons.TABLE_NAME) IN (:{tableNameParamsForInClause})";
+
+            return foreignKeyQuery;
+        }
+
+        /// <inheritdoc/>
+        public string BuildQueryToGetReadOnlyColumns(string schemaParamName, string tableParamName)
+        {
+            // Oracle uses :param instead of @param for bind parameters
+            string query = $"SELECT COLUMN_NAME FROM ALL_TAB_COLS " +
+                $"WHERE OWNER = :{schemaParamName.TrimStart('@')} AND TABLE_NAME = :{tableParamName.TrimStart('@')} AND VIRTUAL_COLUMN = 'YES'";
+            return query;
+        }
+
+        /// <summary>
+        /// Builds an Oracle query that discovers autoentity tables: user-accessible tables that
+        /// have a primary key, filtered by the include/exclude patterns and named per the name
+        /// pattern (both using {schema}/{object} placeholders). Include/exclude patterns are comma-
+        /// separated SQL LIKE patterns (with ESCAPE '\') matched against "schema.object".
+        /// Oracle-maintained system schemas (SYS dictionary base tables and friends) are excluded
+        /// so a privileged connection does not materialize hundreds of system entities, mirroring
+        /// the system-object filtering the MSSQL builder performs.
+        /// Entity names are lowercased so generated REST paths and GraphQL type names stay
+        /// stable regardless of catalog folding. Column exposed names are a separate layer
+        /// (catalog spelling unless mapped). The returned "schema"/"object" values keep
+        /// physical casing for source resolution.
+        /// Returns rows aliased as "schema", "object", and "entity_name" (the JSON property names
+        /// the metadata provider reads when materializing generated entities).
+        /// </summary>
+        public string BuildGetAutoentitiesQuery()
+        {
+            return @"
+WITH exclude_patterns AS (
+    SELECT TRIM(REGEXP_SUBSTR(:exclude_pattern, '[^,]+', 1, LEVEL)) AS pattern
+    FROM dual
+    CONNECT BY LEVEL <= REGEXP_COUNT(:exclude_pattern, ',') + 1
+        AND TRIM(REGEXP_SUBSTR(:exclude_pattern, '[^,]+', 1, LEVEL)) IS NOT NULL
+),
+include_patterns AS (
+    SELECT TRIM(REGEXP_SUBSTR(:include_pattern, '[^,]+', 1, LEVEL)) AS pattern
+    FROM dual
+    CONNECT BY LEVEL <= REGEXP_COUNT(:include_pattern, ',') + 1
+        AND TRIM(REGEXP_SUBSTR(:include_pattern, '[^,]+', 1, LEVEL)) IS NOT NULL
+),
+candidate_tables AS (
+    SELECT
+        t.owner AS schema_name,
+        t.table_name AS object_name,
+        t.owner || '.' || t.table_name AS full_name
+    FROM all_tables t
+    WHERE t.owner NOT IN (
+              'SYS', 'XDB', 'ORDSYS', 'ORDDATA', 'MDSYS', 'OLAPSYS', 'LBACSYS',
+              'DVSYS', 'AUDSYS', 'OJVMSYS', 'CTXSYS', 'WMSYS', 'EXFSYS', 'OUTLN',
+              'GSMADMIN_INTERNAL', 'DBSNMP', 'APPQOSSYS', 'FLOWS_FILES')
+      AND NOT REGEXP_LIKE(t.owner, '^APEX_[0-9]+')
+      AND EXISTS (
+        SELECT 1
+        FROM all_constraints c
+        WHERE c.owner = t.owner
+          AND c.table_name = t.table_name
+          AND c.constraint_type = 'P'
+    )
+)
+SELECT
+    a.schema_name AS ""schema"",
+    a.object_name AS ""object"",
+    CASE
+        WHEN NVL(LENGTH(TRIM(:name_pattern)), 0) = 0 THEN LOWER(a.object_name)
+        ELSE REPLACE(REPLACE(:name_pattern, '{schema}', LOWER(a.schema_name)), '{object}', LOWER(a.object_name))
+    END AS ""entity_name""
+FROM candidate_tables a
+WHERE
+    (NOT EXISTS (SELECT 1 FROM exclude_patterns)
+     OR NOT EXISTS (SELECT 1 FROM exclude_patterns WHERE UPPER(a.full_name) LIKE UPPER(exclude_patterns.pattern) ESCAPE '\'))
+    AND
+    (NOT EXISTS (SELECT 1 FROM include_patterns)
+     OR EXISTS (SELECT 1 FROM include_patterns WHERE UPPER(a.full_name) LIKE UPPER(include_patterns.pattern) ESCAPE '\'))
+ORDER BY a.schema_name, a.object_name";
+        }
+
+        public string QuoteTableNameAsDBConnectionParam(string param)
+        {
+            // This value is bound as a DbConnectionParam (e.g. against ALL_TAB_COLS.TABLE_NAME),
+            // NOT embedded directly in SQL text. Oracle stores unquoted identifiers in uppercase
+            // and ALL_TAB_COLS.TABLE_NAME stores the bare (unquoted, uppercased) name, so the
+            // bind value must be bare and uppercased - quoting it here would never match.
+            return param.ToUpperInvariant();
+        }
+    }
+}
