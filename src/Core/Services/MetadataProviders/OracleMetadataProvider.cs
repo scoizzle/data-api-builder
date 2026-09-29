@@ -499,6 +499,17 @@ namespace Azure.DataApiBuilder.Core.Services
                         columnDefinition.IsClob = true;
                     }
 
+                    // Bounded string columns expose their maximum length so the query builder can
+                    // choose between VARCHAR2 and CLOB for generated JSON output. CLOB/NCLOB (and
+                    // LONG) are unbounded and stay on the LOB path.
+                    if (columnDefinition.SystemType == typeof(string)
+                        && !columnDefinition.IsClob
+                        && physicalType is not null
+                        && !physicalType.Equals("LONG", StringComparison.OrdinalIgnoreCase))
+                    {
+                        columnDefinition.Length = TryReadOracleColumnLength(columnInfo, allColumnsInTable);
+                    }
+
                     columnDefinition.DbType = TypeHelper.GetDbTypeFromSystemType(columnDefinition.SystemType);
                 }
             }
