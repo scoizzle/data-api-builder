@@ -115,6 +115,16 @@ Oracle specifics:
 - **Invalid policy fields** (a field the entity does not expose) are rejected while processing the policy with a clear authorization error, rather than producing a malformed predicate.
 - **Multiple-create** applies the read policy of each created/related entity, combined with the OR'd primary-key predicate, in the same way as MSSQL.
 
+## Nested reads: keyed CTE aggregation
+
+Nested GraphQL relationship selections are generated as **keyed aggregate CTEs** by `OracleQueryBuilder` instead of correlated `LEFT OUTER JOIN LATERAL` subqueries:
+
+- Each relationship whose correlation predicates are plain column equalities becomes one `WITH "<alias>_cte" AS (…)` block. Inside it, child rows are ranked with `ROW_NUMBER() OVER (PARTITION BY <foreign keys> ORDER BY <child order>)`, the per-parent top-N is kept (`N` is the child's limit, including the extra row used for pagination), and the JSON fragment is aggregated once per parent key (`JSON_ARRAYAGG` for lists, the single `JSON_OBJECT` for to-one).
+- The parent joins the CTE on the foreign keys (`LEFT OUTER JOIN "<alias>_cte" ON …`). CTEs are emitted leaf-first, so a nested CTE can reference the CTEs of its own relationships. List fragments are wrapped in `COALESCE(…, TO_CLOB(JSON_ARRAY()))` so a parent with no children still deserializes as `[]`.
+- Relationships that cannot be de-correlated (non-equality correlation predicates, nested `groupBy`) fall back to the previous correlated LATERAL form, so the JSON contract is unchanged.
+
+Motivation: Oracle's transformation of the LATERAL form can pick a per-parent plan (`INDEX FULL SCAN` + `WINDOW … PUSHED RANK` that only stops after accumulating `N` matches per parent), which rescans the child table once per parent. On a synthetic skewed shape (2,000 parents, 1M children, 5 parents with 50k children) the generated CTE form measured ~0.4 s / ~6.6k buffer gets versus ~9.6 s / ~1.3M buffer gets for the LATERAL form, with byte-identical JSON (`JSON_EQUAL`). The child aggregates currently cover every parent key rather than just the request page; seeding the page into the CTEs is a possible follow-up optimization.
+
 ## Cursor usage and ODP.NET statement caching
 
 DAB disposes every `DbDataReader`/`DbCommand` after a result is read, including the REF CURSOR output parameters used by the PL/SQL DML blocks, so it does not leak cursors. However, ODP.NET's client-side statement cache retains one open cursor per **distinct** SQL statement on a connection (measured: the cursor count grows by one per distinct statement and stays flat for repeated statements). On a long-lived pooled session that executes many distinct statements this consumes the account's per-session `open_cursors` limit (Oracle default `300`), surfacing at request time as:

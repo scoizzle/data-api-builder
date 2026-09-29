@@ -3,6 +3,7 @@
 
 using System.Data;
 using System.Data.Common;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
@@ -132,11 +133,28 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
+            OracleBuildContext context = new();
+            string query = BuildStructureWithJson(structure, context);
+            return context.Ctes.Count == 0
+                ? query
+                : $"WITH {string.Join(", ", context.Ctes)} {query}";
+        }
+
+        /// <summary>
+        /// Builds a SqlQueryStructure into its single JSON document (list or object) and, when a
+        /// <paramref name="context"/> is supplied, renders nested relationships as keyed CTE
+        /// aggregates joined on the relationship foreign keys instead of correlated LATERALs.
+        /// Null context means "legacy/correlated" mode: nested relationships are rendered as
+        /// <c>LEFT OUTER JOIN LATERAL</c>. That mode is used only where the keyed CTE form cannot
+        /// be proven equivalent (e.g. a relationship whose correlation predicate is not a plain
+        /// column equality), so semantics are preserved while the common shapes get the
+        /// de-correlated plan.
+        /// </summary>
+        private string BuildStructureWithJson(SqlQueryStructure structure, OracleBuildContext? context)
+        {
             // Schema/table and DAB aliases go through QuoteRelation / QuoteTableAlias (uppercase,
             // quoted). Column names are physical backing names and are emitted verbatim.
-            string fromSql = $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
-                             $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
-            fromSql += string.Join("", structure.JoinQueries.Select(x => $" LEFT OUTER JOIN LATERAL ({Build(x.Value)}) {QuoteTableAlias(x.Key)} ON (1=1)"));
+            string fromSql = BuildFromSql(structure, context);
 
             string predicates;
             if (structure.IsMultipleCreateOperation)
@@ -162,7 +180,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             string aggregations = BuildAggregationColumns(structure);
 
-            string query = $"SELECT {MakeSelectColumns(structure)}{aggregations}"
+            string query = $"SELECT {MakeSelectColumns(structure, context)}{aggregations}"
                 + $" FROM {fromSql}"
                 + $" WHERE {predicates}"
                 + BuildGroupBy(structure)
@@ -198,6 +216,227 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             return result.ToString();
+        }
+
+        /// <summary>
+        /// Per-query state for the keyed-CTE strategy. Every nested relationship that can be
+        /// de-correlated becomes one CTE aggregating its JSON fragment once per parent key; the
+        /// parent joins it on the relationship columns. CTEs are appended leaf-first, so a CTE can
+        /// reference the CTEs registered for its own nested relationships before itself.
+        /// </summary>
+        private sealed class OracleBuildContext
+        {
+            public List<string> Ctes { get; } = new();
+
+            /// <summary>JoinQueries alias (e.g. "table1_subq") to the CTE carrying its JSON.</summary>
+            public Dictionary<string, string> CteNameByJoinAlias { get; } = new(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// Builds the FROM clause of a structure, rendering each nested relationship as either a
+        /// keyed CTE join (correlation is a set of plain column equalities) or the legacy
+        /// correlated LATERAL when the CTE form cannot be proven equivalent.
+        /// </summary>
+        private string BuildFromSql(SqlQueryStructure structure, OracleBuildContext? context)
+        {
+            string fromSql = $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
+                             $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
+
+            foreach (KeyValuePair<string, SqlQueryStructure> joinQuery in structure.JoinQueries)
+            {
+                if (context is not null
+                    && TryBuildChildCte(joinQuery.Key, joinQuery.Value, structure.SourceAlias, context,
+                        out string cteName, out List<(string KeyAlias, string ParentExpression)> joinKeys))
+                {
+                    string onClause = string.Join(" AND ", joinKeys.Select(
+                        joinKey => $"{QuoteIdentifier(cteName)}.{QuoteIdentifier(joinKey.KeyAlias)} = {joinKey.ParentExpression}"));
+                    fromSql += $" LEFT OUTER JOIN {QuoteIdentifier(cteName)} ON {onClause}";
+                }
+                else
+                {
+                    fromSql += $" LEFT OUTER JOIN LATERAL ({BuildStructureWithJson(joinQuery.Value, null)}) {QuoteTableAlias(joinQuery.Key)} ON (1=1)";
+                }
+            }
+
+            return fromSql;
+        }
+
+        /// <summary>
+        /// Attempts to register a keyed aggregate CTE for one nested relationship. Returns false
+        /// (leaving the caller to emit the correlated LATERAL) when the relationship is not a
+        /// plain equality correlation, when the child uses nested groupBy, or when it has no
+        /// deterministic order for the per-parent ranking.
+        /// </summary>
+        private bool TryBuildChildCte(
+            string joinAlias,
+            SqlQueryStructure child,
+            string parentAlias,
+            OracleBuildContext context,
+            out string cteName,
+            out List<(string KeyAlias, string ParentExpression)> joinKeys)
+        {
+            cteName = string.Empty;
+            joinKeys = new();
+
+            if (child.GroupByMetadata.Fields.Count > 0 || child.OrderByColumns.Count == 0)
+            {
+                return false;
+            }
+
+            List<(Column Parent, Column Child)> correlationKeys = new();
+            HashSet<Predicate> correlationPredicates = new();
+            foreach (Predicate predicate in child.Predicates)
+            {
+                Column? left = predicate.Left?.AsColumn();
+                Column? right = predicate.Right?.AsColumn();
+                bool leftIsParent = left is not null && string.Equals(left.TableAlias, parentAlias, StringComparison.Ordinal);
+                bool rightIsParent = right is not null && string.Equals(right.TableAlias, parentAlias, StringComparison.Ordinal);
+                if (!leftIsParent && !rightIsParent)
+                {
+                    continue;
+                }
+
+                // Any non-equality reference to the parent means the child cannot be aggregated
+                // independently of the parent row.
+                if (predicate.Op != PredicateOperation.Equal
+                    || left is null || right is null
+                    || leftIsParent == rightIsParent)
+                {
+                    return false;
+                }
+
+                correlationPredicates.Add(predicate);
+                correlationKeys.Add(leftIsParent ? (left, right) : (right, left));
+            }
+
+            if (correlationKeys.Count == 0)
+            {
+                return false;
+            }
+
+            cteName = $"{joinAlias}_cte";
+            List<string> keyAliases = new();
+            List<string> keyExpressions = new();
+            for (int i = 0; i < correlationKeys.Count; i++)
+            {
+                string keyAlias = $"k{i}";
+                keyAliases.Add(keyAlias);
+                keyExpressions.Add(Build(correlationKeys[i].Child));
+                joinKeys.Add((keyAlias, Build(correlationKeys[i].Parent)));
+            }
+
+            // BuildFromSql inside BuildChildCteSql registers this child's own nested CTEs first,
+            // which keeps the WITH clause leaf-first (a CTE may only reference earlier CTEs).
+            string cteSql = BuildChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context);
+            context.Ctes.Add($"{QuoteIdentifier(cteName)} AS ( {cteSql} )");
+            context.CteNameByJoinAlias[joinAlias] = cteName;
+            return true;
+        }
+
+        /// <summary>
+        /// Builds one relationship aggregate CTE: rank the child rows per parent key, keep the
+        /// per-parent top-N (N is the child's limit, which includes the extra row used for
+        /// pagination), then aggregate the JSON fragment once per parent key.
+        /// </summary>
+        private string BuildChildCteSql(
+            SqlQueryStructure child,
+            HashSet<Predicate> correlationPredicates,
+            List<string> keyAliases,
+            List<string> keyExpressions,
+            OracleBuildContext context)
+        {
+            string fromSql = BuildFromSql(child, context);
+
+            string predicates = JoinPredicateStrings(
+                child.GetDbPolicyForOperation(EntityActionOperation.Read),
+                child.FilterPredicates,
+                Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
+                Build(child.PaginationMetadata.PaginationPredicate));
+            predicates = AddEscapeToLikeClauses(predicates);
+
+            string partitionBy = string.Join(", ", keyExpressions);
+            string orderBy = string.Join(", ", child.OrderByColumns.Select(orderColumn => Build(orderColumn)));
+            string keyList = string.Join(", ", keyAliases.Select(QuoteIdentifier));
+            string keySelect = string.Join(", ", keyExpressions.Zip(
+                keyAliases, (expression, alias) => $"{expression} AS {QuoteIdentifier(alias)}"));
+            string jsonObject = BuildJsonObjectExpression(child, context);
+            string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
+
+            string ranked = $"SELECT {jsonObject} AS \"json_doc\", " +
+                            $"ROW_NUMBER() OVER (PARTITION BY {partitionBy} ORDER BY {orderBy}) AS \"rn\", " +
+                            $"{keySelect} FROM {fromSql} WHERE {predicates}";
+
+            if (child.IsListQuery)
+            {
+                return $"SELECT {keyList}, " +
+                       $"COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
+                       $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
+                       $"FROM ( SELECT \"json_doc\", \"rn\", {keyList} FROM ( {ranked} ) ) " +
+                       $"WHERE \"rn\" <= {rowLimit} GROUP BY {keyList}";
+            }
+
+            return $"SELECT {keyList}, \"json_doc\" AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
+                   $"FROM ( {ranked} ) WHERE \"rn\" <= {rowLimit}";
+        }
+
+        /// <summary>
+        /// Builds the explicit JSON object for a row source. Unlike JSON_OBJECT(*), the key/value
+        /// list lets the keyed CTE strategy exclude ranking/key columns from the document.
+        /// NULL ON NULL matches the correlated shape's JSON_OBJECT(*) behavior for null columns.
+        /// </summary>
+        private string BuildJsonObjectExpression(SqlQueryStructure structure, OracleBuildContext context)
+        {
+            List<string> fields = new();
+            foreach (LabelledColumn column in structure.Columns)
+            {
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {BuildColumnValue(structure, column, context)}");
+            }
+
+            return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL RETURNING CLOB)";
+        }
+
+        private static string QuoteJsonKey(string label)
+        {
+            return $"'{label.Replace("'", "''")}'";
+        }
+
+        /// <summary>
+        /// Builds the value expression for one projected column: nested JSON fragments come from
+        /// the child CTE (or the lateral alias), byte[] columns are base64-encoded, and everything
+        /// else is a plain column reference.
+        /// </summary>
+        private string BuildColumnValue(SqlQueryStructure structure, LabelledColumn column, OracleBuildContext? context)
+        {
+            if (column.ColumnName == SqlQueryStructure.DATA_IDENT)
+            {
+                if (context is not null
+                    && column.TableAlias is not null
+                    && context.CteNameByJoinAlias.TryGetValue(column.TableAlias, out string? childCteName)
+                    && structure.JoinQueries.TryGetValue(column.TableAlias, out SqlQueryStructure? childStructure))
+                {
+                    string expression = $"{QuoteIdentifier(childCteName)}.{QuoteIdentifier(SqlQueryStructure.DATA_IDENT)}";
+                    // A keyed CTE has no row for a parent with zero children; list relationships
+                    // must still deserialize as an empty JSON array, matching the correlated shape.
+                    return childStructure.IsListQuery
+                        ? $"COALESCE({expression}, TO_CLOB(JSON_ARRAY()))"
+                        : expression;
+                }
+
+                return Build(column as Column);
+            }
+
+            if (structure.GetColumnSystemType(column.ColumnName) == typeof(byte[]))
+            {
+                // Oracle RAW/BLOB is not stored as base64 so a conversion is made before
+                // producing the json result since HotChocolate handles ByteArray as base64.
+                // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261 "bad argument", so NULL byte
+                // columns must pass through unmodified (CASE WHEN ... IS NULL THEN NULL).
+                string refColumn = Build(column as Column);
+                return $"CASE WHEN {refColumn} IS NULL THEN NULL " +
+                       $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({refColumn})) END";
+            }
+
+            return Build(column as Column);
         }
 
         /// <inheritdoc />
@@ -747,7 +986,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Encode byte array columns to base64 strings instead of hex strings
         /// when parsing the results into json
         /// </summary>
-        private string MakeSelectColumns(SqlQueryStructure structure)
+        private string MakeSelectColumns(SqlQueryStructure structure, OracleBuildContext? context)
         {
             List<string> builtColumns = new();
 
@@ -757,23 +996,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // columns which contain the json of a nested type are called SqlQueryStructure.DATA_IDENT
                 // and they are not actual columns of the underlying table so don't check for column type
                 // in that scenario
-                if (column.ColumnName != SqlQueryStructure.DATA_IDENT &&
-                    structure.GetColumnSystemType(column.ColumnName) == typeof(byte[]))
-                {
-                    // Oracle RAW/BLOB is not stored as base64 so a conversion is made before
-                    // producing the json result since HotChocolate handles ByteArray as base64.
-                    // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261 "bad argument", so NULL byte
-                    // columns must pass through unmodified (CASE WHEN ... IS NULL THEN NULL).
-                    string refColumn = Build(column as Column);
-                    builtColumns.Add(
-                        $"CASE WHEN {refColumn} IS NULL THEN NULL " +
-                        $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({refColumn})) END " +
-                        $"AS {QuoteIdentifier(column.Label)}");
-                }
-                else
-                {
-                    builtColumns.Add(Build(column as LabelledColumn));
-                }
+                builtColumns.Add(
+                    $"{BuildColumnValue(structure, column, context)} AS {QuoteIdentifier(column.Label)}");
             }
 
             return string.Join(", ", builtColumns);
