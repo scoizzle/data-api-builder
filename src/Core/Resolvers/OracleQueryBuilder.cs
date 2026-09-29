@@ -133,7 +133,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlQueryStructure structure)
         {
-            OracleBuildContext context = new();
+            OracleBuildContext context = new() { RootStructure = structure };
             string query = BuildStructureWithJson(structure, context);
             return context.Ctes.Count == 0
                 ? query
@@ -156,27 +156,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // quoted). Column names are physical backing names and are emitted verbatim.
             string fromSql = BuildFromSql(structure, context);
 
-            string predicates;
-            if (structure.IsMultipleCreateOperation)
-            {
-                predicates = JoinPredicateStrings(
-                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
-                                    structure.FilterPredicates,
-                                    Build(structure.Predicates, " OR ", isMultipleCreateOperation: true),
-                                    Build(structure.PaginationMetadata.PaginationPredicate));
-            }
-            else
-            {
-                predicates = JoinPredicateStrings(
-                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
-                                    structure.FilterPredicates,
-                                    Build(structure.Predicates),
-                                    Build(structure.PaginationMetadata.PaginationPredicate));
-            }
-
-            // Add ESCAPE clause to LIKE predicates so that % and _ wildcards in the
-            // search pattern are properly escaped when used as literal characters.
-            predicates = AddEscapeToLikeClauses(predicates);
+            string predicates = BuildStructurePredicates(structure);
 
             string aggregations = BuildAggregationColumns(structure);
 
@@ -226,10 +206,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         private sealed class OracleBuildContext
         {
+            public SqlQueryStructure? RootStructure { get; set; }
+
             public List<string> Ctes { get; } = new();
 
             /// <summary>JoinQueries alias (e.g. "table1_subq") to the CTE carrying its JSON.</summary>
             public Dictionary<string, string> CteNameByJoinAlias { get; } = new(StringComparer.Ordinal);
+
+            /// <summary>Name of the request-page CTE, when one was emitted.</summary>
+            public string? PageCteName { get; set; }
+
+            /// <summary>Parent correlation expression to the page CTE column holding its value.</summary>
+            public Dictionary<string, string> PageColumnAliasByExpression { get; } = new(StringComparer.Ordinal);
         }
 
         /// <summary>
@@ -242,49 +230,60 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string fromSql = $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
                              $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
 
+            bool isRoot = context is not null && ReferenceEquals(structure, context.RootStructure);
+            if (isRoot)
+            {
+                EnsurePageCte(structure, context!);
+            }
+
             foreach (KeyValuePair<string, SqlQueryStructure> joinQuery in structure.JoinQueries)
             {
                 if (context is not null
-                    && TryBuildChildCte(joinQuery.Key, joinQuery.Value, structure.SourceAlias, context,
-                        out string cteName, out List<(string KeyAlias, string ParentExpression)> joinKeys))
+                    && IsCteEligible(joinQuery.Value)
+                    && TryGetCorrelationKeys(joinQuery.Value, structure.SourceAlias,
+                        out List<(Column Parent, Column Child)> correlationKeys,
+                        out HashSet<Predicate> correlationPredicates))
                 {
-                    string onClause = string.Join(" AND ", joinKeys.Select(
-                        joinKey => $"{QuoteIdentifier(cteName)}.{QuoteIdentifier(joinKey.KeyAlias)} = {joinKey.ParentExpression}"));
-                    fromSql += $" LEFT OUTER JOIN {QuoteIdentifier(cteName)} ON {onClause}";
+                    string? pageRestriction = isRoot ? BuildPageRestriction(correlationKeys, context) : null;
+                    if (TryBuildChildCte(joinQuery.Key, joinQuery.Value, correlationKeys, correlationPredicates,
+                            context, pageRestriction, out string cteName,
+                            out List<(string KeyAlias, string ParentExpression)> joinKeys))
+                    {
+                        string onClause = string.Join(" AND ", joinKeys.Select(
+                            joinKey => $"{QuoteIdentifier(cteName)}.{QuoteIdentifier(joinKey.KeyAlias)} = {joinKey.ParentExpression}"));
+                        fromSql += $" LEFT OUTER JOIN {QuoteIdentifier(cteName)} ON {onClause}";
+                        continue;
+                    }
                 }
-                else
-                {
-                    fromSql += $" LEFT OUTER JOIN LATERAL ({BuildStructureWithJson(joinQuery.Value, null)}) {QuoteTableAlias(joinQuery.Key)} ON (1=1)";
-                }
+
+                fromSql += $" LEFT OUTER JOIN LATERAL ({BuildStructureWithJson(joinQuery.Value, null)}) {QuoteTableAlias(joinQuery.Key)} ON (1=1)";
             }
 
             return fromSql;
         }
 
         /// <summary>
-        /// Attempts to register a keyed aggregate CTE for one nested relationship. Returns false
-        /// (leaving the caller to emit the correlated LATERAL) when the relationship is not a
-        /// plain equality correlation, when the child uses nested groupBy, or when it has no
-        /// deterministic order for the per-parent ranking.
+        /// Whether a nested relationship can be rendered as a keyed aggregate CTE. Nested groupBy
+        /// has no keyed equivalent, and a deterministic order is required for the per-parent rank.
         /// </summary>
-        private bool TryBuildChildCte(
-            string joinAlias,
+        private static bool IsCteEligible(SqlQueryStructure child)
+        {
+            return child.GroupByMetadata.Fields.Count == 0 && child.OrderByColumns.Count > 0;
+        }
+
+        /// <summary>
+        /// Extracts the equality predicates that correlate a child to its parent. Returns false when
+        /// the child references the parent alias through anything other than a plain column
+        /// equality, because such a child cannot be pre-aggregated independently of the parent row.
+        /// </summary>
+        private static bool TryGetCorrelationKeys(
             SqlQueryStructure child,
             string parentAlias,
-            OracleBuildContext context,
-            out string cteName,
-            out List<(string KeyAlias, string ParentExpression)> joinKeys)
+            out List<(Column Parent, Column Child)> correlationKeys,
+            out HashSet<Predicate> correlationPredicates)
         {
-            cteName = string.Empty;
-            joinKeys = new();
-
-            if (child.GroupByMetadata.Fields.Count > 0 || child.OrderByColumns.Count == 0)
-            {
-                return false;
-            }
-
-            List<(Column Parent, Column Child)> correlationKeys = new();
-            HashSet<Predicate> correlationPredicates = new();
+            correlationKeys = new();
+            correlationPredicates = new();
             foreach (Predicate predicate in child.Predicates)
             {
                 Column? left = predicate.Left?.AsColumn();
@@ -296,8 +295,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     continue;
                 }
 
-                // Any non-equality reference to the parent means the child cannot be aggregated
-                // independently of the parent row.
                 if (predicate.Op != PredicateOperation.Equal
                     || left is null || right is null
                     || leftIsParent == rightIsParent)
@@ -309,12 +306,144 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 correlationKeys.Add(leftIsParent ? (left, right) : (right, left));
             }
 
-            if (correlationKeys.Count == 0)
+            return correlationKeys.Count > 0;
+        }
+
+        /// <summary>
+        /// Emits the request-page CTE when the root has at least one de-correlatable child: the
+        /// root's keys for the requested page (filters, policy, keyset predicate, ordering and
+        /// limit all applied). Child aggregates use it to restrict ranking/JSON to page-reachable
+        /// rows instead of every parent in the child table.
+        /// The root predicates therefore run once here and once in the final query; that duplicate
+        /// is the price of bounding every aggregate to the page.
+        /// </summary>
+        private void EnsurePageCte(SqlQueryStructure root, OracleBuildContext context)
+        {
+            if (context.PageCteName is not null
+                || root.GroupByMetadata.Fields.Count > 0
+                || root.OrderByColumns.Count == 0
+                || root.Limit() is null)
             {
-                return false;
+                return;
             }
 
+            List<string> parentExpressions = new();
+            foreach (SqlQueryStructure child in root.JoinQueries.Values)
+            {
+                if (!IsCteEligible(child)
+                    || !TryGetCorrelationKeys(child, root.SourceAlias,
+                        out List<(Column Parent, Column Child)> correlationKeys, out _))
+                {
+                    continue;
+                }
+
+                foreach ((Column parent, Column _) in correlationKeys)
+                {
+                    string parentExpression = Build(parent);
+                    if (!parentExpressions.Contains(parentExpression))
+                    {
+                        parentExpressions.Add(parentExpression);
+                    }
+                }
+            }
+
+            if (parentExpressions.Count == 0)
+            {
+                return;
+            }
+
+            string pageCteName = "dab_page_cte";
+            List<string> pageColumns = new();
+            for (int i = 0; i < parentExpressions.Count; i++)
+            {
+                string columnAlias = $"c{i}";
+                pageColumns.Add($"{parentExpressions[i]} AS {QuoteIdentifier(columnAlias)}");
+                context.PageColumnAliasByExpression[parentExpressions[i]] = columnAlias;
+            }
+
+            string baseFrom = $"{QuoteRelation(root.DatabaseObject.SchemaName, root.DatabaseObject.Name)} " +
+                              $"{QuoteTableAlias(root.SourceAlias)}{Build(root.Joins)}";
+            string pageSql = $"SELECT {string.Join(", ", pageColumns)} FROM {baseFrom} " +
+                             $"WHERE {BuildStructurePredicates(root)}{BuildOrderBy(root)} " +
+                             $"OFFSET 0 ROWS FETCH NEXT {(root.Limit() ?? 1).ToString(CultureInfo.InvariantCulture)} ROWS ONLY";
+
+            context.Ctes.Add($"{QuoteIdentifier(pageCteName)} AS ( {pageSql} )");
+            context.PageCteName = pageCteName;
+        }
+
+        /// <summary>
+        /// Builds the predicate that restricts a direct child of the root to keys present in the
+        /// page CTE. A semi-join is used (not an inner join) so a repeated page value cannot
+        /// duplicate child rows inside the aggregate.
+        /// </summary>
+        private string? BuildPageRestriction(
+            List<(Column Parent, Column Child)> correlationKeys,
+            OracleBuildContext context)
+        {
+            if (context.PageCteName is null)
+            {
+                return null;
+            }
+
+            List<string> conditions = new();
+            foreach ((Column parent, Column child) in correlationKeys)
+            {
+                if (!context.PageColumnAliasByExpression.TryGetValue(Build(parent), out string? pageColumnAlias))
+                {
+                    return null;
+                }
+
+                conditions.Add($"{QuoteIdentifier(context.PageCteName)}.{QuoteIdentifier(pageColumnAlias)} = {Build(child)}");
+            }
+
+            return $"EXISTS (SELECT 1 FROM {QuoteIdentifier(context.PageCteName)} WHERE {string.Join(" AND ", conditions)})";
+        }
+
+        /// <summary>
+        /// Builds the policy/filter/pagination predicate shared by the main query and the page CTE.
+        /// </summary>
+        private string BuildStructurePredicates(SqlQueryStructure structure)
+        {
+            string predicates;
+            if (structure.IsMultipleCreateOperation)
+            {
+                predicates = JoinPredicateStrings(
+                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                                    structure.FilterPredicates,
+                                    Build(structure.Predicates, " OR ", isMultipleCreateOperation: true),
+                                    Build(structure.PaginationMetadata.PaginationPredicate));
+            }
+            else
+            {
+                predicates = JoinPredicateStrings(
+                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                                    structure.FilterPredicates,
+                                    Build(structure.Predicates),
+                                    Build(structure.PaginationMetadata.PaginationPredicate));
+            }
+
+            // Add ESCAPE clause to LIKE predicates so that % and _ wildcards in the
+            // search pattern are properly escaped when used as literal characters.
+            return AddEscapeToLikeClauses(predicates);
+        }
+
+        /// <summary>
+        /// Registers a keyed aggregate CTE for one nested relationship. <see cref="BuildFromSql"/>
+        /// inside <see cref="BuildChildCteSql"/> registers this child's own nested CTEs first,
+        /// which keeps the WITH clause leaf-first (a CTE may only reference earlier CTEs).
+        /// </summary>
+        private bool TryBuildChildCte(
+            string joinAlias,
+            SqlQueryStructure child,
+            List<(Column Parent, Column Child)> correlationKeys,
+            HashSet<Predicate> correlationPredicates,
+            OracleBuildContext context,
+            string? pageRestriction,
+            out string cteName,
+            out List<(string KeyAlias, string ParentExpression)> joinKeys)
+        {
             cteName = $"{joinAlias}_cte";
+            joinKeys = new();
             List<string> keyAliases = new();
             List<string> keyExpressions = new();
             for (int i = 0; i < correlationKeys.Count; i++)
@@ -325,9 +454,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 joinKeys.Add((keyAlias, Build(correlationKeys[i].Parent)));
             }
 
-            // BuildFromSql inside BuildChildCteSql registers this child's own nested CTEs first,
-            // which keeps the WITH clause leaf-first (a CTE may only reference earlier CTEs).
-            string cteSql = BuildChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context);
+            string cteSql = BuildChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction);
             context.Ctes.Add($"{QuoteIdentifier(cteName)} AS ( {cteSql} )");
             context.CteNameByJoinAlias[joinAlias] = cteName;
             return true;
@@ -343,53 +470,58 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             HashSet<Predicate> correlationPredicates,
             List<string> keyAliases,
             List<string> keyExpressions,
-            OracleBuildContext context)
+            OracleBuildContext context,
+            string? pageRestriction)
         {
             string fromSql = BuildFromSql(child, context);
 
             string predicates = JoinPredicateStrings(
+                pageRestriction,
                 child.GetDbPolicyForOperation(EntityActionOperation.Read),
                 child.FilterPredicates,
                 Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
                 Build(child.PaginationMetadata.PaginationPredicate));
             predicates = AddEscapeToLikeClauses(predicates);
 
+            string visibleSelect = string.Join(", ", child.Columns.Select(
+                column => $"{BuildColumnValue(child, column, context)} AS {QuoteIdentifier(column.Label)}"));
             string partitionBy = string.Join(", ", keyExpressions);
             string orderBy = string.Join(", ", child.OrderByColumns.Select(orderColumn => Build(orderColumn)));
             string keyList = string.Join(", ", keyAliases.Select(QuoteIdentifier));
             string keySelect = string.Join(", ", keyExpressions.Zip(
                 keyAliases, (expression, alias) => $"{expression} AS {QuoteIdentifier(alias)}"));
-            string jsonObject = BuildJsonObjectExpression(child, context);
             string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
 
-            string ranked = $"SELECT {jsonObject} AS \"json_doc\", " +
-                            $"ROW_NUMBER() OVER (PARTITION BY {partitionBy} ORDER BY {orderBy}) AS \"rn\", " +
-                            $"{keySelect} FROM {fromSql} WHERE {predicates}";
+            // JSON is built in the outer block so it is evaluated only for the rows kept by the
+            // per-parent top-N filter, not for every child row that was ranked.
+            string ranked = $"SELECT {visibleSelect}, {keySelect}, " +
+                            $"ROW_NUMBER() OVER (PARTITION BY {partitionBy} ORDER BY {orderBy}) AS \"rn\" " +
+                            $"FROM {fromSql} WHERE {predicates}";
+            string jsonObject = BuildJsonObjectFromAliases(child);
 
             if (child.IsListQuery)
             {
                 return $"SELECT {keyList}, " +
-                       $"COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
+                       $"COALESCE(JSON_ARRAYAGG({jsonObject} ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
                        $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
-                       $"FROM ( SELECT \"json_doc\", \"rn\", {keyList} FROM ( {ranked} ) ) " +
-                       $"WHERE \"rn\" <= {rowLimit} GROUP BY {keyList}";
+                       $"FROM ( {ranked} ) WHERE \"rn\" <= {rowLimit} GROUP BY {keyList}";
             }
 
-            return $"SELECT {keyList}, \"json_doc\" AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
+            return $"SELECT {keyList}, {jsonObject} AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
                    $"FROM ( {ranked} ) WHERE \"rn\" <= {rowLimit}";
         }
 
         /// <summary>
-        /// Builds the explicit JSON object for a row source. Unlike JSON_OBJECT(*), the key/value
-        /// list lets the keyed CTE strategy exclude ranking/key columns from the document.
-        /// NULL ON NULL matches the correlated shape's JSON_OBJECT(*) behavior for null columns.
+        /// Builds the explicit JSON object over the ranked row source's column aliases. Unlike
+        /// JSON_OBJECT(*), the key/value list lets the keyed CTE strategy exclude ranking/key
+        /// columns from the document. NULL ON NULL matches JSON_OBJECT(*) behavior for nulls.
         /// </summary>
-        private string BuildJsonObjectExpression(SqlQueryStructure structure, OracleBuildContext context)
+        private string BuildJsonObjectFromAliases(SqlQueryStructure structure)
         {
             List<string> fields = new();
             foreach (LabelledColumn column in structure.Columns)
             {
-                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {BuildColumnValue(structure, column, context)}");
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {QuoteIdentifier(column.Label)}");
             }
 
             return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL RETURNING CLOB)";
