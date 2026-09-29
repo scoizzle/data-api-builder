@@ -190,9 +190,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     // Oracle bind names: strip the '@' DAB prefix and use ':' (i.e. the parameter
                     // collection name must match the ':name' referenced in the command text).
                     parameter.ParameterName = oracleName;
-                    parameter.Value = parameterEntry.Value.Value ?? DBNull.Value;
 
+                    // PopulateDbTypeForParameter also translates date/time values ODP.NET cannot
+                    // bind (e.g. Microsoft.OData.Edm.Date) and must therefore run before Value is
+                    // assigned - ODP.NET throws from the Value setter for those types.
                     PopulateDbTypeForParameter(parameterEntry, parameter);
+                    if (parameter.Value is null)
+                    {
+                        parameter.Value = parameterEntry.Value.Value ?? DBNull.Value;
+                    }
+
                     cmd.Parameters.Add(parameter);
                 }
             }
@@ -203,6 +210,100 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             OracleBindRegistrar.RegisterPlSqlOutputBinds(cmd, translatedSql);
 
             return cmd;
+        }
+
+        /// <summary>
+        /// Translates DAB's date/time parameter values into Oracle-bindable values and types.
+        /// ODP.NET infers the bind type from the CLR value alone, which is wrong for the shapes
+        /// DAB produces:
+        ///  - Microsoft.OData.Edm.Date (the value of an OData date literal) and DateOnly are not
+        ///    CLR types ODP.NET can bind, so a date filter would fail with an argument error.
+        ///  - A System.DateTimeOffset (ISO 8601 UTC filters such as "col ge 2025-01-01T00:00:00Z")
+        ///    would bind as TIMESTAMP WITH TIME ZONE. Comparing that bind against a plain
+        ///    DATE/TIMESTAMP column makes Oracle convert the column to an instant at the session
+        ///    time zone, so equality filters silently miss rows and range filters can raise
+        ///    ORA-01878 around DST transitions. Those values are bound as a plain TIMESTAMP using
+        ///    the UTC wall clock, matching DAB's contract that date/time values are UTC.
+        ///  - TIMESTAMP WITH TIME ZONE columns carry DbType.DateTimeOffset, so their parameters
+        ///    keep the offset (Oracle compares instants for those columns).
+        /// Parameters without a DbType hint (date literals the OData parser wrapped in a
+        /// ConvertNode do not inherit the column type) fall back to the plain TIMESTAMP form.
+        /// </summary>
+        /// <inheritdoc />
+        public override void PopulateDbTypeForParameter(
+            KeyValuePair<string, DbConnectionParam> parameterEntry,
+            DbParameter parameter)
+        {
+            if (parameter is not OracleParameter oracleParameter
+                || parameterEntry.Value is null
+                || parameterEntry.Value.Value is null)
+            {
+                return;
+            }
+
+            object value = parameterEntry.Value.Value;
+            switch (parameterEntry.Value.DbType)
+            {
+                case DbType.DateTimeOffset:
+                    oracleParameter.OracleDbType = OracleDbType.TimeStampTZ;
+                    oracleParameter.Value = ToDateTimeOffset(value);
+                    break;
+                case DbType.Date:
+                case DbType.DateTime:
+                case DbType.DateTime2:
+                    oracleParameter.OracleDbType = OracleDbType.TimeStamp;
+                    oracleParameter.Value = ToUtcWallClock(value);
+                    break;
+                default:
+                    // Oracle DATE/TIMESTAMP columns surface as System.DateTime, for which
+                    // TypeHelper has no DbType mapping, so most date filters have no hint.
+                    if (value is Microsoft.OData.Edm.Date
+                        or DateTimeOffset
+                        or DateOnly)
+                    {
+                        oracleParameter.OracleDbType = OracleDbType.TimeStamp;
+                        oracleParameter.Value = ToUtcWallClock(value);
+                    }
+
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Converts a date/time parameter value to the plain (offset-less) UTC DateTime that a
+        /// DATE/TIMESTAMP column comparison expects. DAB stores date/time values as UTC, so an
+        /// offset is discarded by shifting to UTC rather than dropping it.
+        /// </summary>
+        private static object ToUtcWallClock(object value)
+        {
+            return value switch
+            {
+                Microsoft.OData.Edm.Date date => new DateTime(date.Year, date.Month, date.Day),
+                DateTimeOffset dateTimeOffset => dateTimeOffset.UtcDateTime,
+                DateTime dateTime when dateTime.Kind == DateTimeKind.Local => dateTime.ToUniversalTime(),
+                DateOnly date => date.ToDateTime(TimeOnly.MinValue),
+                _ => value,
+            };
+        }
+
+        /// <summary>
+        /// Converts a date/time parameter value to a DateTimeOffset so it can be bound to a
+        /// TIMESTAMP WITH TIME ZONE column without losing the offset.
+        /// </summary>
+        private static object ToDateTimeOffset(object value)
+        {
+            return value switch
+            {
+                DateTimeOffset => value,
+                Microsoft.OData.Edm.Date date => new DateTimeOffset(
+                    new DateTime(date.Year, date.Month, date.Day),
+                    TimeSpan.Zero),
+                DateTime dateTime => new DateTimeOffset(
+                    dateTime.Kind == DateTimeKind.Local ? dateTime.ToUniversalTime() : dateTime,
+                    TimeSpan.Zero),
+                DateOnly date => new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero),
+                _ => value,
+            };
         }
 
         /// <summary>
