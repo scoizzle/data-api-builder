@@ -218,6 +218,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             /// <summary>Parent correlation expression to the page CTE column holding its value.</summary>
             public Dictionary<string, string> PageColumnAliasByExpression { get; } = new(StringComparer.Ordinal);
+
+            /// <summary>
+            /// JoinQueries alias of a flattened to-one relationship to its inline JSON object
+            /// expression (built from the flattened join's columns).
+            /// </summary>
+            public Dictionary<string, string> InlineJsonByJoinAlias { get; } = new(StringComparer.Ordinal);
         }
 
         /// <summary>
@@ -236,30 +242,147 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 EnsurePageCte(structure, context!);
             }
 
-            foreach (KeyValuePair<string, SqlQueryStructure> joinQuery in structure.JoinQueries)
+            // Policy/filter predicates are emitted as unqualified column strings. Flattening adds
+            // sibling tables to this row source, which would make those strings ambiguous, so
+            // flattening is disabled anywhere in the chain that carries such a predicate.
+            bool allowFlatten = context is not null && !HasUnqualifiedPredicates(structure);
+            AddRelationshipJoins(structure, context, applyPageRestriction: isRoot, allowFlatten, ref fromSql);
+            return fromSql;
+        }
+
+        /// <summary>
+        /// Whether the structure carries a raw policy or filter predicate string whose column
+        /// references are not table-qualified.
+        /// </summary>
+        private static bool HasUnqualifiedPredicates(SqlQueryStructure structure)
+        {
+            return !string.IsNullOrEmpty(structure.GetDbPolicyForOperation(EntityActionOperation.Read))
+                || !string.IsNullOrEmpty(structure.FilterPredicates);
+        }
+
+        /// <summary>
+        /// Appends a join for every nested relationship of <paramref name="parent"/>: to-one
+        /// relationships whose correlated columns are the child's primary key are flattened into
+        /// the parent row source (no CTE, no ranking, inline JSON); other relationships become
+        /// keyed aggregate CTEs; anything that cannot be de-correlated keeps the correlated
+        /// LATERAL fallback.
+        /// </summary>
+        private void AddRelationshipJoins(
+            SqlQueryStructure parent,
+            OracleBuildContext? context,
+            bool applyPageRestriction,
+            bool allowFlatten,
+            ref string fromSql)
+        {
+            foreach (KeyValuePair<string, SqlQueryStructure> joinQuery in parent.JoinQueries)
             {
+                SqlQueryStructure child = joinQuery.Value;
                 if (context is not null
-                    && IsCteEligible(joinQuery.Value)
-                    && TryGetCorrelationKeys(joinQuery.Value, structure.SourceAlias,
+                    && TryGetCorrelationKeys(child, parent.SourceAlias,
                         out List<(Column Parent, Column Child)> correlationKeys,
                         out HashSet<Predicate> correlationPredicates))
                 {
-                    string? pageRestriction = isRoot ? BuildPageRestriction(correlationKeys, context) : null;
-                    if (TryBuildChildCte(joinQuery.Key, joinQuery.Value, correlationKeys, correlationPredicates,
-                            context, pageRestriction, out string cteName,
-                            out List<(string KeyAlias, string ParentExpression)> joinKeys))
+                    bool flattenChild = allowFlatten && !HasUnqualifiedPredicates(child);
+                    if (flattenChild
+                        && TryFlattenToOneJoin(child, correlationKeys, context, flattenChild, ref fromSql, out string inlineJson))
                     {
-                        string onClause = string.Join(" AND ", joinKeys.Select(
-                            joinKey => $"{QuoteIdentifier(cteName)}.{QuoteIdentifier(joinKey.KeyAlias)} = {joinKey.ParentExpression}"));
-                        fromSql += $" LEFT OUTER JOIN {QuoteIdentifier(cteName)} ON {onClause}";
+                        context.InlineJsonByJoinAlias[joinQuery.Key] = inlineJson;
                         continue;
+                    }
+
+                    if (IsCteEligible(child))
+                    {
+                        string? pageRestriction = applyPageRestriction ? BuildPageRestriction(correlationKeys, context) : null;
+                        if (TryBuildChildCte(joinQuery.Key, child, correlationKeys, correlationPredicates,
+                                context, pageRestriction, out string cteName,
+                                out List<(string KeyAlias, string ParentExpression)> joinKeys))
+                        {
+                            string onClause = string.Join(" AND ", joinKeys.Select(
+                                joinKey => $"{QuoteIdentifier(cteName)}.{QuoteIdentifier(joinKey.KeyAlias)} = {joinKey.ParentExpression}"));
+                            fromSql += $" LEFT OUTER JOIN {QuoteIdentifier(cteName)} ON {onClause}";
+                            continue;
+                        }
                     }
                 }
 
                 fromSql += $" LEFT OUTER JOIN LATERAL ({BuildStructureWithJson(joinQuery.Value, null)}) {QuoteTableAlias(joinQuery.Key)} ON (1=1)";
             }
+        }
 
-            return fromSql;
+        /// <summary>
+        /// Flattens a to-one relationship into the parent row source when the correlated child
+        /// columns are the child's primary key and the child cannot fan out. Its columns become
+        /// plain join expressions and its JSON object is built inline, so the relationship needs
+        /// no CTE, no CLOB column, and no ROW_NUMBER. Returns false when the child must keep a
+        /// keyed aggregate (non-unique correlation, associative joins, or a list relationship).
+        /// </summary>
+        private bool TryFlattenToOneJoin(
+            SqlQueryStructure child,
+            List<(Column Parent, Column Child)> correlationKeys,
+            OracleBuildContext context,
+            bool allowFlatten,
+            ref string fromSql,
+            out string jsonExpression)
+        {
+            jsonExpression = string.Empty;
+            if (!CanFlattenToOne(child, correlationKeys))
+            {
+                return false;
+            }
+
+            // The child's policy/filter predicates (including the correlation equalities) become
+            // the outer join condition, so parents without a matching child keep their row.
+            string childFrom = $"{QuoteRelation(child.DatabaseObject.SchemaName, child.DatabaseObject.Name)} " +
+                               $"{QuoteTableAlias(child.SourceAlias)}{Build(child.Joins)}";
+            fromSql += $" LEFT OUTER JOIN {childFrom} ON ({BuildStructurePredicates(child)})";
+
+            // The child's own relationships must be joined before its JSON object is built.
+            AddRelationshipJoins(child, context, applyPageRestriction: false, allowFlatten, ref fromSql);
+
+            // An outer join with no matching child leaves every child column NULL, and building
+            // JSON_OBJECT unconditionally would emit an all-null object instead of JSON null.
+            // The correlated columns are the child's primary key (never NULL when a row exists),
+            // so they distinguish "no child" from "child with null fields".
+            string existenceCheck = string.Join(" AND ", correlationKeys.Select(
+                key => $"{Build(key.Child)} IS NOT NULL"));
+            jsonExpression = $"CASE WHEN {existenceCheck} THEN {BuildJsonObjectExpression(child, context)} ELSE NULL END";
+            return true;
+        }
+
+        /// <summary>
+        /// A to-one relationship can be flattened when the correlated child columns are exactly
+        /// the child's primary key (one row per parent value) and the child has no associative
+        /// joins: both conditions rule out row multiplication in the parent row source.
+        /// </summary>
+        private static bool CanFlattenToOne(
+            SqlQueryStructure child,
+            List<(Column Parent, Column Child)> correlationKeys)
+        {
+            if (child.IsListQuery || child.PaginationMetadata.IsPaginated || child.Joins.Count > 0)
+            {
+                return false;
+            }
+
+            return IsPrimaryKeyCorrelation(child, correlationKeys);
+        }
+
+        /// <summary>
+        /// Whether the child-side correlation columns form the child's primary key, which makes
+        /// the correlation unique and per-parent ranking unnecessary.
+        /// </summary>
+        private static bool IsPrimaryKeyCorrelation(
+            SqlQueryStructure child,
+            List<(Column Parent, Column Child)> correlationKeys)
+        {
+            List<string> primaryKey = child.PrimaryKey();
+            if (primaryKey.Count == 0 || primaryKey.Count != correlationKeys.Count)
+            {
+                return false;
+            }
+
+            HashSet<string> correlationColumns = new(
+                correlationKeys.Select(key => key.Child.ColumnName), StringComparer.Ordinal);
+            return correlationColumns.SetEquals(primaryKey);
         }
 
         /// <summary>
@@ -327,12 +450,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return;
             }
 
+            bool allowFlatten = !HasUnqualifiedPredicates(root);
             List<string> parentExpressions = new();
             foreach (SqlQueryStructure child in root.JoinQueries.Values)
             {
                 if (!IsCteEligible(child)
                     || !TryGetCorrelationKeys(child, root.SourceAlias,
-                        out List<(Column Parent, Column Child)> correlationKeys, out _))
+                        out List<(Column Parent, Column Child)> correlationKeys, out _)
+                    || (allowFlatten && !HasUnqualifiedPredicates(child) && CanFlattenToOne(child, correlationKeys)))
                 {
                     continue;
                 }
@@ -454,7 +579,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 joinKeys.Add((keyAlias, Build(correlationKeys[i].Parent)));
             }
 
-            string cteSql = BuildChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction);
+            // A to-one relationship correlated on the child's primary key has exactly one row per
+            // key, so the per-parent rank (and its sort) can be skipped entirely.
+            bool skipRanking = !child.IsListQuery
+                && child.Joins.Count == 0
+                && IsPrimaryKeyCorrelation(child, correlationKeys);
+
+            string cteSql = BuildChildCteSql(
+                child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction, skipRanking);
             context.Ctes.Add($"{QuoteIdentifier(cteName)} AS ( {cteSql} )");
             context.CteNameByJoinAlias[joinAlias] = cteName;
             return true;
@@ -463,7 +595,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Builds one relationship aggregate CTE: rank the child rows per parent key, keep the
         /// per-parent top-N (N is the child's limit, which includes the extra row used for
-        /// pagination), then aggregate the JSON fragment once per parent key.
+        /// pagination), then aggregate the JSON fragment once per parent key. For a to-one
+        /// relationship whose correlation is the child's primary key the rank and sort are
+        /// skipped because exactly one row exists per key.
         /// </summary>
         private string BuildChildCteSql(
             SqlQueryStructure child,
@@ -471,7 +605,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> keyAliases,
             List<string> keyExpressions,
             OracleBuildContext context,
-            string? pageRestriction)
+            string? pageRestriction,
+            bool skipRanking)
         {
             string fromSql = BuildFromSql(child, context);
 
@@ -491,13 +626,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string keySelect = string.Join(", ", keyExpressions.Zip(
                 keyAliases, (expression, alias) => $"{expression} AS {QuoteIdentifier(alias)}"));
             string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
+            string jsonObject = BuildJsonObjectFromAliases(child);
+            string source = $"SELECT {visibleSelect}, {keySelect} FROM {fromSql} WHERE {predicates}";
+
+            if (skipRanking)
+            {
+                return $"SELECT {keyList}, {jsonObject} AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
+                       $"FROM ( {source} )";
+            }
 
             // JSON is built in the outer block so it is evaluated only for the rows kept by the
             // per-parent top-N filter, not for every child row that was ranked.
             string ranked = $"SELECT {visibleSelect}, {keySelect}, " +
                             $"ROW_NUMBER() OVER (PARTITION BY {partitionBy} ORDER BY {orderBy}) AS \"rn\" " +
                             $"FROM {fromSql} WHERE {predicates}";
-            string jsonObject = BuildJsonObjectFromAliases(child);
 
             if (child.IsListQuery)
             {
@@ -524,6 +666,75 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 fields.Add($"{QuoteJsonKey(column.Label)} VALUE {QuoteIdentifier(column.Label)}");
             }
 
+            return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL{BuildJsonReturningClause(structure)})";
+        }
+
+        /// <summary>
+        /// Chooses the JSON object's return type: VARCHAR2 when a conservative upper bound on the
+        /// serialized object stays well below the 4000-byte limit (avoiding a LOB per row), and
+        /// CLOB otherwise. Nested relationship fragments are unbounded and keep CLOB.
+        /// </summary>
+        private static string BuildJsonReturningClause(SqlQueryStructure structure)
+        {
+            const int varcharBudget = 3000;
+            SourceDefinition sourceDefinition = structure.GetUnderlyingSourceDefinition();
+
+            int estimatedSize = 16;
+            foreach (LabelledColumn column in structure.Columns)
+            {
+                // Worst-case JSON escaping expands one character to six bytes.
+                estimatedSize += (QuoteJsonKey(column.Label).Length + 4) * 6;
+                if (estimatedSize > varcharBudget || column.ColumnName == SqlQueryStructure.DATA_IDENT)
+                {
+                    return " RETURNING CLOB";
+                }
+
+                if (!sourceDefinition.Columns.TryGetValue(column.ColumnName, out ColumnDefinition? definition))
+                {
+                    return " RETURNING CLOB";
+                }
+
+                Type systemType = definition.SystemType;
+                if (systemType == typeof(string))
+                {
+                    if (definition.Length is not int length || length <= 0)
+                    {
+                        return " RETURNING CLOB";
+                    }
+
+                    estimatedSize += length * 6;
+                }
+                else if (systemType == typeof(byte[]))
+                {
+                    if (definition.Length is not int byteLength || byteLength <= 0)
+                    {
+                        return " RETURNING CLOB";
+                    }
+
+                    estimatedSize += ((byteLength + 2) / 3) * 4;
+                }
+                else
+                {
+                    // Numbers/dates/guids/times have small fixed representations.
+                    estimatedSize += 64;
+                }
+            }
+
+            return estimatedSize <= varcharBudget ? " RETURNING VARCHAR2(4000)" : " RETURNING CLOB";
+        }
+
+        /// <summary>
+        /// Builds the JSON object for a flattened to-one row source directly from its column
+        /// value expressions, so no intermediate CTE/CLOB column is needed for the relationship.
+        /// </summary>
+        private string BuildJsonObjectExpression(SqlQueryStructure structure, OracleBuildContext context)
+        {
+            List<string> fields = new();
+            foreach (LabelledColumn column in structure.Columns)
+            {
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {BuildColumnValue(structure, column, context)}");
+            }
+
             return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL RETURNING CLOB)";
         }
 
@@ -541,17 +752,25 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             if (column.ColumnName == SqlQueryStructure.DATA_IDENT)
             {
-                if (context is not null
-                    && column.TableAlias is not null
-                    && context.CteNameByJoinAlias.TryGetValue(column.TableAlias, out string? childCteName)
-                    && structure.JoinQueries.TryGetValue(column.TableAlias, out SqlQueryStructure? childStructure))
+                if (context is not null && column.TableAlias is not null)
                 {
-                    string expression = $"{QuoteIdentifier(childCteName)}.{QuoteIdentifier(SqlQueryStructure.DATA_IDENT)}";
-                    // A keyed CTE has no row for a parent with zero children; list relationships
-                    // must still deserialize as an empty JSON array, matching the correlated shape.
-                    return childStructure.IsListQuery
-                        ? $"COALESCE({expression}, TO_CLOB(JSON_ARRAY()))"
-                        : expression;
+                    // Flattened to-one relationship: its JSON object is built inline over the
+                    // flattened join's columns.
+                    if (context.InlineJsonByJoinAlias.TryGetValue(column.TableAlias, out string? inlineJson))
+                    {
+                        return inlineJson;
+                    }
+
+                    if (context.CteNameByJoinAlias.TryGetValue(column.TableAlias, out string? childCteName)
+                        && structure.JoinQueries.TryGetValue(column.TableAlias, out SqlQueryStructure? childStructure))
+                    {
+                        string expression = $"{QuoteIdentifier(childCteName)}.{QuoteIdentifier(SqlQueryStructure.DATA_IDENT)}";
+                        // A keyed CTE has no row for a parent with zero children; list relationships
+                        // must still deserialize as an empty JSON array, matching the correlated shape.
+                        return childStructure.IsListQuery
+                            ? $"COALESCE({expression}, TO_CLOB(JSON_ARRAY()))"
+                            : expression;
+                    }
                 }
 
                 return Build(column as Column);
