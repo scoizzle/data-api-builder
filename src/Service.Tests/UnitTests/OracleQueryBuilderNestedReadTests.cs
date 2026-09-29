@@ -29,18 +29,25 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(parent);
 
-            // The request page is materialized first and bounds the relationship aggregate.
-            StringAssert.StartsWith(query, "WITH \"dab_page_cte\" AS ( SELECT \"TABLE0\".\"ID\" AS \"c0\"");
+            // The request page is materialized first (with the columns the final query needs) and
+            // bounds the relationship aggregate.
+            StringAssert.StartsWith(query, "WITH \"dab_page_cte\" AS ( SELECT \"TABLE0\".\"ID\" AS \"ID\", \"TABLE0\".\"ID\" AS \"c0\"");
             StringAssert.Contains(query, "FROM \"DBO\".\"PARENTS\" \"TABLE0\"");
             StringAssert.Contains(query, "ORDER BY \"TABLE0\".\"ID\" ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY");
             // The child aggregate only ranks rows reachable from the page.
             StringAssert.Contains(query, "EXISTS (SELECT 1 FROM \"dab_page_cte\" WHERE \"dab_page_cte\".\"c0\" = \"TABLE1\".\"parent_id\")");
             StringAssert.Contains(query, "ROW_NUMBER() OVER (PARTITION BY \"TABLE1\".\"parent_id\" ORDER BY \"TABLE1\".\"id\" ASC)");
             StringAssert.Contains(query, "GROUP BY \"k0\"");
-            StringAssert.Contains(query, "LEFT OUTER JOIN \"table1_subq_cte\" ON \"table1_subq_cte\".\"k0\" = \"TABLE0\".\"ID\"");
+            // The final query reads the page instead of re-applying the root predicates.
+            StringAssert.Contains(query, "FROM \"dab_page_cte\" \"TABLE0\" LEFT OUTER JOIN \"table1_subq_cte\" ON \"table1_subq_cte\".\"k0\" = \"TABLE0\".\"ID\"");
+            StringAssert.Contains(query, "WHERE 1 = 1");
             // JSON is built after the per-parent top-N filter, not for every ranked row.
-            StringAssert.Contains(query, "WHERE \"rn\" <= 100 GROUP BY \"k0\"");
-            StringAssert.Contains(query, "JSON_ARRAYAGG(JSON_OBJECT('id' VALUE \"id\" NULL ON NULL RETURNING VARCHAR2(4000)) ORDER BY \"rn\" RETURNING CLOB)");
+            // The child's rows are ranked first; descendant joins and JSON build only for the
+            // surviving top-N rows.
+            StringAssert.Contains(query, "SELECT \"TABLE1\".\"id\" AS \"id\", \"TABLE1\".\"parent_id\" AS \"k0\", ROW_NUMBER() OVER (PARTITION BY \"TABLE1\".\"parent_id\" ORDER BY \"TABLE1\".\"id\" ASC) AS \"rn\"");
+            StringAssert.Contains(query, "JSON_ARRAYAGG(json_doc ORDER BY \"rn\" RETURNING CLOB)");
+            StringAssert.Contains(query, "JSON_OBJECT('id' VALUE \"TABLE1\".\"id\" NULL ON NULL RETURNING VARCHAR2(4000)) AS json_doc");
+            StringAssert.Contains(query, "WHERE \"TABLE1\".\"rn\" <= 100 ) ranked_rows GROUP BY \"k0\"");
             // Lists must still deserialize as [] when a parent has no children.
             StringAssert.Contains(query, "COALESCE(\"table1_subq_cte\".\"data\", TO_CLOB(JSON_ARRAY()))");
             Assert.IsFalse(query.Contains("LATERAL"), "Nested relationship should not fall back to LATERAL.");
@@ -72,7 +79,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "LEFT OUTER JOIN \"DBO\".\"CHILDREN\" \"TABLE1\" ON (\"TABLE1\".\"ID\" = \"TABLE0\".\"ID\")");
             // The child's JSON object is built inline over the flattened join, guarded so a
             // missing child stays JSON null instead of becoming an all-null object.
-            StringAssert.Contains(query, "CASE WHEN \"TABLE1\".\"ID\" IS NOT NULL THEN JSON_OBJECT('ID' VALUE \"TABLE1\".\"ID\" NULL ON NULL RETURNING CLOB) ELSE NULL END AS \"child\"");
+            StringAssert.Contains(query, "CASE WHEN \"TABLE1\".\"ID\" IS NOT NULL THEN JSON_OBJECT('ID' VALUE \"TABLE1\".\"ID\" NULL ON NULL RETURNING VARCHAR2(4000)) ELSE NULL END AS \"child\"");
         }
 
         private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithListChild(
