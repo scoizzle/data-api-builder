@@ -40,7 +40,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "LEFT OUTER JOIN \"table1_subq_cte\" ON \"table1_subq_cte\".\"k0\" = \"TABLE0\".\"ID\"");
             // JSON is built after the per-parent top-N filter, not for every ranked row.
             StringAssert.Contains(query, "WHERE \"rn\" <= 100 GROUP BY \"k0\"");
-            StringAssert.Contains(query, "JSON_ARRAYAGG(JSON_OBJECT('id' VALUE \"id\" NULL ON NULL RETURNING CLOB) ORDER BY \"rn\" RETURNING CLOB)");
+            StringAssert.Contains(query, "JSON_ARRAYAGG(JSON_OBJECT('id' VALUE \"id\" NULL ON NULL RETURNING VARCHAR2(4000)) ORDER BY \"rn\" RETURNING CLOB)");
             // Lists must still deserialize as [] when a parent has no children.
             StringAssert.Contains(query, "COALESCE(\"table1_subq_cte\".\"data\", TO_CLOB(JSON_ARRAY()))");
             Assert.IsFalse(query.Contains("LATERAL"), "Nested relationship should not fall back to LATERAL.");
@@ -55,6 +55,24 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.IsFalse(query.StartsWith("WITH "), "Non-equality correlation must not use the keyed CTE form.");
             StringAssert.Contains(query, "LEFT OUTER JOIN LATERAL");
+        }
+
+        [TestMethod]
+        public void Build_ToOneRelationshipWithPrimaryKeyCorrelation_IsFlattened()
+        {
+            SqlQueryStructure parent = CreateParentWithToOneChild();
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            // No CTE, no page CTE (the only child is flattened), no ranking and no lateral.
+            Assert.IsFalse(query.StartsWith("WITH "), "A single flattenable to-one child needs no CTE.");
+            Assert.IsFalse(query.Contains("_cte"), "To-one relationship should not become a CTE.");
+            Assert.IsFalse(query.Contains("ROW_NUMBER"), "Unique to-one relationship must not be ranked.");
+            Assert.IsFalse(query.Contains("LATERAL"), "To-one relationship should be flattened, not lateral.");
+            StringAssert.Contains(query, "LEFT OUTER JOIN \"DBO\".\"CHILDREN\" \"TABLE1\" ON (\"TABLE1\".\"ID\" = \"TABLE0\".\"ID\")");
+            // The child's JSON object is built inline over the flattened join, guarded so a
+            // missing child stays JSON null instead of becoming an all-null object.
+            StringAssert.Contains(query, "CASE WHEN \"TABLE1\".\"ID\" IS NOT NULL THEN JSON_OBJECT('ID' VALUE \"TABLE1\".\"ID\" NULL ON NULL RETURNING CLOB) ELSE NULL END AS \"child\"");
         }
 
         private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithListChild(
@@ -126,6 +144,76 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SetLimit(parent, 100);
 
             return (parent, child);
+        }
+
+        private static SqlQueryStructure CreateParentWithToOneChild()
+        {
+            SourceDefinition childSource = new();
+            childSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            childSource.PrimaryKey.Add("ID");
+            DatabaseTable childTable = new("dbo", "children") { TableDefinition = childSource };
+            Mock<ISqlMetadataProvider> childMetadata = new();
+            childMetadata.Setup(x => x.GetSourceDefinition("Child")).Returns(childSource);
+
+            SqlQueryStructure child = CreateStructure(isList: false);
+            SetField(child, "EntityName", "Child");
+            SetField(child, "MetadataProvider", childMetadata.Object);
+            SetField(child, "DatabaseObject", childTable);
+            SetField(child, "SourceAlias", "table1");
+            SetBaseProperty(child, "Columns", new List<LabelledColumn>
+            {
+                new("dbo", "children", "ID", "ID", "table1")
+            });
+            SetField(child, "Predicates", new List<Predicate>
+            {
+                new(
+                    new PredicateOperand(new Column(string.Empty, string.Empty, "ID", "table1")),
+                    PredicateOperation.Equal,
+                    new PredicateOperand(new Column(string.Empty, string.Empty, "ID", "table0")))
+            });
+            SetField(child, "DbPolicyPredicatesForOperations", new Dictionary<EntityActionOperation, string?>());
+            SetField(child, "Joins", new List<SqlJoinStructure>());
+            SetField(child, "FilterPredicates", string.Empty);
+            SetField(child, "OrderByColumns", new List<OrderByColumn>
+            {
+                new("dbo", "children", "ID", "table1")
+            });
+            SetField(child, "PaginationMetadata", new PaginationMetadata(child));
+            SetField(child, "GroupByMetadata", new GroupByMetadata());
+            SetField(child, "Counter", new IncrementingInteger());
+            SetLimit(child, 1);
+
+            SourceDefinition parentSource = new();
+            parentSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            DatabaseTable parentTable = new("dbo", "parents") { TableDefinition = parentSource };
+            Mock<ISqlMetadataProvider> parentMetadata = new();
+            parentMetadata.Setup(x => x.GetSourceDefinition("Parent")).Returns(parentSource);
+
+            SqlQueryStructure parent = CreateStructure(isList: true);
+            SetField(parent, "EntityName", "Parent");
+            SetField(parent, "MetadataProvider", parentMetadata.Object);
+            SetField(parent, "DatabaseObject", parentTable);
+            SetField(parent, "SourceAlias", "table0");
+            SetBaseProperty(parent, "Columns", new List<LabelledColumn>
+            {
+                new("dbo", "parents", "ID", "id", "table0"),
+                new("dbo", "children", SqlQueryStructure.DATA_IDENT, "child", "table1_subq")
+            });
+            SetJoinQuery(parent, "table1_subq", child);
+            SetField(parent, "Predicates", new List<Predicate>());
+            SetField(parent, "DbPolicyPredicatesForOperations", new Dictionary<EntityActionOperation, string?>());
+            SetField(parent, "Joins", new List<SqlJoinStructure>());
+            SetField(parent, "FilterPredicates", string.Empty);
+            SetField(parent, "OrderByColumns", new List<OrderByColumn>
+            {
+                new("dbo", "parents", "ID", "table0")
+            });
+            SetField(parent, "PaginationMetadata", new PaginationMetadata(parent));
+            SetField(parent, "GroupByMetadata", new GroupByMetadata());
+            SetField(parent, "Counter", new IncrementingInteger());
+            SetLimit(parent, 100);
+
+            return parent;
         }
 
         private static SqlQueryStructure CreateStructure(bool isList)
