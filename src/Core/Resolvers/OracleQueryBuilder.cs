@@ -25,6 +25,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private const string ORACLE_ESCAPE_CHAR = "\\";
         /// <summary>Alias of the DISTINCT page-key set joined by direct child aggregates.</summary>
         private const string PageJoinAlias = "dab_page";
+
+        /// <summary>
+        /// Oracle rejects IN lists with more than 1000 expressions. Child cursors bind one entry
+        /// per page key, so pages larger than this fall back to the single-query JSON path.
+        /// </summary>
+        private const int MaxPageKeysForBindList = 1000;
         /// <summary>
         /// Indicator emitted by the fallback-to-update branch when the target row does not exist
         /// (no row matched the primary key, and no update policy exists to explain a no-match).
@@ -836,7 +842,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             pageCursor = null;
             if (root.IsMultipleCreateOperation
                 || root.GroupByMetadata.Fields.Count > 0
-                || root.OrderByColumns.Count == 0)
+                || root.OrderByColumns.Count == 0
+                || (root.Limit() ?? 1) > MaxPageKeysForBindList)
             {
                 return false;
             }
