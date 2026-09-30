@@ -165,6 +165,18 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsNull(cursor);
         }
 
+        [TestMethod]
+        public void PageCursor_PageLargerThanOracleInListLimit_FallsBackToJsonPlan()
+        {
+            (SqlQueryStructure parent, _) = CreateParentWithListChild(PredicateOperation.Equal);
+            SetLimit(parent, 1001);
+
+            bool built = new OracleQueryBuilder().TryBuildRelationalPageCursor(parent, out RelationalReadCursor? cursor);
+
+            Assert.IsFalse(built, "More page keys than an Oracle IN list accepts must use the JSON path.");
+            Assert.IsNull(cursor);
+        }
+
         private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithListChild(
             PredicateOperation correlationOperation)
         {
