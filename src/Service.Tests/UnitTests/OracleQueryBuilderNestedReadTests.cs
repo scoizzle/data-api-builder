@@ -31,7 +31,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             // The request page is materialized first (with the columns the final query needs) and
             // bounds the relationship aggregate.
-            StringAssert.StartsWith(query, "WITH \"dab_page_cte\" AS ( SELECT \"TABLE0\".\"ID\" AS \"ID\", \"TABLE0\".\"ID\" AS \"c0\"");
+            // MATERIALIZE keeps the page from being inlined into its multiple readers; inlining
+            // a query name whose definition references another one raises ORA-32036 on some
+            // Oracle versions.
+            StringAssert.StartsWith(query, "WITH \"dab_page_cte\" AS ( SELECT /*+ MATERIALIZE */ \"TABLE0\".\"ID\" AS \"ID\", \"TABLE0\".\"ID\" AS \"c0\"");
             StringAssert.Contains(query, "FROM \"DBO\".\"PARENTS\" \"TABLE0\"");
             StringAssert.Contains(query, "ORDER BY \"TABLE0\".\"ID\" ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY");
             // The child aggregate only ranks rows reachable from the page.
