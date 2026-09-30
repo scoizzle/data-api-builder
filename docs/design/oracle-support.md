@@ -70,6 +70,10 @@ This path is **GraphQL-only**. REST batch/array create does not share it (same a
 
 Oracle `RAW` values are serialized as base64. `BLOB` columns are typed as byte[] and null-guarded during base64 encoding; values larger than roughly 2000 bytes are not covered because `UTL_ENCODE.BASE64_ENCODE` accepts `RAW` and the implicit `BLOB`-to-`RAW` conversion is size-limited.
 
+### Date and time filter values
+
+GraphQL filter literals for `DATE`/`TIMESTAMP` columns arrive as strings. Left as a `VARCHAR2` bind, Oracle converts the string with the session NLS date format (default `DD-MON-RR`), so ISO 8601 filter values raise `ORA-01861`/`ORA-01843` and only the Oracle-specific `DD-MON-RR` spelling works. `BaseSqlQueryStructure.MakeDbConnectionParam` parses such values into the column's date/time type before binding; the invariant-culture parse accepts both ISO 8601 (`2026-01-01`, `2026-01-01T10:23:00Z`) and the `DD-MON-RR` spelling, so filters no longer depend on NLS settings. `TIMESTAMP WITH TIME ZONE` columns keep the offset (bound as `TimeStampTZ` by `OracleQueryExecutor`); plain `DATE`/`TIMESTAMP` values are bound as the UTC wall clock. OData date literals (REST/MCP) are converted by the same executor conversion.
+
 ### Synonyms
 
 Oracle resolves an **unqualified** name in this order: object in the current schema, then a **private synonym** owned by the current user, then a **public** synonym (`OWNER = 'PUBLIC'`). A **schema-qualified** name never uses a public synonym.
