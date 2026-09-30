@@ -943,12 +943,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     continue;
                 }
 
-                if (child.GroupByMetadata.Fields.Count > 0
-                    || child.OrderByColumns.Count == 0
-                    || !pageKeysByJoinAlias.TryGetValue(joinQuery.Key, out IReadOnlyList<object?[]>? pageKeys)
-                    || pageKeys.Count == 0)
+                if (child.GroupByMetadata.Fields.Count > 0 || child.OrderByColumns.Count == 0)
                 {
                     return false;
+                }
+
+                if (!pageKeysByJoinAlias.TryGetValue(joinQuery.Key, out IReadOnlyList<object?[]>? pageKeys)
+                    || pageKeys.Count == 0)
+                {
+                    // No parent row carries a key for this relationship; the executor renders
+                    // an empty result without opening a cursor.
+                    continue;
                 }
 
                 if (!TryBuildRelationalChildCursor(
@@ -1047,14 +1052,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                               $"ROW_NUMBER() OVER (PARTITION BY {partitionBy} ORDER BY {orderSql}) AS {rnAlias} " +
                               $"FROM {fromSql} WHERE {predicateSql} AND {pageKeyPredicate}";
 
+            // Aliases are quoted everywhere: an unquoted reference would fold to uppercase and
+            // miss the quoted alias projected by the inline view (ORA-00904).
             string childAlias = QuoteTableAlias(child.SourceAlias);
             List<string> outerColumns = new(projection.Aliases);
-            outerColumns.AddRange(keyAliases.Select(QuoteIdentifier));
-            outerColumns.Add(rnAlias);
-            string outerSelect = string.Join(", ", outerColumns.Select(column => $"{childAlias}.{column}"));
+            outerColumns.AddRange(keyAliases);
+            outerColumns.Add("rn");
+            string outerSelect = string.Join(", ", outerColumns.Select(column => $"{childAlias}.{QuoteIdentifier(column)}"));
             string outerOrder = string.Join(", ", keyAliases
                 .Select(alias => $"{childAlias}.{QuoteIdentifier(alias)}")
-                .Append($"{childAlias}.{rnAlias}"));
+                .Append($"{childAlias}.{QuoteIdentifier("rn")}"));
 
             string sql = $"SELECT {outerSelect} FROM ( {innerSql} ) {childAlias} " +
                          $"WHERE {childAlias}.{rnAlias} <= {limit.ToString(CultureInfo.InvariantCulture)} " +
@@ -1109,7 +1116,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     || HasUnqualifiedPredicates(nested)
                     || !CanFlattenToOne(nested, nestedKeys))
                 {
-                    // Rendered as its own cursor; its correlation aliases are registered below.
+                    // Rendered as its own cursor (built by TryBuildRelationalChildCursors); the
+                    // field is a placeholder the assembler fills from that cursor's result.
+                    fields.Add(new RelationalReadField(
+                        jsonName: column.Label,
+                        relationJoinAlias: column.TableAlias,
+                        relationIsList: nested.IsListQuery));
                     continue;
                 }
 
