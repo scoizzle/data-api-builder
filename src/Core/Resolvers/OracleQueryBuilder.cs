@@ -609,7 +609,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string baseFrom = $"{QuoteRelation(root.DatabaseObject.SchemaName, root.DatabaseObject.Name)} " +
                               $"{QuoteTableAlias(root.SourceAlias)}{Build(root.Joins)}" +
                               string.Concat(filterKeySetJoins);
-            string pageSql = $"SELECT {string.Join(", ", pageColumns)} FROM {baseFrom} " +
+            // The page CTE is read by the final query and by every direct child aggregate, and
+            // its definition may reference a set-based filter CTE. Some Oracle versions inline a
+            // query name used more than once when its definition references another query name
+            // and then raise ORA-32036. MATERIALIZE pins the documented workaround and also stops
+            // the page computation (and its filter scan) from being evaluated once per reader.
+            string pageSql = $"SELECT /*+ MATERIALIZE */ {string.Join(", ", pageColumns)} FROM {baseFrom} " +
                              $"WHERE {BuildStructurePredicates(root, pagePredicates)}{BuildOrderBy(root)} " +
                              $"OFFSET 0 ROWS FETCH NEXT {(root.Limit() ?? 1).ToString(CultureInfo.InvariantCulture)} ROWS ONLY";
 
