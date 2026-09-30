@@ -66,6 +66,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     /// a flattened to-one object has no direct alias and instead exposes its column aliases
     /// as children. <see cref="NullGuardAliases"/> are the child's primary-key aliases: when
     /// every one of them is NULL the outer join found no row and the field must be JSON null.
+    /// A field that renders a relationship cursor has <see cref="RelationJoinAlias"/> set and
+    /// takes its value from that cursor's assembled result.
     /// </summary>
     internal sealed class RelationalReadField
     {
@@ -74,13 +76,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string alias = "",
             bool isObject = false,
             IReadOnlyList<string>? nullGuardAliases = null,
-            IReadOnlyList<RelationalReadField>? children = null)
+            IReadOnlyList<RelationalReadField>? children = null,
+            string? relationJoinAlias = null,
+            bool relationIsList = false)
         {
             JsonName = jsonName;
             Alias = alias;
             IsObject = isObject;
             NullGuardAliases = nullGuardAliases ?? System.Array.Empty<string>();
             Children = children ?? System.Array.Empty<RelationalReadField>();
+            RelationJoinAlias = relationJoinAlias;
+            RelationIsList = relationIsList;
         }
 
         public string JsonName { get; }
@@ -92,5 +98,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public IReadOnlyList<string> NullGuardAliases { get; }
 
         public IReadOnlyList<RelationalReadField> Children { get; }
+
+        public string? RelationJoinAlias { get; }
+
+        /// <summary>Whether the relationship renders as a JSON array (true) or a single object.</summary>
+        public bool RelationIsList { get; }
     }
 }

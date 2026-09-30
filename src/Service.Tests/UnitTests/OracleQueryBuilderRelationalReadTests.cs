@@ -45,10 +45,16 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             // the alias is reused from the already-selected column instead of duplicated.
             Assert.AreEqual("id", cursor.CorrelationAliasesByJoinAlias["table1_subq"].Single());
             Assert.AreEqual("id", cursor.AliasByExpression["\"TABLE0\".\"ID\""]);
-            Assert.AreEqual(1, cursor.Fields.Count);
+            Assert.AreEqual(2, cursor.Fields.Count);
             Assert.AreEqual("id", cursor.Fields[0].JsonName);
             Assert.AreEqual("id", cursor.Fields[0].Alias);
             Assert.IsFalse(cursor.Fields[0].IsObject);
+
+            // The relationship is a placeholder filled from its own cursor's result.
+            RelationalReadField relation = cursor.Fields[1];
+            Assert.AreEqual("children", relation.JsonName);
+            Assert.AreEqual("table1_subq", relation.RelationJoinAlias);
+            Assert.IsTrue(relation.RelationIsList);
         }
 
         [TestMethod]

@@ -350,6 +350,26 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             IQueryBuilder queryBuilder = _queryFactory.GetQueryBuilder(databaseType);
             IQueryExecutor queryExecutor = _queryFactory.GetQueryExecutor(databaseType);
 
+            // Engines that can render a nested read as flat relational row sets (Oracle first)
+            // execute those cursors and assemble the JSON document in C# instead of producing a
+            // single SQL JSON document. Reads on an uncommitted local transaction and reads that
+            // the entity cache would serve keep the JSON path.
+            if (!isMultipleCreateOperation
+                && dbConnection is null
+                && structure.JoinQueries.Count > 0
+                && queryBuilder is IRelationalReadPlanBuilder planBuilder
+                && !IsEntityCacheApplicable(runtimeConfig, structure)
+                && planBuilder.TryBuildRelationalPageCursor(structure, out RelationalReadCursor? pageCursor))
+            {
+                return await RelationalReadExecutor.ExecuteAsync(
+                    planBuilder,
+                    pageCursor!,
+                    structure,
+                    queryExecutor,
+                    dataSourceName,
+                    _httpContextAccessor.HttpContext);
+            }
+
             string queryString;
 
             // Open connection and execute query using _queryExecutor
@@ -415,6 +435,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             return response;
+        }
+
+        /// <summary>
+        /// Whether the read would be served through the entity cache. The relational plan has no
+        /// query text to key the cache with, so those reads keep the JSON path.
+        /// </summary>
+        private static bool IsEntityCacheApplicable(RuntimeConfig runtimeConfig, SqlQueryStructure structure)
+        {
+            return runtimeConfig.CanUseCache()
+                && string.IsNullOrEmpty(structure.DbPolicyPredicatesForOperations[EntityActionOperation.Read])
+                && runtimeConfig.IsEntityCachingEnabled(structure.EntityName);
         }
 
         private async Task<JsonDocument?> GetResultInCacheScenario(
