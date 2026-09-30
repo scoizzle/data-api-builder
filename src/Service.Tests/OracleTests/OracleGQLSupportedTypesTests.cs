@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -140,6 +141,51 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             string queryOperator)
         {
             await QueryTypeColumnFilterAndOrderBy(type, filterOperator, sqlValue, gqlValue, queryOperator);
+        }
+
+        /// <summary>
+        /// Regression test: GraphQL filter values for Oracle DATE/TIMESTAMP columns must be
+        /// bound as date/time values, not as VARCHAR2. A string bind is converted by Oracle
+        /// using the session NLS date format (default DD-MON-RR), which accepted the
+        /// Oracle-specific spelling but raised ORA-01861 for ISO 8601 filter values.
+        /// The shared supported-types tests skip these types for Oracle, so they are
+        /// exercised here against the type_table columns.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(DATETIME_TYPE, "gte", "TO_TIMESTAMP('1999-01-08 10:23:00', 'YYYY-MM-DD HH24:MI:SS')", "\"1999-01-08T10:23:00\"", " >= ")]
+        [DataRow(DATETIME_TYPE, "eq", "TO_TIMESTAMP('1999-01-08 10:23:54', 'YYYY-MM-DD HH24:MI:SS')", "\"1999-01-08T10:23:54\"", " = ")]
+        [DataRow(DATETIME_TYPE, "lt", "TO_TIMESTAMP('9999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS')", "\"9999-12-31T23:59:59\"", " < ")]
+        [DataRow(DATE_TYPE, "gte", "TO_DATE('1999-01-08', 'YYYY-MM-DD')", "\"1999-01-08\"", " >= ")]
+        // The Oracle NLS spelling that worked before the fix must keep working.
+        [DataRow(DATETIME_TYPE, "gte", "TO_TIMESTAMP('1999-01-08 10:23:00', 'YYYY-MM-DD HH24:MI:SS')", "\"08-JAN-99 10:23:00\"", " >= ")]
+        public async Task Oracle_graphql_datetime_filters_accept_iso_values(
+            string type,
+            string filterOperator,
+            string sqlValue,
+            string gqlValue,
+            string queryOperator)
+        {
+            string field = GetTestFieldName(type);
+            string gqlQuery = @"{
+                supportedTypes(first: 100 orderBy: { typeid: ASC } filter: { " + field + ": {" + filterOperator + ": " + gqlValue + @"} }) {
+                    items {
+                        typeid, " + field + @"
+                    }
+                }
+            }";
+
+            string dbQuery = MakeQueryOnTypeTable(
+                queryFields: new List<DabField> { new(alias: "typeid", backingColumnName: "id"), new(backingColumnName: field) },
+                filterValue: sqlValue,
+                filterOperator: queryOperator,
+                filterField: field,
+                orderBy: "id",
+                limit: "100");
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(gqlQuery, "supportedTypes", isAuthenticated: false);
+            string expected = await GetDatabaseResultAsync(dbQuery);
+
+            PerformTestEqualsForExtendedTypes(type, expected, actual.GetProperty("items").ToString());
         }
 
         protected override string MakeQueryOnTypeTable(List<DabField> queryFields, int id)
