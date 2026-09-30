@@ -35,7 +35,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "FROM \"DBO\".\"PARENTS\" \"TABLE0\"");
             StringAssert.Contains(query, "ORDER BY \"TABLE0\".\"ID\" ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY");
             // The child aggregate only ranks rows reachable from the page.
-            StringAssert.Contains(query, "EXISTS (SELECT 1 FROM \"dab_page_cte\" WHERE \"dab_page_cte\".\"c0\" = \"TABLE1\".\"parent_id\")");
+            StringAssert.Contains(query, "INNER JOIN (SELECT DISTINCT \"c0\" FROM \"dab_page_cte\") \"dab_page\" ON (\"dab_page\".\"c0\" = \"TABLE1\".\"parent_id\")");
             StringAssert.Contains(query, "ROW_NUMBER() OVER (PARTITION BY \"TABLE1\".\"parent_id\" ORDER BY \"TABLE1\".\"id\" ASC)");
             StringAssert.Contains(query, "GROUP BY \"k0\"");
             // The final query reads the page instead of re-applying the root predicates.

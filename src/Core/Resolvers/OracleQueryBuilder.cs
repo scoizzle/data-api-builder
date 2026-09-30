@@ -23,6 +23,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private const string INSERT_UPSERT = "inserted";
         private const string UPDATE_UPSERT = "updated";
         private const string ORACLE_ESCAPE_CHAR = "\\";
+        /// <summary>Alias of the DISTINCT page-key set joined by direct child aggregates.</summary>
+        private const string PageJoinAlias = "dab_page";
         /// <summary>
         /// Indicator emitted by the fallback-to-update branch when the target row does not exist
         /// (no row matched the primary key, and no update policy exists to explain a no-match).
@@ -158,9 +160,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             // When the page CTE already applied the root predicates (filters, policy, keyset
             // paging), the final query reads the page instead of re-scanning the root table.
+            List<Predicate>? predicatesOverride = context is not null && ReferenceEquals(structure, context.RootStructure)
+                ? context.RootPredicatesOverride
+                : null;
             string predicates = PageFeedsRoot(structure, context)
                 ? BASE_PREDICATE
-                : BuildStructurePredicates(structure);
+                : BuildStructurePredicates(structure, predicatesOverride);
 
             string aggregations = BuildAggregationColumns(structure);
 
@@ -234,6 +239,21 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             /// expression (built from the flattened join's columns).
             /// </summary>
             public Dictionary<string, string> InlineJsonByJoinAlias { get; } = new(StringComparer.Ordinal);
+
+            /// <summary>Counter used to name set-based nested-filter key CTEs.</summary>
+            public int NextFilterCteId { get; set; }
+
+            /// <summary>
+            /// Page predicates with nested-relationship filters rewritten as set-based key CTEs.
+            /// Reused by the final query when it does not read the page CTE.
+            /// </summary>
+            public List<Predicate>? PagePredicatesOverride { get; set; }
+
+            /// <summary>Key-set joins belonging to <see cref="PagePredicatesOverride"/>.</summary>
+            public List<string> PageKeySetJoins { get; } = new();
+
+            /// <summary>Predicate override the final (root) query must use, when any.</summary>
+            public List<Predicate>? RootPredicatesOverride { get; set; }
         }
 
         /// <summary>
@@ -253,6 +273,35 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ? $"{QuoteIdentifier(context!.PageCteName!)} {QuoteTableAlias(structure.SourceAlias)}"
                 : $"{QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
                   $"{QuoteTableAlias(structure.SourceAlias)}{Build(structure.Joins)}";
+
+            if (isRoot && context is not null && !PageFeedsRoot(structure, context))
+            {
+                // The final query applies the root predicates itself (no page CTE, or the page
+                // cannot feed the root). Reuse the page's rewritten predicates and key-set joins
+                // when present, otherwise rewrite the nested-filter EXISTS predicates now so the
+                // root query never probes the child table per candidate parent.
+                if (context.PagePredicatesOverride is not null)
+                {
+                    fromSql += string.Concat(context.PageKeySetJoins);
+                    context.RootPredicatesOverride = context.PagePredicatesOverride;
+                }
+                else
+                {
+                    List<string> keySetJoins = new();
+                    List<Predicate> rewritten = new();
+                    foreach (Predicate predicate in structure.Predicates)
+                    {
+                        rewritten.Add(RewritePredicateForPage(
+                            predicate, structure.SourceAlias, context, keySetJoins, inConjunction: true));
+                    }
+
+                    if (keySetJoins.Count > 0)
+                    {
+                        fromSql += string.Concat(keySetJoins);
+                        context.RootPredicatesOverride = rewritten;
+                    }
+                }
+            }
 
             // Policy/filter predicates are emitted as unqualified column strings. Flattening adds
             // sibling tables to this row source, which would make those strings ambiguous, so
@@ -304,9 +353,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                     if (IsCteEligible(child))
                     {
-                        string? pageRestriction = applyPageRestriction ? BuildPageRestriction(correlationKeys, context) : null;
+                        string? pageJoin = applyPageRestriction ? BuildPageJoin(correlationKeys, context) : null;
                         if (TryBuildChildCte(joinQuery.Key, child, correlationKeys, correlationPredicates,
-                                context, pageRestriction, out string cteName,
+                                context, pageJoin, out string cteName,
                                 out List<(string KeyAlias, string ParentExpression)> joinKeys))
                         {
                             string onClause = string.Join(" AND ", joinKeys.Select(
@@ -412,7 +461,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// equality, because such a child cannot be pre-aggregated independently of the parent row.
         /// </summary>
         private static bool TryGetCorrelationKeys(
-            SqlQueryStructure child,
+            BaseSqlQueryStructure child,
             string parentAlias,
             out List<(Column Parent, Column Child)> correlationKeys,
             out HashSet<Predicate> correlationPredicates)
@@ -543,15 +592,140 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 context.PageColumnAliasByExpression[parentColumns[i].Expression] = columnAlias;
             }
 
+            // Nested-relationship filters render as correlated EXISTS subqueries, which probe the
+            // child table once per candidate parent. On large child tables without a parent/date
+            // composite index Oracle can turn that into an index join over the whole date range
+            // (minutes for a page). For the page computation, ANDed nested filters are rewritten
+            // into set-based DISTINCT key CTEs joined once; predicates under OR/NOT are left as
+            // EXISTS to preserve semantics.
+            List<string> filterKeySetJoins = new();
+            List<Predicate> pagePredicates = new();
+            foreach (Predicate predicate in root.Predicates)
+            {
+                pagePredicates.Add(RewritePredicateForPage(
+                    predicate, root.SourceAlias, context, filterKeySetJoins, inConjunction: true));
+            }
+
             string baseFrom = $"{QuoteRelation(root.DatabaseObject.SchemaName, root.DatabaseObject.Name)} " +
-                              $"{QuoteTableAlias(root.SourceAlias)}{Build(root.Joins)}";
+                              $"{QuoteTableAlias(root.SourceAlias)}{Build(root.Joins)}" +
+                              string.Concat(filterKeySetJoins);
             string pageSql = $"SELECT {string.Join(", ", pageColumns)} FROM {baseFrom} " +
-                             $"WHERE {BuildStructurePredicates(root)}{BuildOrderBy(root)} " +
+                             $"WHERE {BuildStructurePredicates(root, pagePredicates)}{BuildOrderBy(root)} " +
                              $"OFFSET 0 ROWS FETCH NEXT {(root.Limit() ?? 1).ToString(CultureInfo.InvariantCulture)} ROWS ONLY";
 
             context.Ctes.Add($"{QuoteIdentifier(pageCteName)} AS ( {pageSql} )");
             context.PageCteName = pageCteName;
             context.PageCteFeedsRoot = canFeedRoot;
+            context.PagePredicatesOverride = pagePredicates;
+            context.PageKeySetJoins.AddRange(filterKeySetJoins);
+        }
+
+        /// <summary>
+        /// Rewrites an ANDed predicate for the page computation: a nested-relationship filter
+        /// (an EXISTS over a correlated child) becomes a set-based DISTINCT key CTE joined once.
+        /// Predicates nested under OR/NOT are copied unchanged so boolean semantics are preserved.
+        /// </summary>
+        private Predicate RewritePredicateForPage(
+            Predicate predicate,
+            string parentAlias,
+            OracleBuildContext context,
+            List<string> keySetJoins,
+            bool inConjunction)
+        {
+            if (inConjunction
+                && predicate.Left is null
+                && predicate.Op == PredicateOperation.EXISTS
+                && predicate.Right.AsSqlQueryStructure() is BaseSqlQueryStructure exists
+                && TryBuildFilterKeySetJoin(exists, parentAlias, context, out string join))
+            {
+                keySetJoins.Add(join);
+                return TruePredicate();
+            }
+
+            bool operandsInConjunction = inConjunction && predicate.Op == PredicateOperation.AND;
+            PredicateOperand? left = RewriteOperandForPage(predicate.Left, parentAlias, context, keySetJoins, operandsInConjunction);
+            PredicateOperand right = RewriteOperandForPage(predicate.Right, parentAlias, context, keySetJoins, operandsInConjunction)
+                                     ?? predicate.Right;
+            return ReferenceEquals(left, predicate.Left) && ReferenceEquals(right, predicate.Right)
+                ? predicate
+                : new Predicate(left, predicate.Op, right, predicate.AddParenthesis);
+        }
+
+        private PredicateOperand? RewriteOperandForPage(
+            PredicateOperand? operand,
+            string parentAlias,
+            OracleBuildContext context,
+            List<string> keySetJoins,
+            bool inConjunction)
+        {
+            if (operand is null)
+            {
+                return null;
+            }
+
+            if (operand.AsPredicate() is Predicate inner)
+            {
+                Predicate rewritten = RewritePredicateForPage(inner, parentAlias, context, keySetJoins, inConjunction);
+                return ReferenceEquals(rewritten, inner) ? operand : new PredicateOperand(rewritten);
+            }
+
+            return operand;
+        }
+
+        private static Predicate TruePredicate()
+        {
+            return new Predicate(new PredicateOperand("1"), PredicateOperation.Equal, new PredicateOperand("1"));
+        }
+
+        /// <summary>
+        /// Builds the DISTINCT key CTE for one nested-relationship filter and returns the join that
+        /// attaches it to the page. The CTE reads the correlated child columns for the filter's
+        /// conditions in a single set-based pass, replacing per-parent probes.
+        /// </summary>
+        private bool TryBuildFilterKeySetJoin(
+            BaseSqlQueryStructure exists,
+            string parentAlias,
+            OracleBuildContext context,
+            out string join)
+        {
+            join = string.Empty;
+            if (!TryGetCorrelationKeys(exists, parentAlias,
+                    out List<(Column Parent, Column Child)> correlationKeys,
+                    out HashSet<Predicate> correlationPredicates))
+            {
+                return false;
+            }
+
+            string cteName = $"dab_filter_cte_{context.NextFilterCteId++}";
+            string fromSql = $"{QuoteRelation(exists.DatabaseObject.SchemaName, exists.DatabaseObject.Name)} " +
+                             $"{QuoteTableAlias(exists.SourceAlias)}{Build(exists.Joins)}";
+
+            List<string> keyAliases = new();
+            List<string> keySelect = new();
+            for (int i = 0; i < correlationKeys.Count; i++)
+            {
+                string keyAlias = $"k{i}";
+                keyAliases.Add(keyAlias);
+                keySelect.Add($"{Build(correlationKeys[i].Child)} AS {QuoteIdentifier(keyAlias)}");
+            }
+
+            string predicates = JoinPredicateStrings(
+                exists.GetDbPolicyForOperation(EntityActionOperation.Read),
+                exists.FilterPredicates,
+                Build(exists.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()));
+            predicates = AddEscapeToLikeClauses(predicates);
+
+            context.Ctes.Add($"{QuoteIdentifier(cteName)} AS ( SELECT DISTINCT {string.Join(", ", keySelect)} " +
+                             $"FROM {fromSql} WHERE {predicates} )");
+
+            List<string> joinConditions = new();
+            for (int i = 0; i < correlationKeys.Count; i++)
+            {
+                joinConditions.Add($"{QuoteIdentifier(cteName)}.{QuoteIdentifier(keyAliases[i])} = {Build(correlationKeys[i].Parent)}");
+            }
+
+            join = $" INNER JOIN {QuoteIdentifier(cteName)} ON ({string.Join(" AND ", joinConditions)})";
+            return true;
         }
 
         /// <summary>
@@ -566,11 +740,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Builds the predicate that restricts a direct child of the root to keys present in the
-        /// page CTE. A semi-join is used (not an inner join) so a repeated page value cannot
-        /// duplicate child rows inside the aggregate.
+        /// Builds the inner join that restricts a direct child aggregate to the page keys. Joining
+        /// the DISTINCT key set (rather than an EXISTS probe) lets the optimizer push the parent
+        /// key into the child index access, and cannot duplicate child rows inside the aggregate.
         /// </summary>
-        private string? BuildPageRestriction(
+        private string? BuildPageJoin(
             List<(Column Parent, Column Child)> correlationKeys,
             OracleBuildContext context)
         {
@@ -579,6 +753,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return null;
             }
 
+            List<string> pageColumns = new();
             List<string> conditions = new();
             foreach ((Column parent, Column child) in correlationKeys)
             {
@@ -587,38 +762,48 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     return null;
                 }
 
-                conditions.Add($"{QuoteIdentifier(context.PageCteName)}.{QuoteIdentifier(pageColumnAlias)} = {Build(child)}");
+                if (!pageColumns.Contains(pageColumnAlias))
+                {
+                    pageColumns.Add(pageColumnAlias);
+                }
+
+                conditions.Add($"{QuoteIdentifier(PageJoinAlias)}.{QuoteIdentifier(pageColumnAlias)} = {Build(child)}");
             }
 
-            return $"EXISTS (SELECT 1 FROM {QuoteIdentifier(context.PageCteName)} WHERE {string.Join(" AND ", conditions)})";
+            return $" INNER JOIN (SELECT DISTINCT {string.Join(", ", pageColumns.Select(QuoteIdentifier))} " +
+                   $"FROM {QuoteIdentifier(context.PageCteName)}) {QuoteIdentifier(PageJoinAlias)} " +
+                   $"ON ({string.Join(" AND ", conditions)})";
         }
 
         /// <summary>
         /// Builds the policy/filter/pagination predicate shared by the main query and the page CTE.
+        /// <paramref name="predicatesOverride"/> supplies already-rewritten predicates for the page
+        /// (see <see cref="RewritePredicateForPage"/>).
         /// </summary>
-        private string BuildStructurePredicates(SqlQueryStructure structure)
+        private string BuildStructurePredicates(SqlQueryStructure structure, List<Predicate>? predicatesOverride = null)
         {
-            string predicates;
+            List<Predicate> predicates = predicatesOverride ?? structure.Predicates;
+            string predicateString;
             if (structure.IsMultipleCreateOperation)
             {
-                predicates = JoinPredicateStrings(
+                predicateString = JoinPredicateStrings(
                                     structure.GetDbPolicyForOperation(EntityActionOperation.Read),
                                     structure.FilterPredicates,
-                                    Build(structure.Predicates, " OR ", isMultipleCreateOperation: true),
+                                    Build(predicates, " OR ", isMultipleCreateOperation: true),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
             }
             else
             {
-                predicates = JoinPredicateStrings(
+                predicateString = JoinPredicateStrings(
                                     structure.GetDbPolicyForOperation(EntityActionOperation.Read),
                                     structure.FilterPredicates,
-                                    Build(structure.Predicates),
+                                    Build(predicates),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
             }
 
             // Add ESCAPE clause to LIKE predicates so that % and _ wildcards in the
             // search pattern are properly escaped when used as literal characters.
-            return AddEscapeToLikeClauses(predicates);
+            return AddEscapeToLikeClauses(predicateString);
         }
 
         /// <summary>
@@ -632,7 +817,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<(Column Parent, Column Child)> correlationKeys,
             HashSet<Predicate> correlationPredicates,
             OracleBuildContext context,
-            string? pageRestriction,
+            string? pageJoin,
             out string cteName,
             out List<(string KeyAlias, string ParentExpression)> joinKeys)
         {
@@ -655,7 +840,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 && IsPrimaryKeyCorrelation(child, correlationKeys);
 
             string cteSql = BuildChildCteSql(
-                child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction, skipRanking);
+                child, correlationPredicates, keyAliases, keyExpressions, context, pageJoin, skipRanking);
             context.Ctes.Add($"{QuoteIdentifier(cteName)} AS ( {cteSql} )");
             context.CteNameByJoinAlias[joinAlias] = cteName;
             return true;
@@ -674,7 +859,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> keyAliases,
             List<string> keyExpressions,
             OracleBuildContext context,
-            string? pageRestriction,
+            string? pageJoin,
             bool skipRanking)
         {
             // Direct foreign-key relationships rank first and attach descendant relationships
@@ -683,8 +868,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // many) children keep the single-block form because their link-table joins can expose
             // duplicate column names, which the ranked row source cannot carry.
             return child.Joins.Count == 0
-                ? BuildRankedChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction, skipRanking)
-                : BuildJoinedChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageRestriction, skipRanking);
+                ? BuildRankedChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageJoin, skipRanking)
+                : BuildJoinedChildCteSql(child, correlationPredicates, keyAliases, keyExpressions, context, pageJoin, skipRanking);
         }
 
         /// <summary>
@@ -698,11 +883,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> keyAliases,
             List<string> keyExpressions,
             OracleBuildContext context,
-            string? pageRestriction,
+            string? pageJoin,
             bool skipRanking)
         {
             string predicates = JoinPredicateStrings(
-                pageRestriction,
                 child.GetDbPolicyForOperation(EntityActionOperation.Read),
                 child.FilterPredicates,
                 Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
@@ -714,7 +898,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string keySelect = string.Join(", ", keyExpressions.Zip(
                 keyAliases, (expression, alias) => $"{expression} AS {QuoteIdentifier(alias)}"));
             string baseFrom = $"{QuoteRelation(child.DatabaseObject.SchemaName, child.DatabaseObject.Name)} " +
-                              $"{childAlias}{Build(child.Joins)}";
+                              $"{childAlias}{Build(child.Joins)}" +
+                              (pageJoin ?? string.Empty);
             string exposedSelect = BuildRankedExposedColumns(child, childAlias, context);
 
             string coreSelect = $"SELECT {exposedSelect}, {keySelect}";
@@ -810,13 +995,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> keyAliases,
             List<string> keyExpressions,
             OracleBuildContext context,
-            string? pageRestriction,
+            string? pageJoin,
             bool skipRanking)
         {
-            string fromSql = BuildFromSql(child, context);
+            string fromSql = BuildFromSql(child, context) + (pageJoin ?? string.Empty);
 
             string predicates = JoinPredicateStrings(
-                pageRestriction,
                 child.GetDbPolicyForOperation(EntityActionOperation.Read),
                 child.FilterPredicates,
                 Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
