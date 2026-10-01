@@ -787,12 +787,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         // The plan model is internal, so the shared interface is satisfied explicitly while the
         // concrete methods stay internal for tests and the engine-side call sites of this build.
-        bool IRelationalReadPlanBuilder.TryBuildRelationalReadPlan(
-            SqlQueryStructure root,
-            IReadOnlyDictionary<string, IReadOnlyList<object?[]>> pageKeysByJoinAlias,
-            out RelationalReadPlan? plan)
-            => TryBuildRelationalReadPlan(root, pageKeysByJoinAlias, out plan);
-
         bool IRelationalReadPlanBuilder.TryBuildRelationalPageCursor(
             SqlQueryStructure root,
             out RelationalReadCursor? pageCursor)
@@ -805,34 +799,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             => TryBuildRelationalChildCursors(parentCursor, pageKeysByJoinAlias, out childCursors);
 
         /// <summary>
-        /// Builds the full relational plan for a request: the page cursor plus one cursor per
-        /// relationship, scoped by the parent key values already read from the page cursor rows
-        /// (<paramref name="pageKeysByJoinAlias"/> maps a relationship alias to one array of
-        /// key values per parent row, in <see cref="TryGetCorrelationKeys"/> order).
-        /// </summary>
-        internal bool TryBuildRelationalReadPlan(
-            SqlQueryStructure root,
-            IReadOnlyDictionary<string, IReadOnlyList<object?[]>> pageKeysByJoinAlias,
-            out RelationalReadPlan? plan)
-        {
-            plan = null;
-            if (!TryBuildRelationalPageCursor(root, out RelationalReadCursor? pageCursor)
-                || !TryBuildRelationalChildCursors(pageCursor!, pageKeysByJoinAlias, out IReadOnlyList<RelationalReadCursor>? childCursors))
-            {
-                return false;
-            }
-
-            plan = new RelationalReadPlan(pageCursor!, childCursors!);
-            return true;
-        }
-
-        /// <summary>
-        /// Builds the request-page cursor of the relational read plan: the root's filters (with
-        /// nested-relationship filters rewritten as set-based key CTEs), policy, keyset predicate,
-        /// ordering and limit applied to one flat row set. No JSON functions are emitted; nested
-        /// documents are assembled in C#. Returns false when the root cannot be represented as
-        /// flat rows (multiple-create read-back, groupBy, no deterministic order) or when a
-        /// relationship in the tree is not correlated by plain column equalities.
+        /// Builds the request-page cursor: the root's filters (with nested-relationship filters
+        /// rewritten as set-based key CTEs), policy, keyset predicate, ordering, limit and any
+        /// aggregation projected as one flat row set. No JSON functions are emitted; documents
+        /// are assembled in C#. Returns false only for the shapes without a relational form:
+        /// a groupBy root with relationship selections, or a relationship that is not correlated
+        /// by plain column equalities.
         /// </summary>
         internal bool TryBuildRelationalPageCursor(SqlQueryStructure root, out RelationalReadCursor? pageCursor)
         {
