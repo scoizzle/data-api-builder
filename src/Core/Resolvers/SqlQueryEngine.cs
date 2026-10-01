@@ -365,7 +365,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (queryBuilder is IRelationalReadPlanBuilder planBuilder
                 && planBuilder.TryBuildRelationalPageCursor(structure, out RelationalReadCursor? pageCursor))
             {
-                if (!entityCacheApplies)
+                // A document whose relationships are served by separate child cursors cannot be
+                // keyed by the page cursor's SQL alone: child selections and child-only arguments
+                // (first, orderBy, nested filters) are rendered into those cursors, so two
+                // different requests could share a cache key and serve the wrong document. Those
+                // reads bypass the cache; flat, point, groupBy and flattened-to-one reads (whose
+                // full shape is in the page cursor SQL) stay cacheable.
+                if (!entityCacheApplies || HasRelationshipCursors(pageCursor!.Fields))
                 {
                     return await RelationalReadExecutor.ExecuteAsync(
                         planBuilder,
@@ -447,6 +453,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             return response;
+        }
+
+        /// <summary>
+        /// Whether any projected field is served by a relationship cursor rather than by the
+        /// cursor's own row source.
+        /// </summary>
+        private static bool HasRelationshipCursors(IReadOnlyList<RelationalReadField> fields)
+        {
+            foreach (RelationalReadField field in fields)
+            {
+                if (field.RelationJoinAlias is not null || HasRelationshipCursors(field.Children))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

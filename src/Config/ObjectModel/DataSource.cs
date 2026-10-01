@@ -159,8 +159,9 @@ public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 /// ORA-01013 "user requested cancel of current operation". ODP.NET's own default is 0 (wait
 /// forever), unlike the other ADO.NET providers whose default is 30 seconds, so DAB applies
 /// <see cref="DEFAULT_COMMAND_TIMEOUT_SECONDS"/> unless overridden. 0 disables the cap.
-/// The value is applied process-wide (ODP.NET exposes it globally); when several Oracle data
-/// sources configure different values, the strictest positive value wins.
+/// The cap is applied per command (OracleCommand.CommandTimeout) rather than through ODP.NET's
+/// process-wide OracleConfiguration.CommandTimeout, which ODP.NET rejects once a connection has
+/// been opened (ORA-50099).
 /// </param>
 public record OracleOptions(int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS) : IDataSourceOptions
 {

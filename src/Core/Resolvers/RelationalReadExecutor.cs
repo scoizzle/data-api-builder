@@ -4,9 +4,11 @@
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.AspNetCore.Http;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
@@ -129,7 +131,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 if (!context.PlanBuilder.TryBuildRelationalChildCursors(cursor, batchKeys, out IReadOnlyList<RelationalReadCursor>? childCursors))
                 {
-                    break;
+                    // The page cursor already validated every shape reachable from the request,
+                    // so this indicates a nested shape without a relational form. Failing loudly
+                    // is required: silently dropping the relationship would return a partial
+                    // document that looks valid to the caller.
+                    throw new DataApiBuilderException(
+                        message: "The query's nested relationship shape cannot be rendered as a relational read plan.",
+                        statusCode: HttpStatusCode.InternalServerError,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed);
                 }
 
                 foreach (RelationalReadCursor child in childCursors!)

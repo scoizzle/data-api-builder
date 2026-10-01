@@ -7,19 +7,7 @@ using Azure.DataApiBuilder.Core.Models;
 namespace Azure.DataApiBuilder.Core.Resolvers
 {
     /// <summary>
-    /// A nested read rendered as flat relational row sets instead of database JSON functions:
-    /// one cursor for the request page and one cursor per relationship, assembled into the JSON
-    /// document in C#. This is the engine-agnostic counterpart of the single-JSON-column shape
-    /// the other database engines produce in SQL (MSSQL FOR JSON, PostgreSQL/MySQL json
-    /// functions); an engine opts in by implementing <see cref="IRelationalReadPlanBuilder"/>
-    /// and executing the plan through its query executor.
-    /// </summary>
-    internal sealed record RelationalReadPlan(
-        RelationalReadCursor PageCursor,
-        IReadOnlyList<RelationalReadCursor> ChildCursors);
-
-    /// <summary>
-    /// One flat row set of a relational plan. All payload columns are projected with explicit
+    /// One flat row set of a read rendered as relational rows. All payload columns are projected with explicit
     /// aliases; correlation keys are projected as additional k0.. aliases so the executor can
     /// pass their values to the next level and the assembler can attach rows to their parents.
     /// </summary>
@@ -56,8 +44,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
     /// <summary>
     /// A bind whose value is one parent-side key value for one parent row. The executor adds it
-    /// to the child cursor's command; <see cref="SourceColumn"/> is the physical parent column
-    /// so the executor can apply the column's bind type.
+    /// to the child cursor's command; <see cref="SourceColumn"/> identifies the physical parent
+    /// column the value was read from.
     /// </summary>
     internal sealed record RelationalReadBind(string Name, object? Value, string SourceColumn);
 
