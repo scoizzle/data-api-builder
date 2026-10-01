@@ -26,14 +26,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>Alias of the DISTINCT page-key set joined by direct child aggregates.</summary>
         private const string PageJoinAlias = "dab_page";
 
-        /// <summary>
-        /// Oracle rejects IN lists with more than 1000 expressions (each chunk is emitted as its
-        /// own OR'd IN list) and a statement can carry at most 65535 binds. Child cursors bind one
-        /// entry per page key per correlation column, so pages beyond this bound fall back to the
-        /// single-query JSON path instead of emitting a pathological statement.
-        /// </summary>
-        private const int MaxPageKeysForBindList = 10000;
-
         /// <summary>Maximum expressions in one Oracle IN list (ORA-01795 beyond it).</summary>
         private const int MaxInListExpressions = 1000;
         /// <summary>
@@ -845,12 +837,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         internal bool TryBuildRelationalPageCursor(SqlQueryStructure root, out RelationalReadCursor? pageCursor)
         {
             pageCursor = null;
-            if (root.IsMultipleCreateOperation
+            if (root.GroupByMetadata.Fields.Count > 0 && root.JoinQueries.Count > 0)
+            {
                 // A groupBy root is rendered as flat aggregate rows; nested relationships on a
                 // groupBy query have no relational form, so that shape keeps the JSON path.
-                || (root.GroupByMetadata.Fields.Count > 0 && root.JoinQueries.Count > 0)
-                || (root.Limit() ?? 1) > MaxPageKeysForBindList)
-            {
                 return false;
             }
 
