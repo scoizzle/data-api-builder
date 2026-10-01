@@ -27,10 +27,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private const string PageJoinAlias = "dab_page";
 
         /// <summary>
-        /// Oracle rejects IN lists with more than 1000 expressions. Child cursors bind one entry
-        /// per page key, so pages larger than this fall back to the single-query JSON path.
+        /// Oracle rejects IN lists with more than 1000 expressions (each chunk is emitted as its
+        /// own OR'd IN list) and a statement can carry at most 65535 binds. Child cursors bind one
+        /// entry per page key per correlation column, so pages beyond this bound fall back to the
+        /// single-query JSON path instead of emitting a pathological statement.
         /// </summary>
-        private const int MaxPageKeysForBindList = 1000;
+        private const int MaxPageKeysForBindList = 10000;
+
+        /// <summary>Maximum expressions in one Oracle IN list (ORA-01795 beyond it).</summary>
+        private const int MaxInListExpressions = 1000;
         /// <summary>
         /// Indicator emitted by the fallback-to-update branch when the target row does not exist
         /// (no row matched the primary key, and no update policy exists to explain a no-match).
@@ -841,8 +846,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             pageCursor = null;
             if (root.IsMultipleCreateOperation
-                || root.GroupByMetadata.Fields.Count > 0
-                || root.OrderByColumns.Count == 0
+                // A groupBy root is rendered as flat aggregate rows; nested relationships on a
+                // groupBy query have no relational form, so that shape keeps the JSON path.
+                || (root.GroupByMetadata.Fields.Count > 0 && root.JoinQueries.Count > 0)
                 || (root.Limit() ?? 1) > MaxPageKeysForBindList)
             {
                 return false;
@@ -859,6 +865,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return false;
             }
 
+            // Aggregate columns are not part of SqlQueryStructure.Columns; they are rendered
+            // separately by the JSON builder and must be projected here for the assembler.
+            foreach (AggregationOperation aggregation in root.GroupByMetadata.Aggregations)
+            {
+                fields.Add(projection.AddScalar(Build(aggregation.Column), aggregation.Column.OperationAlias));
+            }
+
             // Reuse the page predicate rewrite (currently applied to the keyed-CTE page) so the
             // root never probes a child table once per candidate parent; the nested-filter key
             // CTEs are emitted on this cursor's own WITH clause.
@@ -872,7 +885,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             fromSql += string.Concat(keySetJoins);
             string sql = $"SELECT {projection.SelectList} FROM {fromSql} " +
-                         $"WHERE {BuildStructurePredicates(root, predicates)}{BuildOrderBy(root)} " +
+                         $"WHERE {BuildStructurePredicates(root, predicates)}" +
+                         $"{BuildGroupBy(root)}{BuildHaving(root)}{BuildOrderBy(root)} " +
                          $"OFFSET 0 ROWS FETCH NEXT {(root.Limit() ?? 1).ToString(CultureInfo.InvariantCulture)} ROWS ONLY";
             if (context.Ctes.Count > 0)
             {
@@ -1036,7 +1050,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string leftSide = keyExpressions.Count == 1
                 ? keyExpressions[0]
                 : $"({string.Join(", ", keyExpressions)})";
-            string pageKeyPredicate = $"{leftSide} IN ({string.Join(", ", keyRows)})";
+
+            // Oracle caps one IN list at 1000 expressions (ORA-01795); larger pages are split
+            // into several OR'd lists over the same bind values.
+            List<string> keyPredicates = new();
+            for (int start = 0; start < keyRows.Count; start += MaxInListExpressions)
+            {
+                IEnumerable<string> chunk = keyRows.Skip(start).Take(MaxInListExpressions);
+                keyPredicates.Add($"{leftSide} IN ({string.Join(", ", chunk)})");
+            }
+
+            string pageKeyPredicate = keyPredicates.Count == 1
+                ? keyPredicates[0]
+                : $"({string.Join(" OR ", keyPredicates)})";
 
             string predicateSql = JoinPredicateStrings(
                 child.GetDbPolicyForOperation(EntityActionOperation.Read),

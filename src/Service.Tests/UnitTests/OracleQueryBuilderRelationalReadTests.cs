@@ -10,6 +10,7 @@ using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.Sql;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 
@@ -166,15 +167,116 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        public void PageCursor_PageLargerThanOracleInListLimit_FallsBackToJsonPlan()
+        public void PageCursor_PageBeyondBindBudget_FallsBackToJsonPlan()
         {
             (SqlQueryStructure parent, _) = CreateParentWithListChild(PredicateOperation.Equal);
-            SetLimit(parent, 1001);
+            SetLimit(parent, 10001);
 
             bool built = new OracleQueryBuilder().TryBuildRelationalPageCursor(parent, out RelationalReadCursor? cursor);
 
-            Assert.IsFalse(built, "More page keys than an Oracle IN list accepts must use the JSON path.");
+            Assert.IsFalse(built, "Pages whose child binds would exceed Oracle's statement budget must use the JSON path.");
             Assert.IsNull(cursor);
+        }
+
+        [TestMethod]
+        public void PageCursor_FlatQuery_ProjectsRowsWithoutJson()
+        {
+            SqlQueryStructure structure = CreateFlatStructure();
+
+            bool built = new OracleQueryBuilder().TryBuildRelationalPageCursor(structure, out RelationalReadCursor? cursor);
+
+            Assert.IsTrue(built);
+            Assert.IsNotNull(cursor);
+            Assert.IsNull(cursor.JoinAlias);
+            Assert.IsFalse(cursor.Sql.Contains("JSON_"));
+            StringAssert.Contains(cursor.Sql, "\"TABLE0\".\"NAME\" AS \"name\"");
+            StringAssert.Contains(cursor.Sql, "FROM \"DBO\".\"ITEMS\" \"TABLE0\"");
+            StringAssert.Contains(cursor.Sql, "OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY");
+            Assert.AreEqual(2, cursor.Fields.Count);
+            Assert.IsTrue(cursor.Fields.All(field => field.RelationJoinAlias is null));
+        }
+
+        [TestMethod]
+        public void PageCursor_GroupBy_ProjectsAggregateRowsWithoutJson()
+        {
+            SqlQueryStructure structure = CreateFlatStructure();
+            SetBaseProperty(structure, "Columns", new List<LabelledColumn>
+            {
+                new("dbo", "items", "NAME", "name", "table0")
+            });
+            GroupByMetadata groupBy = new()
+            {
+                RequestedFields = true,
+                RequestedAggregations = true,
+            };
+            groupBy.Fields["name"] = new Column("dbo", "items", "NAME", "table0");
+            groupBy.Aggregations.Add(new AggregationOperation(
+                new AggregationColumn("dbo", "items", "ID", SchemaConverter.AggregationType.count, "count", distinct: false, "table0")));
+            SetField(structure, "GroupByMetadata", groupBy);
+
+            bool built = new OracleQueryBuilder().TryBuildRelationalPageCursor(structure, out RelationalReadCursor? cursor);
+
+            Assert.IsTrue(built);
+            Assert.IsNotNull(cursor);
+            Assert.IsFalse(cursor.Sql.Contains("JSON_"));
+            StringAssert.Contains(cursor.Sql, "COUNT(\"TABLE0\".\"ID\")");
+            StringAssert.Contains(cursor.Sql, "AS \"count\"");
+            StringAssert.Contains(cursor.Sql, "GROUP BY \"TABLE0\".\"NAME\"");
+            Assert.IsTrue(cursor.Fields.Any(field => field.JsonName == "count" && field.Alias == "count"));
+        }
+
+        [TestMethod]
+        public void ChildCursor_PageKeysBeyondInListLimit_ChunksPredicates()
+        {
+            (SqlQueryStructure parent, _) = CreateParentWithListChild(PredicateOperation.Equal);
+            OracleQueryBuilder builder = new();
+            Assert.IsTrue(builder.TryBuildRelationalPageCursor(parent, out RelationalReadCursor? pageCursor));
+
+            object?[][] keys = Enumerable.Range(1, 2500).Select(value => new object?[] { value }).ToArray();
+            Assert.IsTrue(builder.TryBuildRelationalChildCursors(
+                pageCursor!,
+                new Dictionary<string, IReadOnlyList<object?[]>> { ["table1_subq"] = keys },
+                out IReadOnlyList<RelationalReadCursor>? children));
+
+            RelationalReadCursor cursor = children!.Single();
+            Assert.AreEqual(2500, cursor.Binds.Count);
+            Assert.AreEqual(3, System.Text.RegularExpressions.Regex.Matches(cursor.Sql, @"IN \(").Count,
+                "2500 keys must split into three OR'd IN lists.");
+            StringAssert.Contains(cursor.Sql, " OR ");
+        }
+
+        private static SqlQueryStructure CreateFlatStructure()
+        {
+            SourceDefinition source = new();
+            source.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("NAME", new ColumnDefinition { SystemType = typeof(string) });
+            DatabaseTable table = new("dbo", "items") { TableDefinition = source };
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(x => x.GetSourceDefinition("Item")).Returns(source);
+
+            SqlQueryStructure structure = CreateStructure(isList: true);
+            SetField(structure, "EntityName", "Item");
+            SetField(structure, "MetadataProvider", metadata.Object);
+            SetField(structure, "DatabaseObject", table);
+            SetField(structure, "SourceAlias", "table0");
+            SetBaseProperty(structure, "Columns", new List<LabelledColumn>
+            {
+                new("dbo", "items", "ID", "id", "table0"),
+                new("dbo", "items", "NAME", "name", "table0")
+            });
+            SetField(structure, "Predicates", new List<Predicate>());
+            SetField(structure, "DbPolicyPredicatesForOperations", new Dictionary<EntityActionOperation, string?>());
+            SetField(structure, "Joins", new List<SqlJoinStructure>());
+            SetField(structure, "FilterPredicates", string.Empty);
+            SetField(structure, "OrderByColumns", new List<OrderByColumn>
+            {
+                new("dbo", "items", "ID", "table0")
+            });
+            SetField(structure, "PaginationMetadata", new PaginationMetadata(structure));
+            SetField(structure, "GroupByMetadata", new GroupByMetadata());
+            SetField(structure, "Counter", new IncrementingInteger());
+            SetLimit(structure, 100);
+            return structure;
         }
 
         private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithListChild(
