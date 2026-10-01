@@ -2406,10 +2406,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc/>
-        public override string BuildForeignKeyInfoQuery(int numberOfParameters)
+        public override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
         {
-            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
-            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
+            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);
+            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfTableParameters);
 
             // Oracle uses :param syntax instead of @param
             string tableSchemaParamsForInClause = string.Join(", :", schemaNameParams);
@@ -2418,7 +2418,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // Oracle uses its data dictionary views instead of INFORMATION_SCHEMA
             // ALL_CONSTRAINTS contains constraint information (CONSTRAINT_TYPE = 'R' for foreign keys)
             // ALL_CONS_COLUMNS contains column mappings for constraints
-            // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint
+            // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint.
+            // The owner and table predicates compare the bound values directly: OracleMetadataProvider
+            // uppercases them, and wrapping the dictionary columns in UPPER() would make the
+            // predicates non-sargable on the data dictionary views.
             string foreignKeyQuery = $@"
                 SELECT
                     RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
@@ -2445,8 +2448,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         AND RefConsCol.POSITION = RefConsPkCol.POSITION
                 WHERE
                     RefCons.CONSTRAINT_TYPE = 'R'
-                    AND UPPER(RefCons.OWNER) IN (:{tableSchemaParamsForInClause})
-                    AND UPPER(RefCons.TABLE_NAME) IN (:{tableNameParamsForInClause})";
+                    AND RefCons.OWNER IN (:{tableSchemaParamsForInClause})
+                    AND RefCons.TABLE_NAME IN (:{tableNameParamsForInClause})";
 
             return foreignKeyQuery;
         }
