@@ -350,38 +350,50 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             IQueryBuilder queryBuilder = _queryFactory.GetQueryBuilder(databaseType);
             IQueryExecutor queryExecutor = _queryFactory.GetQueryExecutor(databaseType);
 
-            // Engines that can render a read as flat relational row sets (Oracle first) execute
-            // those cursors and assemble the JSON document in C# instead of producing a single SQL
-            // JSON document; nested relationships become one cursor per level. Reads on an
-            // uncommitted local transaction and reads the entity cache would serve keep the JSON
-            // path.
-            if (!isMultipleCreateOperation
-                && dbConnection is null
-                && queryBuilder is IRelationalReadPlanBuilder planBuilder
-                && !IsEntityCacheApplicable(runtimeConfig, structure)
-                && planBuilder.TryBuildRelationalPageCursor(structure, out RelationalReadCursor? pageCursor))
-            {
-                return await RelationalReadExecutor.ExecuteAsync(
-                    planBuilder,
-                    pageCursor!,
-                    structure,
-                    queryExecutor,
-                    dataSourceName,
-                    _httpContextAccessor.HttpContext);
-            }
-
-            string queryString;
-
-            // Open connection and execute query using _queryExecutor
             if (isMultipleCreateOperation)
             {
                 structure.IsMultipleCreateOperation = true;
-                queryString = queryBuilder.Build(structure);
             }
-            else
+
+            bool entityCacheApplies = dbConnection is null && IsEntityCacheApplicable(runtimeConfig, structure);
+
+            // Engines that can render a read as flat relational row sets (Oracle first) execute
+            // those cursors and assemble the JSON document in C# instead of producing a single SQL
+            // JSON document; nested relationships become one cursor per level. Transaction-bound
+            // reads (multiple-create follow-ups) run on the caller's connection, and cached reads
+            // key the cache by the page cursor's SQL.
+            if (queryBuilder is IRelationalReadPlanBuilder planBuilder
+                && planBuilder.TryBuildRelationalPageCursor(structure, out RelationalReadCursor? pageCursor))
             {
-                queryString = queryBuilder.Build(structure);
+                if (!entityCacheApplies)
+                {
+                    return await RelationalReadExecutor.ExecuteAsync(
+                        planBuilder,
+                        pageCursor!,
+                        structure,
+                        queryExecutor,
+                        dataSourceName,
+                        _httpContextAccessor.HttpContext,
+                        dbConnection,
+                        dbTransaction);
+                }
+
+                return await GetResultInCacheScenario(
+                    runtimeConfig,
+                    structure,
+                    queryString: pageCursor!.Sql,
+                    dataSourceName,
+                    queryExecutor,
+                    cacheEntryLevel: runtimeConfig.GetEntityCacheEntryLevel(structure.EntityName),
+                    executeQuery: async () =>
+                    {
+                        using JsonDocument? document = await RelationalReadExecutor.ExecuteAsync(
+                            planBuilder, pageCursor!, structure, queryExecutor, dataSourceName, _httpContextAccessor.HttpContext);
+                        return document is null ? default : document.RootElement.Clone();
+                    });
             }
+
+            string queryString = queryBuilder.Build(structure);
 
             // Follow-up reads on an uncommitted local transaction must not use the cache (different connection).
             if (dbConnection is null && runtimeConfig.CanUseCache())
@@ -438,8 +450,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Whether the read would be served through the entity cache. The relational plan has no
-        /// query text to key the cache with, so those reads keep the JSON path.
+        /// Whether the read would be served through the entity cache.
         /// </summary>
         private static bool IsEntityCacheApplicable(RuntimeConfig runtimeConfig, SqlQueryStructure structure)
         {
@@ -454,7 +465,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string queryString,
             string dataSourceName,
             IQueryExecutor queryExecutor,
-            EntityCacheLevel cacheEntryLevel)
+            EntityCacheLevel cacheEntryLevel,
+            Func<Task<JsonElement>>? executeQuery = null)
         {
             DatabaseQueryMetadata queryMetadata = new(queryText: queryString, dataSource: dataSourceName, queryParameters: structure.Parameters);
             JsonElement? result;
@@ -463,13 +475,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // Do not get result from cache even if it exists, still cache result.
                 case SqlQueryStructure.CACHE_CONTROL_NO_CACHE:
-                    result = await queryExecutor.ExecuteQueryAsync(
-                        sqltext: queryMetadata.QueryText,
-                        parameters: queryMetadata.QueryParameters,
-                        dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonElement>,
-                        httpContext: _httpContextAccessor.HttpContext!,
-                        args: null,
-                        dataSourceName: queryMetadata.DataSource);
+                    result = executeQuery is null
+                        ? await queryExecutor.ExecuteQueryAsync(
+                            sqltext: queryMetadata.QueryText,
+                            parameters: queryMetadata.QueryParameters,
+                            dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonElement>,
+                            httpContext: _httpContextAccessor.HttpContext!,
+                            args: null,
+                            dataSourceName: queryMetadata.DataSource)
+                        : await executeQuery();
                     _cache.Set<JsonElement?>(
                         queryMetadata,
                         cacheEntryTtl: runtimeConfig.GetEntityCacheEntryTtl(entityName: structure.EntityName),
@@ -487,13 +501,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     }
                     else
                     {
-                        result = await queryExecutor.ExecuteQueryAsync(
-                            sqltext: queryMetadata.QueryText,
-                            parameters: queryMetadata.QueryParameters,
-                            dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonElement>,
-                            httpContext: _httpContextAccessor.HttpContext!,
-                            args: null,
-                            dataSourceName: queryMetadata.DataSource);
+                        result = executeQuery is null
+                            ? await queryExecutor.ExecuteQueryAsync(
+                                sqltext: queryMetadata.QueryText,
+                                parameters: queryMetadata.QueryParameters,
+                                dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonElement>,
+                                httpContext: _httpContextAccessor.HttpContext!,
+                                args: null,
+                                dataSourceName: queryMetadata.DataSource)
+                            : await executeQuery();
                     }
 
                     return ParseResultIntoJsonDocument(result);
@@ -517,11 +533,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     return ParseResultIntoJsonDocument(result);
 
                 default:
-                    result = await _cache.GetOrSetAsync<JsonElement>(
-                        queryExecutor,
-                        queryMetadata,
-                        cacheEntryTtl: runtimeConfig.GetEntityCacheEntryTtl(entityName: structure.EntityName),
-                        cacheEntryLevel);
+                    result = executeQuery is null
+                        ? await _cache.GetOrSetAsync<JsonElement>(
+                            queryExecutor,
+                            queryMetadata,
+                            cacheEntryTtl: runtimeConfig.GetEntityCacheEntryTtl(entityName: structure.EntityName),
+                            cacheEntryLevel)
+                        : await _cache.GetOrSetAsync<JsonElement>(
+                            executeQuery,
+                            queryMetadata,
+                            cacheEntryTtl: runtimeConfig.GetEntityCacheEntryTtl(entityName: structure.EntityName),
+                            cacheEntryLevel);
                     return ParseResultIntoJsonDocument(result);
             }
         }

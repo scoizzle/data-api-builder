@@ -21,9 +21,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     internal static class RelationalReadExecutor
     {
         /// <summary>
+        /// Maximum binds one child cursor statement may carry. Oracle allows 65535 binds per
+        /// statement; staying well below keeps the generated SQL and bind arrays sane.
+        /// </summary>
+        private const int MaxBindsPerChildCursor = 30000;
+
+        /// <summary>
         /// Executes the page cursor and all nested cursors, returning the JSON document the
         /// JSON-based engines would have returned: an array for list queries (empty when there
         /// are no rows) and a single object for point queries (null when there is no row).
+        /// When <paramref name="connection"/> is supplied (multiple-create follow-up reads on an
+        /// uncommitted transaction) every cursor runs on that connection and transaction.
         /// </summary>
         public static async Task<JsonDocument?> ExecuteAsync(
             IRelationalReadPlanBuilder planBuilder,
@@ -31,10 +39,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             SqlQueryStructure structure,
             IQueryExecutor queryExecutor,
             string dataSourceName,
-            HttpContext? httpContext)
+            HttpContext? httpContext,
+            DbConnection? connection = null,
+            DbTransaction? transaction = null)
         {
-            List<RelationalReadRow> pageRows = await ExecuteCursorAsync(
-                queryExecutor, pageCursor, structure.Parameters, dataSourceName, httpContext);
+            RelationalExecutionContext context = new(
+                planBuilder,
+                queryExecutor,
+                structure.Parameters,
+                dataSourceName,
+                httpContext,
+                connection,
+                transaction);
+
+            List<RelationalReadRow> pageRows = await ExecuteCursorAsync(context, pageCursor);
 
             if (!pageCursor.IsList && pageRows.Count == 0)
             {
@@ -42,8 +60,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return null;
             }
 
-            List<JsonNode?> rowValues = await AssembleRowsAsync(
-                planBuilder, queryExecutor, pageCursor, pageRows, structure.Parameters, dataSourceName, httpContext);
+            List<JsonNode?> rowValues = await AssembleRowsAsync(context, pageCursor, pageRows);
 
             JsonNode result = pageCursor.IsList
                 ? new JsonArray(rowValues.Select(value => value?.DeepClone()).ToArray())
@@ -57,29 +74,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// once per level, then each parent row picks its children by correlation key.
         /// </summary>
         private static async Task<List<JsonNode?>> AssembleRowsAsync(
-            IRelationalReadPlanBuilder planBuilder,
-            IQueryExecutor queryExecutor,
+            RelationalExecutionContext context,
             RelationalReadCursor cursor,
-            List<RelationalReadRow> rows,
-            IDictionary<string, DbConnectionParam> baseParameters,
-            string dataSourceName,
-            HttpContext? httpContext)
+            List<RelationalReadRow> rows)
         {
-            // alias -> (child row values, key tuple per child row per correlation alias value)
-            Dictionary<string, ChildCursorResult> children = new(StringComparer.Ordinal);
-            IReadOnlyDictionary<string, IReadOnlyList<object?[]>> keysByAlias = BuildChildKeys(cursor, rows);
-            if (keysByAlias.Count > 0
-                && planBuilder.TryBuildRelationalChildCursors(cursor, keysByAlias, out IReadOnlyList<RelationalReadCursor>? childCursors))
-            {
-                foreach (RelationalReadCursor child in childCursors!)
-                {
-                    List<RelationalReadRow> childRows = await ExecuteCursorAsync(
-                        queryExecutor, child, baseParameters, dataSourceName, httpContext);
-                    List<JsonNode?> childValues = await AssembleRowsAsync(
-                        planBuilder, queryExecutor, child, childRows, baseParameters, dataSourceName, httpContext);
-                    children[child.JoinAlias!] = new ChildCursorResult(child, childRows, childValues);
-                }
-            }
+            Dictionary<string, ChildCursorResult> children = await ExecuteChildrenAsync(context, cursor, rows);
 
             List<JsonNode?> values = new(rows.Count);
             foreach (RelationalReadRow row in rows)
@@ -88,6 +87,72 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             return values;
+        }
+
+        /// <summary>
+        /// Executes every relationship cursor nested under the cursor's rows and groups the
+        /// assembled child values by parent key. Parent keys are fetched in batches sized to stay
+        /// within the per-statement bind budget and the batches are merged here, so arbitrarily
+        /// large pages stay on the relational path.
+        /// </summary>
+        private static async Task<Dictionary<string, ChildCursorResult>> ExecuteChildrenAsync(
+            RelationalExecutionContext context,
+            RelationalReadCursor cursor,
+            List<RelationalReadRow> rows)
+        {
+            Dictionary<string, ChildCursorResult> children = new(StringComparer.Ordinal);
+            IReadOnlyDictionary<string, IReadOnlyList<object?[]>> keysByAlias = BuildChildKeys(cursor, rows);
+            if (keysByAlias.Count == 0)
+            {
+                return children;
+            }
+
+            int maxKeyColumns = keysByAlias.Keys.Max(alias => cursor.CorrelationAliasesByJoinAlias[alias].Count);
+            int batchSize = Math.Max(1, MaxBindsPerChildCursor / Math.Max(1, maxKeyColumns));
+            Dictionary<string, (RelationalReadCursor Cursor, List<RelationalReadRow> Rows, List<JsonNode?> Values)> accumulated = new(StringComparer.Ordinal);
+
+            for (int start = 0; ; start += batchSize)
+            {
+                Dictionary<string, IReadOnlyList<object?[]>> batchKeys = new(StringComparer.Ordinal);
+                foreach ((string alias, IReadOnlyList<object?[]> keys) in keysByAlias)
+                {
+                    if (start < keys.Count)
+                    {
+                        batchKeys[alias] = keys.Skip(start).Take(batchSize).ToArray();
+                    }
+                }
+
+                if (batchKeys.Count == 0)
+                {
+                    break;
+                }
+
+                if (!context.PlanBuilder.TryBuildRelationalChildCursors(cursor, batchKeys, out IReadOnlyList<RelationalReadCursor>? childCursors))
+                {
+                    break;
+                }
+
+                foreach (RelationalReadCursor child in childCursors!)
+                {
+                    List<RelationalReadRow> childRows = await ExecuteCursorAsync(context, child);
+                    List<JsonNode?> childValues = await AssembleRowsAsync(context, child, childRows);
+                    if (!accumulated.TryGetValue(child.JoinAlias!, out var accumulator))
+                    {
+                        accumulator = (child, new List<RelationalReadRow>(), new List<JsonNode?>());
+                    }
+
+                    accumulator.Rows.AddRange(childRows);
+                    accumulator.Values.AddRange(childValues);
+                    accumulated[child.JoinAlias!] = accumulator;
+                }
+            }
+
+            foreach ((string alias, var accumulator) in accumulated)
+            {
+                children[alias] = new ChildCursorResult(accumulator.Cursor, accumulator.Rows, accumulator.Values);
+            }
+
+            return children;
         }
 
         private static JsonObject BuildRowObject(
@@ -193,16 +258,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         private static async Task<List<RelationalReadRow>> ExecuteCursorAsync(
-            IQueryExecutor queryExecutor,
-            RelationalReadCursor cursor,
-            IDictionary<string, DbConnectionParam> baseParameters,
-            string dataSourceName,
-            HttpContext? httpContext)
+            RelationalExecutionContext context,
+            RelationalReadCursor cursor)
         {
-            IDictionary<string, DbConnectionParam> parameters = baseParameters;
+            IDictionary<string, DbConnectionParam> parameters = context.Parameters;
             if (cursor.Binds.Count > 0)
             {
-                Dictionary<string, DbConnectionParam> withBinds = new(baseParameters);
+                Dictionary<string, DbConnectionParam> withBinds = new(context.Parameters);
                 foreach (RelationalReadBind bind in cursor.Binds)
                 {
                     withBinds[bind.Name] = new DbConnectionParam(bind.Value);
@@ -211,13 +273,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 parameters = withBinds;
             }
 
-            return await queryExecutor.ExecuteQueryAsync(
+            List<RelationalReadRow>? rows = context.Connection is null
+                ? await context.QueryExecutor.ExecuteQueryAsync(
                     sqltext: cursor.Sql,
                     parameters: parameters,
                     dataReaderHandler: ReadRowsAsync,
-                    dataSourceName: dataSourceName,
-                    httpContext: httpContext)
-                ?? new List<RelationalReadRow>();
+                    dataSourceName: context.DataSourceName,
+                    httpContext: context.HttpContext)
+                : await context.QueryExecutor.ExecuteQueryOnConnectionAsync(
+                    connection: context.Connection,
+                    sqltext: cursor.Sql,
+                    parameters: parameters,
+                    dataReaderHandler: ReadRowsAsync,
+                    dataSourceName: context.DataSourceName,
+                    transaction: context.Transaction,
+                    httpContext: context.HttpContext);
+
+            return rows ?? new List<RelationalReadRow>();
         }
 
         private static async Task<List<RelationalReadRow>> ReadRowsAsync(DbDataReader reader, List<string>? args)
@@ -285,6 +357,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 : value.ToString("zzz", CultureInfo.InvariantCulture);
             return $"{baseValue}{fractionText}{offset}";
         }
+
+        /// <summary>
+        /// Everything a cursor execution needs, so the recursive assembly methods do not carry
+        /// eight parameters each.
+        /// </summary>
+        private sealed record RelationalExecutionContext(
+            IRelationalReadPlanBuilder PlanBuilder,
+            IQueryExecutor QueryExecutor,
+            IDictionary<string, DbConnectionParam> Parameters,
+            string DataSourceName,
+            HttpContext? HttpContext,
+            DbConnection? Connection,
+            DbTransaction? Transaction);
 
         private sealed class RelationalReadRow
         {

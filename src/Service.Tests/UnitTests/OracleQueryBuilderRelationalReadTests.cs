@@ -167,15 +167,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        public void PageCursor_PageBeyondBindBudget_FallsBackToJsonPlan()
+        public void PageCursor_LargePage_RemainsOnRelationalPath()
         {
             (SqlQueryStructure parent, _) = CreateParentWithListChild(PredicateOperation.Equal);
             SetLimit(parent, 10001);
 
             bool built = new OracleQueryBuilder().TryBuildRelationalPageCursor(parent, out RelationalReadCursor? cursor);
 
-            Assert.IsFalse(built, "Pages whose child binds would exceed Oracle's statement budget must use the JSON path.");
-            Assert.IsNull(cursor);
+            // Child cursors are batched by the executor, so the page size is not capped here.
+            Assert.IsTrue(built);
+            Assert.IsNotNull(cursor);
+            StringAssert.Contains(cursor.Sql, "FETCH NEXT 10001 ROWS ONLY");
         }
 
         [TestMethod]
