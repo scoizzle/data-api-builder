@@ -167,6 +167,20 @@ Handle it either at the database or from the DAB connection string:
   "connection-string": "Data Source=...;User Id=...;Password=...;Statement Cache Size=50;Self Tuning=false;"
   ```
 
+### Command timeout
+
+ODP.NET's command timeout defaults to 0 (wait forever), while the other ADO.NET providers DAB uses default to 30 seconds. The Oracle executor caps every command (`OracleCommand.CommandTimeout`, applied in `PrepareDbCommand`) so a runaway query fails with `ORA-01013` instead of pinning the request. The default is 30 seconds and can be overridden per data source:
+
+```json
+"data-source": {
+  "database-type": "oracle",
+  "connection-string": "...",
+  "options": { "command-timeout": 60 }
+}
+```
+
+`command-timeout` is in seconds; `0` disables the cap. The cap is applied per command rather than through ODP.NET's process-wide `OracleConfiguration.CommandTimeout`, which ODP.NET rejects once any connection has been opened (`ORA-50099`) and would therefore break hot reload and long-lived processes.
+
 ### Test database
 
 The Oracle integration suite issues several hundred distinct statements, so it exhausts the default `open_cursors=300` partway through a full `TestCategory=ORACLE` run. The test container must either set `open_cursors=1500` or the test connection string must bound the statement cache; with either in place the full category passes. This is cursor-cache sizing, not a DAB query-path leak: 500 repeated list queries, 400 repeated upserts, and repeated `DatabaseSchema-Oracle.sql` re-initialization all leave the cursor count flat or plateaued.
