@@ -350,13 +350,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             IQueryBuilder queryBuilder = _queryFactory.GetQueryBuilder(databaseType);
             IQueryExecutor queryExecutor = _queryFactory.GetQueryExecutor(databaseType);
 
-            // Engines that can render a nested read as flat relational row sets (Oracle first)
-            // execute those cursors and assemble the JSON document in C# instead of producing a
-            // single SQL JSON document. Reads on an uncommitted local transaction and reads that
-            // the entity cache would serve keep the JSON path.
+            // Engines that can render a read as flat relational row sets (Oracle first) execute
+            // those cursors and assemble the JSON document in C# instead of producing a single SQL
+            // JSON document; nested relationships become one cursor per level. Reads on an
+            // uncommitted local transaction and reads the entity cache would serve keep the JSON
+            // path.
             if (!isMultipleCreateOperation
                 && dbConnection is null
-                && structure.JoinQueries.Count > 0
                 && queryBuilder is IRelationalReadPlanBuilder planBuilder
                 && !IsEntityCacheApplicable(runtimeConfig, structure)
                 && planBuilder.TryBuildRelationalPageCursor(structure, out RelationalReadCursor? pageCursor))
