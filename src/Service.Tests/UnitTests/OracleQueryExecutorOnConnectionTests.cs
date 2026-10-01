@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
@@ -129,6 +130,58 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     builder.ConnectionString.Contains("Encryption", StringComparison.OrdinalIgnoreCase),
                     builder.ConnectionString);
             }
+        }
+
+        /// <summary>
+        /// ODP.NET's command timeout defaults to 0 (no timeout); the executor caps each command
+        /// from the data-source option, falling back to the cross-provider default of 30 seconds.
+        /// </summary>
+        [TestMethod]
+        public void OracleCommandTimeoutIsAppliedPerCommandFromDataSourceOptions()
+        {
+            using OracleConnection conn = new("User Id=x;Password=y;Data Source=localhost:1521/x");
+
+            RuntimeConfig configured = CreateOracleConfig(
+                new Dictionary<string, object?> { ["command-timeout"] = 12 });
+            RuntimeConfigProvider configuredProvider = TestHelper.GenerateInMemoryRuntimeConfigProvider(configured);
+            OracleQueryExecutor configuredExecutor = new(
+                configuredProvider,
+                new OracleDbExceptionParser(configuredProvider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object);
+
+            Assert.AreEqual(12, configuredProvider.GetConfig().DataSource.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+            string configuredName = configuredProvider.GetConfig().GetDataSourceNamesToDataSourcesIterator().First().Key;
+            DbCommand configuredCommand = configuredExecutor.PrepareDbCommand(
+                conn, "SELECT 1 FROM DUAL", new Dictionary<string, DbConnectionParam>(), httpContext: null, configuredName);
+            Assert.AreEqual(12, configuredCommand.CommandTimeout);
+
+            RuntimeConfig defaults = CreateOracleConfig(new Dictionary<string, object?>());
+            RuntimeConfigProvider defaultsProvider = TestHelper.GenerateInMemoryRuntimeConfigProvider(defaults);
+            OracleQueryExecutor defaultsExecutor = new(
+                defaultsProvider,
+                new OracleDbExceptionParser(defaultsProvider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object);
+
+            string defaultsName = defaultsProvider.GetConfig().GetDataSourceNamesToDataSourcesIterator().First().Key;
+            DbCommand defaultsCommand = defaultsExecutor.PrepareDbCommand(
+                conn, "SELECT 1 FROM DUAL", new Dictionary<string, DbConnectionParam>(), httpContext: null, defaultsName);
+            Assert.AreEqual(OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS, defaultsCommand.CommandTimeout);
+        }
+
+        private static RuntimeConfig CreateOracleConfig(Dictionary<string, object?> options)
+        {
+            return new RuntimeConfig(
+                Schema: "",
+                DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", options),
+                Runtime: new(
+                    Rest: new(),
+                    GraphQL: new(),
+                    Mcp: new(),
+                    Host: new(null, null)
+                ),
+                Entities: new(new Dictionary<string, Entity>()));
         }
 
         [TestMethod]

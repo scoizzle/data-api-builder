@@ -62,6 +62,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         private Dictionary<string, bool> _dataSourceToSessionContextUsage;
 
+        /// <summary>
+        /// DatasourceName to the maximum time, in seconds, one command may run (0 disables).
+        /// Applied per command in <see cref="PrepareDbCommand(OracleConnection, string, IDictionary{string, DbConnectionParam}, HttpContext?, string)"/>;
+        /// ODP.NET's process-wide OracleConfiguration.CommandTimeout cannot be used because it
+        /// rejects assignment once any connection has been opened (ORA-50099), which hot reload
+        /// and long-lived processes would hit.
+        /// </summary>
+        private readonly Dictionary<string, int> _dataSourceCommandTimeouts = new(StringComparer.OrdinalIgnoreCase);
+
         private readonly RuntimeConfigProvider _runtimeConfigProvider;
 
         public OracleQueryExecutor(
@@ -105,8 +114,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             IEnumerable<KeyValuePair<string, DataSource>> oracledbs = _runtimeConfigProvider.GetConfig().GetDataSourceNamesToDataSourcesIterator().Where(x => x.Value.DatabaseType == DatabaseType.Oracle);
 
+            // ODP.NET's command timeout defaults to 0 (wait forever), unlike the other ADO.NET
+            // providers whose default is 30 seconds. Cap each data source's commands so a runaway
+            // query fails with ORA-01013 instead of pinning the request; 0 disables the cap.
             foreach ((string dataSourceName, DataSource dataSource) in oracledbs)
             {
+                OracleOptions oracleOptions = dataSource.GetTypedOptions<OracleOptions>() ?? new OracleOptions();
+                _dataSourceCommandTimeouts[dataSourceName] = oracleOptions.CommandTimeoutSeconds;
+
                 // Hosted/late-configured deployments must not send database traffic in cleartext.
                 // MySQL/PostgreSQL force SslMode=VerifyFull and MSSQL forces Encrypt=true; ODP.NET
                 // rejects SqlClient's "Encryption=true" keyword, so require native network encryption
@@ -155,6 +170,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             OracleCommand cmd = conn.CreateCommand();
             cmd.CommandType = CommandType.Text;
+
+            // ODP.NET waits forever by default; cap the command so a runaway query fails with
+            // ORA-01013 instead of pinning the request (see _dataSourceCommandTimeouts).
+            cmd.CommandTimeout = _dataSourceCommandTimeouts.TryGetValue(dataSourceName, out int commandTimeout)
+                ? commandTimeout
+                : OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS;
 
             // ODP.NET binds by POSITION by default, which mismatches DAB's named binds and causes
             // PL/SQL blocks that mix input binds, RETURNING output binds, and a REF CURSOR output
