@@ -86,12 +86,10 @@ namespace Azure.DataApiBuilder.Core.Services
         protected IAbstractQueryManagerFactory QueryManagerFactory { get; init; }
 
         /// <summary>
-        /// Maps an entity name to a DatabaseObject. Comparisons are ordinal and case-insensitive so
-        /// engines that surface catalog identifiers with a different case than the authored entity
-        /// name (e.g. Oracle) resolve correctly, without culture-sensitive semantics.
+        /// Maps an entity name to a DatabaseObject.
         /// </summary>
         public virtual Dictionary<string, DatabaseObject> EntityToDatabaseObject { get; set; } =
-            new(StringComparer.OrdinalIgnoreCase);
+            new(StringComparer.InvariantCulture);
 
         protected readonly ILogger<ISqlMetadataProvider> _logger;
 

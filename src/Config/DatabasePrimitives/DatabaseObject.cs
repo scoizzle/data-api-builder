@@ -138,6 +138,8 @@ public class StoredProcedureDefinition : SourceDefinition
     /// The list of input parameters
     /// Key: parameter name, Value: ParameterDefinition object
     /// </summary>
+    // Oracle reports subprogram arguments uppercase in ALL_ARGUMENTS while entities may author
+    // them in any case, so parameter lookup must be case-insensitive for Oracle to bind SP calls.
     public Dictionary<string, ParameterDefinition> Parameters { get; set; } = new(StringComparer.InvariantCultureIgnoreCase);
 
     /// <inheritdoc/>
