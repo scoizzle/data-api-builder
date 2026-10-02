@@ -412,7 +412,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             TargetInvocationException exception = Assert.ThrowsException<TargetInvocationException>(() =>
                 InvokeInstance<object?>(engine, "ProcessMultipleCreateInputField",
-                    Mock.Of<IMiddlewareContext>(), null, Mock.Of<ISqlMetadataProvider>(), structure, 0));
+                    Mock.Of<IMiddlewareContext>(), null, Mock.Of<ISqlMetadataProvider>(), structure, 0,
+                    // Reflection does not apply optional parameter defaults.
+                    null, null));
 
             Assert.IsInstanceOfType<DataApiBuilderException>(exception.InnerException);
         }
@@ -428,7 +430,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             TargetInvocationException exception = Assert.ThrowsException<TargetInvocationException>(() =>
                 InvokeInstance<object?>(engine, "ProcessMultipleCreateInputField",
-                    Mock.Of<IMiddlewareContext>(), new object(), Mock.Of<ISqlMetadataProvider>(), structure, 0));
+                    Mock.Of<IMiddlewareContext>(), new object(), Mock.Of<ISqlMetadataProvider>(), structure, 0,
+                    null, null));
 
             Assert.IsInstanceOfType<DataApiBuilderException>(exception.InnerException);
         }
@@ -444,7 +447,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             TargetInvocationException exception = Assert.ThrowsException<TargetInvocationException>(() =>
                 InvokeInstance<object?>(engine, "ProcessMultipleCreateInputField",
-                    Mock.Of<IMiddlewareContext>(), new List<IValueNode> { null! }, Mock.Of<ISqlMetadataProvider>(), structure, 0));
+                    Mock.Of<IMiddlewareContext>(), new List<IValueNode> { null! }, Mock.Of<ISqlMetadataProvider>(), structure, 0,
+                    null, null));
 
             Assert.IsInstanceOfType<DataApiBuilderException>(exception.InnerException);
         }
@@ -466,6 +470,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 operation,
                 new Dictionary<string, object?>(),
                 metadata,
+                null,
+                // Reflection does not apply optional parameter defaults: pass the connection
+                // and transaction explicitly.
+                null,
                 null
             })!;
 
@@ -499,7 +507,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     new Dictionary<string, object?>(),
                     definition,
                     linkingEntity,
-                    1));
+                    1,
+                    null,
+                    null));
 
             DataApiBuilderException error = (DataApiBuilderException)exception.InnerException!;
             Assert.AreEqual(
