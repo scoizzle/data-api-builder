@@ -15,6 +15,7 @@ using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Resolvers.Factories;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder;
 using Microsoft.Extensions.Logging;
 using Oracle.ManagedDataAccess.Client;
 using static Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLNaming;
@@ -34,6 +35,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// identity columns without needing the schema/table name as parameters.
         /// </summary>
         private readonly Dictionary<SourceDefinition, (string SchemaName, string TableName)> _sourceTableMap = new();
+        private readonly RuntimeConfigProvider _runtimeConfigProvider;
         private string? _defaultSchemaName;
 
         private static readonly Regex SelectIntoIdentityRegex = new(
@@ -53,6 +55,7 @@ namespace Azure.DataApiBuilder.Core.Services
             bool isValidateOnly = false)
             : base(runtimeConfigProvider, runtimeConfigValidator, queryManagerFactory, logger, dataSourceName, isValidateOnly)
         {
+            _runtimeConfigProvider = runtimeConfigProvider;
         }
 
         /// <summary>
@@ -350,6 +353,202 @@ namespace Azure.DataApiBuilder.Core.Services
 
                 _linkingEntities[linkingEntityName] = linkingEntity with { Mappings = mappings };
             }
+        }
+
+        /// <summary>
+        /// Creates linking-entity metadata for M:N relationships when multiple create is enabled.
+        /// Providers that support multiple create override the base no-op.
+        /// </summary>
+        protected override void PopulateMetadataForLinkingObject(
+            string entityName,
+            string targetEntityName,
+            string linkingObject,
+            Dictionary<string, DatabaseObject> sourceObjects)
+        {
+            if (!_runtimeConfigProvider.GetConfig().IsMultipleCreateOperationEnabled())
+            {
+                return;
+            }
+
+            string linkingEntityName = GraphQLUtils.GenerateLinkingEntityName(entityName, targetEntityName);
+
+            // Linking entities stay off REST/GraphQL endpoints. Schema generation still builds
+            // directional linking object types from this metadata when multiple create is enabled.
+            Entity linkingEntity = new(
+                Source: new EntitySource(Type: EntitySourceType.Table, Object: linkingObject, Parameters: null, KeyFields: null),
+                Fields: null,
+                Rest: new(Array.Empty<SupportedHttpVerb>(), Enabled: false),
+                GraphQL: new(Singular: linkingEntityName, Plural: linkingEntityName, Enabled: false),
+                Permissions: Array.Empty<EntityPermission>(),
+                Relationships: null,
+                Mappings: new(),
+                IsLinkingEntity: true);
+            _linkingEntities.TryAdd(linkingEntityName, linkingEntity);
+            PopulateDatabaseObjectForEntity(linkingEntity, linkingEntityName, sourceObjects);
+        }
+
+        /// <summary>
+        /// Discovers tables for the configured autoentity patterns and materializes them as
+        /// entities, using the Oracle-specific discovery query.
+        /// </summary>
+        protected override Task GenerateAutoentitiesIntoEntities(IReadOnlyDictionary<string, Autoentity>? autoentities)
+        {
+            return GenerateAutoentitiesIntoEntities(autoentities, CancellationToken.None);
+        }
+
+        /// <inheritdoc/>
+        protected override async Task GenerateAutoentitiesIntoEntities(
+            IReadOnlyDictionary<string, Autoentity>? autoentities,
+            CancellationToken cancellationToken)
+        {
+            if (autoentities is null)
+            {
+                return;
+            }
+
+            RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
+            Dictionary<string, Entity> entities = new();
+            Dictionary<string, string> entityNameToRawEntity = new();
+            foreach ((string autoentityName, Autoentity autoentity) in autoentities)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int addedEntities = 0;
+                JsonArray? resultArray = await QueryAutoentitiesFromDatabaseAsync(
+                    autoentityName,
+                    autoentity,
+                    cancellationToken);
+                if (resultArray is null)
+                {
+                    continue;
+                }
+
+                foreach (JsonObject? resultObject in resultArray)
+                {
+                    if (resultObject is null)
+                    {
+                        throw new DataApiBuilderException(
+                            message: $"Cannot create new entity from autoentities definition '{autoentityName}' due to an internal error.",
+                            statusCode: HttpStatusCode.InternalServerError,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    // Extract the entity name, schema, and database object name from the query result.
+                    // The SQL query returns these values with placeholders already replaced.
+                    string? entityName = resultObject["entity_name"]?.ToString();
+                    string? objectName = resultObject["object"]?.ToString();
+                    string? schemaName = resultObject["schema"]?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(entityName) || string.IsNullOrWhiteSpace(objectName) || string.IsNullOrWhiteSpace(schemaName))
+                    {
+                        _logger.LogError("Skipping autoentity generation: 'entity_name', 'object', or 'schema' is null or empty for autoentities definition '{autoentityName}'.", autoentityName);
+                        continue;
+                    }
+
+                    // Remove whitespace from the entity name and camelCase-join words so the result is
+                    // a valid identifier for REST paths and GraphQL singular/plural names.
+                    string rawEntityName = entityName;
+                    entityName = RemoveWhitespaceAddCamelCase(entityName);
+
+                    if (string.IsNullOrEmpty(entityName))
+                    {
+                        _logger.LogError(
+                            "Skipping autoentity generation: entity name '{rawEntityName}' for schema '{schemaName}' resolves to an empty string after whitespace removal for autoentities definition '{autoentityName}'.",
+                            rawEntityName, schemaName, autoentityName);
+                        continue;
+                    }
+
+                    if (rawEntityName != entityName)
+                    {
+                        _logger.LogDebug(
+                            "Entity name '{rawEntityName}' was normalized to '{entityName}' by removing whitespace.",
+                            rawEntityName, entityName);
+                    }
+
+                    // Create the entity using the template settings and permissions from the autoentity configuration.
+                    // Currently the source type is always Table for auto-generated entities from database objects.
+                    Entity generatedEntity = new(
+                        Source: new EntitySource(
+                            Object: $"{schemaName}.{objectName}",
+                            Type: EntitySourceType.Table,
+                            Parameters: null,
+                            KeyFields: null),
+                        GraphQL: autoentity.Template.GraphQL,
+                        Rest: autoentity.Template.Rest,
+                        Mcp: autoentity.Template.Mcp,
+                        Permissions: autoentity.Permissions,
+                        Cache: autoentity.Template.Cache,
+                        Health: autoentity.Template.Health,
+                        Fields: null,
+                        Relationships: null,
+                        Mappings: new(),
+                        IsAutoentity: true);
+
+                    // Add the generated entity to the linking entities dictionary.
+                    // This allows the entity to be processed later during metadata population.
+                    // A collision can occur when two database objects produce the same entity name after
+                    // whitespace removal (e.g. "Order Item" and "OrderItem" both yield "OrderItem").
+                    if (!entities.TryAdd(entityName, generatedEntity) || !runtimeConfig.TryAddGeneratedAutoentityNameToDataSourceName(entityName, autoentityName))
+                    {
+                        string checkEntityName = entityNameToRawEntity.ContainsKey(entityName) && !rawEntityName.Contains(" ")
+                            ? entityNameToRawEntity[entityName]
+                            : rawEntityName;
+                        string collisionMessage = checkEntityName.Contains(" ")
+                            ? $"Entity '{entityName}' normalized from '{checkEntityName}' from '{schemaName}' schema conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it."
+                            : $"Entity '{entityName}' conflicts in autoentity pattern '{autoentityName}'. Use --patterns.exclude to skip it.";
+                        throw new DataApiBuilderException(
+                            message: collisionMessage,
+                            statusCode: HttpStatusCode.BadRequest,
+                            subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+                    }
+
+                    addedEntities++;
+                    entityNameToRawEntity.Add(entityName, rawEntityName);
+                }
+
+                if (addedEntities == 0)
+                {
+                    _logger.LogWarning("No new entities were generated from the autoentities definition '{autoentityName}'.", autoentityName);
+                }
+
+                // Track resolution count for validation.
+                runtimeConfig.AutoentityResolutionCounts[autoentityName] = addedEntities;
+            }
+
+            LogRestPathsForEntities(runtimeConfig, entities);
+            _runtimeConfigProvider.AddMergedEntitiesToConfig(entities);
+        }
+
+        /// <summary>
+        /// Queries the database for autoentities with cooperative cancellation using the
+        /// Oracle-specific discovery query.
+        /// </summary>
+        private async Task<JsonArray?> QueryAutoentitiesFromDatabaseAsync(
+            string autoentityName,
+            Autoentity autoentity,
+            CancellationToken cancellationToken)
+        {
+            string include = string.Join(",", autoentity.Patterns.Include);
+            string exclude = string.Join(",", autoentity.Patterns.Exclude);
+            string namePattern = autoentity.Patterns.Name;
+            string getAutoentitiesQuery = SqlQueryBuilder.BuildGetAutoentitiesQuery();
+            Dictionary<string, DbConnectionParam> parameters = new()
+            {
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}include_pattern", new(include, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}exclude_pattern", new(exclude, DbType.String) },
+                { $"{BaseQueryStructure.PARAM_NAME_PREFIX}name_pattern", new(namePattern, DbType.String) }
+            };
+
+            _logger.LogDebug("Query for autoentities is being executed with the following parameters.");
+            _logger.LogDebug("The autoentities definition '{autoentityName}' include pattern: {include}", autoentityName, include);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' exclude pattern: {exclude}", autoentityName, exclude);
+            _logger.LogDebug("The autoentities definition '{autoentityName}' name pattern: {namePattern}", autoentityName, namePattern);
+
+            return await QueryExecutor.ExecuteQueryAsync(
+                sqltext: getAutoentitiesQuery,
+                parameters: parameters,
+                dataReaderHandler: QueryExecutor.GetJsonArrayAsync,
+                dataSourceName: _dataSourceName,
+                cancellationToken: cancellationToken);
         }
 
         /// <summary>

@@ -346,8 +346,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
-        /// Verifies the base metadata provider's unsupported members throw and its shared
-        /// autoentities hook is a no-op when no autoentities are configured.
+        /// Verifies the base metadata provider's unsupported members throw while its linking-object hook remains a no-op.
         /// </summary>
         [TestMethod]
         public void BaseVirtualMetadataOperations_UseDefaultBehavior()
@@ -359,11 +358,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.ThrowsException<NotImplementedException>(
                 () => provider.PopulateTriggerMetadataForTable("Book", "dbo", "books", new SourceDefinition()));
 
-            // The autoentities generation path is implemented in the shared base (Oracle and,
-            // since the fork, MSSQL) and returns immediately when no autoentities are configured.
+            MethodInfo populateLinkingObject = GetBaseMethod("PopulateMetadataForLinkingObject");
+            populateLinkingObject.Invoke(provider, new object[]
+            {
+                "Book", "Author", "dbo.book_authors", new Dictionary<string, DatabaseObject>()
+            });
+
             MethodInfo generateAutoentities = GetBaseMethod(
                 "GenerateAutoentitiesIntoEntities", typeof(IReadOnlyDictionary<string, Autoentity>));
-            generateAutoentities.Invoke(provider, new object?[] { null });
+            TargetInvocationException exception = Assert.ThrowsException<TargetInvocationException>(
+                () => generateAutoentities.Invoke(provider, new object?[] { null }));
+            Assert.IsInstanceOfType<NotSupportedException>(exception.InnerException);
         }
 
         [TestMethod]
