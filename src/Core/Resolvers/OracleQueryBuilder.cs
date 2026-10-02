@@ -2378,10 +2378,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc/>
-        public override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
+        public override string BuildForeignKeyInfoQuery(int numberOfParameters)
         {
-            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);
-            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfTableParameters);
+            string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
+            string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
 
             // Oracle uses :param syntax instead of @param
             string tableSchemaParamsForInClause = string.Join(", :", schemaNameParams);

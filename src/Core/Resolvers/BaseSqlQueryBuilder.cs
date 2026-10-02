@@ -531,13 +531,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc />
-        public virtual string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
+        public virtual string BuildForeignKeyInfoQuery(int numberOfParameters)
         {
             string[] schemaNameParams =
-                CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);
+                CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
 
             string[] tableNameParams =
-                CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfTableParameters);
+                CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
             string tableSchemaParamsForInClause = string.Join(", @", schemaNameParams);
             string tableNameParamsForInClause = string.Join(", @", tableNameParams);
 

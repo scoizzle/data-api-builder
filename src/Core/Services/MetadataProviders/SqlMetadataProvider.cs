@@ -2389,60 +2389,26 @@ namespace Azure.DataApiBuilder.Core.Services
 
             // Build the query required to get the foreign key information.
             BaseSqlQueryBuilder queryBuilder = (BaseSqlQueryBuilder)GetQueryBuilder();
+            string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(numberOfParameters: tableNames.Count);
 
-            // Schema and table names are bound as two independent IN lists, so the matched rows
-            // depend only on the distinct values: deduplicating shrinks the bind list considerably
-            // (one schema entry per referencing table would otherwise dominate). Tables are issued
-            // in batches because Oracle rejects IN lists with more than 1000 expressions
-            // (ORA-01795) and autoentity discovery can produce thousands of referencing tables.
-            List<string> distinctSchemaNames = schemaNames.Distinct(StringComparer.Ordinal).ToList();
-            List<string> distinctTableNames = tableNames.Distinct(StringComparer.Ordinal).ToList();
-            const int foreignKeyMetadataBatchSize = 500;
+            // Build the parameters dictionary for the foreign key info query
+            // consisting of all schema names and table names.
+            Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
+                GetForeignKeyQueryParams(
+                    schemaNames.ToArray(),
+                    tableNames.ToArray());
 
-            PairToFkDefinition = new Dictionary<RelationShipPair, ForeignKeyDefinition>();
-            for (int start = 0; start < distinctTableNames.Count; start += foreignKeyMetadataBatchSize)
-            {
-                List<string> tableNameBatch = distinctTableNames.GetRange(
-                    start, Math.Min(foreignKeyMetadataBatchSize, distinctTableNames.Count - start));
-
-                string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(
-                    numberOfSchemaParameters: distinctSchemaNames.Count,
-                    numberOfTableParameters: tableNameBatch.Count);
-
-                // Build the parameters dictionary for the foreign key info query consisting of
-                // the distinct schema names and the current table name batch.
-                Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
-                    GetForeignKeyQueryParams(
-                        distinctSchemaNames.ToArray(),
-                        tableNameBatch.ToArray());
-
-                // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
-                // RelationShipPair: referencing, referenced tables
-                // ForeignKeyDefinition: referecing, referenced columns
-                Dictionary<RelationShipPair, ForeignKeyDefinition>? batchFkDefinitions =
-                    await QueryExecutor.ExecuteQueryAsync(
-                        sqltext: foreignKeyMetadataQuery,
-                        parameters: foreignKeyMetadataQueryParameters,
-                        dataReaderHandler: SummarizeFkMetadata,
-                        dataSourceName: _dataSourceName,
-                        httpContext: null,
-                        args: null,
-                        cancellationToken: cancellationToken);
-
-                if (batchFkDefinitions is not null)
-                {
-                    foreach ((RelationShipPair pair, ForeignKeyDefinition definition) in batchFkDefinitions)
-                    {
-                        PairToFkDefinition[pair] = definition;
-                    }
-                }
-            }
-
-            if (PairToFkDefinition.Count == 0)
-            {
-                // Preserve the previous "no rows" shape for the follow-up inference step.
-                PairToFkDefinition = null;
-            }
+            // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
+            // RelationShipPair: referencing, referenced tables
+            // ForeignKeyDefinition: referecing, referenced columns
+            PairToFkDefinition = await QueryExecutor.ExecuteQueryAsync(
+                sqltext: foreignKeyMetadataQuery,
+                parameters: foreignKeyMetadataQueryParameters,
+                dataReaderHandler: SummarizeFkMetadata,
+                dataSourceName: _dataSourceName,
+                httpContext: null,
+                args: null,
+                cancellationToken: cancellationToken);
 
             if (PairToFkDefinition is not null)
             {
