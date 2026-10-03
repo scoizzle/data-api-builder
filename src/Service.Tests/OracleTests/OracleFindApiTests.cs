@@ -706,25 +706,25 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [DataTestMethod]
-        [DataRow(" UNION SELECT * FROM books/*")]
-        [DataRow(" UNION SELECT * FROM books--")]
-        [DataRow(" WHERE 1=1/*")]
-        [DataRow(" WHERE 1=1--")]
-        [DataRow("; SELECT * FROM information_schema.tables/*")]
-        [DataRow("; SELECT * FROM information_schema.tables--")]
-        [DataRow("; SELECT * FROM v$version/*")]
-        [DataRow("; SELECT * FROM v$version--")]
-        [DataRow("id UNION SELECT * FROM books/*")]
-        [DataRow("id UNION SELECT * FROM books--")]
-        [DataRow("id WHERE 1=1/*")]
-        [DataRow("id WHERE 1=1--")]
-        [DataRow("id; SELECT * FROM information_schema.tables/*")]
-        [DataRow("id; SELECT * FROM information_schema.tables--")]
-        [DataRow("id; SELECT * FROM v$version/*")]
-        [DataRow("id; SELECT * FROM v$version--")]
-        [DataRow("id; DROP TABLE books;/*")]
-        [DataRow("id; DROP TABLE books;--")]
-        public override async Task FindByIdTestWithSqlInjectionInPKRoute(string sqlInjection)
+        [DataRow(" WHERE 1=1/*", true)]
+        [DataRow("id WHERE 1=1/*", true)]
+        [DataRow(" UNION SELECT * FROM books/*", true)]
+        [DataRow("id UNION SELECT * FROM books/*", true)]
+        [DataRow("; SELECT * FROM information_schema.tables/*", true)]
+        [DataRow("id; SELECT * FROM information_schema.tables/*", true)]
+        [DataRow("; SELECT * FROM v$version/*", true)]
+        [DataRow("id; SELECT * FROM v$version/*", true)]
+        [DataRow("id; DROP TABLE books;/*", true)]
+        [DataRow(" WHERE 1=1--", false)]
+        [DataRow("id WHERE 1=1--", false)]
+        [DataRow(" UNION SELECT * FROM books--", false)]
+        [DataRow("id UNION SELECT * FROM books--", false)]
+        [DataRow("; SELECT * FROM information_schema.tables--", false)]
+        [DataRow("id; SELECT * FROM information_schema.tables--", false)]
+        [DataRow("; SELECT * FROM v$version--", false)]
+        [DataRow("id; SELECT * FROM v$version--", false)]
+        [DataRow("id; DROP TABLE books;--", false)]
+        public override async Task FindByIdTestWithSqlInjectionInPKRoute(string sqlInjection, bool slashStar)
         {
             await SetupAndRunRestApiTest(
                 primaryKeyRoute: $"id/{sqlInjection}",
@@ -732,7 +732,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 entityNameOrPath: _integrationEntityName,
                 sqlQuery: string.Empty,
                 exceptionExpected: true,
-                expectedErrorMessage: sqlInjection.Contains("/*")
+                expectedErrorMessage: slashStar
                     ? "Support for url template with implicit primary key field names is not yet added."
                     : $"Parameter \"{sqlInjection}\" cannot be resolved as column \"ID\" with type \"Decimal\".",
                 expectedStatusCode: HttpStatusCode.BadRequest

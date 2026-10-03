@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Net;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Core.Authorization;
@@ -316,23 +315,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         #endregion
         #region Helper Methods
 
-        /// <summary>
-        /// Creates a property access node for the given column name (used for direct visitor tests).
-        /// </summary>
-        private static SingleValuePropertyAccessNode CreatePropertyNode(string propertyName)
-        {
-            EdmModel model = new();
-            EdmEntityType entityType = new("Test", "Entity");
-            model.AddElement(entityType);
-            IEdmStructuralProperty property = entityType.AddStructuralProperty(propertyName, EdmPrimitiveTypeKind.String);
-
-            SingleValueNode source = new ConstantNode(
-                constantValue: 0,
-                literalText: "0",
-                new EdmPrimitiveTypeReference(EdmCoreModel.Instance.GetPrimitiveType(EdmPrimitiveTypeKind.Int32), isNullable: false));
-
-            return new SingleValuePropertyAccessNode(source, property);
-        }
         /// <summary>
         /// Helper function performs the test by creating the Abstract Syntax Tree
         /// and then traversing it with the ODataASTVisitor. We compare the resultant
