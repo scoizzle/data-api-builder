@@ -153,23 +153,13 @@ namespace Azure.DataApiBuilder.Core.Parsers
         /// <returns>String representing the Field name</returns>
         public override string Visit(SingleValuePropertyAccessNode nodeIn)
         {
-            // Fail closed (instead of emitting an empty/undefined identifier that would become a
-            // database error) when a policy references a field the entity does not expose.
-            if (!_metadataProvider.TryGetBackingColumn(_struct.EntityName, nodeIn.Property.Name, out string? backingColumnName)
-                || string.IsNullOrEmpty(backingColumnName))
-            {
-                throw new DataApiBuilderException(
-                    message: $"Field '{nodeIn.Property.Name}' referenced by the database policy does not exist in entity '{_struct.EntityName}'.",
-                    statusCode: HttpStatusCode.Forbidden,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.AuthorizationCheckFailed);
-            }
-
+            _metadataProvider.TryGetBackingColumn(_struct.EntityName, nodeIn.Property.Name, out string? backingColumnName);
             if (_operation is EntityActionOperation.Create)
             {
-                _struct.FieldsReferencedInDbPolicyForCreateAction.Add(backingColumnName);
+                _struct.FieldsReferencedInDbPolicyForCreateAction.Add(backingColumnName!);
             }
 
-            return _metadataProvider.GetQueryBuilder().QuotePhysicalColumn(backingColumnName);
+            return _metadataProvider.GetQueryBuilder().QuotePhysicalColumn(backingColumnName!);
         }
 
         /// <summary>
@@ -368,19 +358,9 @@ namespace Azure.DataApiBuilder.Core.Parsers
                     (SingleValuePropertyAccessNode)nodeIn.Left : (SingleValuePropertyAccessNode)nodeIn.Right;
             string? paramName = BaseQueryStructure.GetEncodedParamName(_struct.Counter.Current() - 1);
 
-            // Defensive: Visit(SingleValuePropertyAccessNode) already rejects unknown fields, so a
-            // missing backing column or parameter here indicates an unexpected AST shape. Skip the
-            // DbType hint rather than throwing a NullReferenceException.
-            if (!_metadataProvider.TryGetBackingColumn(_struct.EntityName, propertyNode.Property.Name, out string? backingColumnName)
-                || string.IsNullOrEmpty(backingColumnName)
-                || !_struct.GetUnderlyingSourceDefinition().Columns.TryGetValue(backingColumnName, out ColumnDefinition? columnDefinition)
-                || !_struct.Parameters.TryGetValue(paramName, out DbConnectionParam? parameter))
-            {
-                return;
-            }
-
-            parameter.DbType = columnDefinition.DbType;
-            parameter.SqlDbType = columnDefinition.SqlDbType;
+            _metadataProvider.TryGetBackingColumn(_struct.EntityName, propertyNode.Property.Name, out string? backingColumnName);
+            _struct.Parameters[paramName].DbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].DbType;
+            _struct.Parameters[paramName].SqlDbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].SqlDbType;
         }
 
         /// <summary>

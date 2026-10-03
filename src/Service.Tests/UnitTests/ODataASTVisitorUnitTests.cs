@@ -313,21 +313,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 ));
         }
 
-                /// <summary>
-        /// A policy that references a field the entity does not expose must fail with a clear
-        /// authorization error rather than emitting an undefined identifier into the predicate.
-        /// </summary>
-        [TestMethod]
-        public void VisitorUnknownPolicyFieldThrowsAuthorizationError()
-        {
-            ODataASTVisitor visitor = CreateVisitor(DEFAULT_ENTITY, DEFAULT_SCHEMA_NAME, DEFAULT_TABLE_NAME);
-            SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("field_that_does_not_exist");
-
-            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(() => visitor.Visit(propertyNode));
-            Assert.AreEqual(HttpStatusCode.Forbidden, ex.StatusCode);
-            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.AuthorizationCheckFailed, ex.SubStatusCode);
-        }
-
         #endregion
         #region Helper Methods
 

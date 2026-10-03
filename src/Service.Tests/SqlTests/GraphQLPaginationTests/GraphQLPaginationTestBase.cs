@@ -1084,11 +1084,10 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLPaginationTests
         }
 
         /// <summary>
-        /// Request zero entries for a pagination page. GraphQL first:0 is a valid empty page
-        /// (Relay: first is a non-negative integer). REST $first=0 remains rejected.
+        /// Request zero entries for a pagination page
         /// </summary>
         [TestMethod]
-        public async Task RequestZeroFirstReturnsEmptyPage()
+        public async Task RequestInvalidZeroFirst()
         {
             string graphQLQueryName = "books";
             string graphQLQuery = @"{
@@ -1096,16 +1095,11 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLPaginationTests
                     items {
                         id
                     }
-                    hasNextPage
                 }
             }";
 
-            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLQuery, graphQLQueryName, isAuthenticated: false);
-            Assert.AreEqual(0, actual.GetProperty("items").GetArrayLength());
-
-            // first:0 returns no items, but the connection must still report that more items exist
-            // (the books table is non-empty), matching Relay's hasNextPage semantics.
-            Assert.IsTrue(actual.GetProperty("hasNextPage").GetBoolean());
+            JsonElement result = await ExecuteGraphQLRequestAsync(graphQLQuery, graphQLQueryName, isAuthenticated: false);
+            SqlTestHelper.TestForErrorInGraphQLResponse(result.ToString(), statusCode: $"{DataApiBuilderException.SubStatusCodes.BadRequest}");
         }
 
         /// <summary>

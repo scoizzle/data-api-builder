@@ -225,8 +225,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 AddJoinPredicatesForRelatedEntity(
                     targetEntityName: targetEntityName,
                     relatedSourceAlias: subqueryTargetTableAlias,
-                    subQuery: subQuery,
-                    relationshipName: fkLookupKey.RelationshipName);
+                    subQuery: subQuery);
             }
         }
 
@@ -284,16 +283,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <param name="targetEntityName">Entity name as in config file for the related entity.</param>
         /// <param name="relatedSourceAlias">The alias assigned for the underlying source of this related entity.</param>
         /// <param name="subQuery">The subquery to which the join predicates are to be added.</param>
-        /// <param name="relationshipName">Name of the selected relationship. When supplied, only the foreign key
-        /// definitions authored for that relationship are used. This is required when multiple relationships
-        /// connect the same entity pair through distinct foreign keys, because combining their predicates would
-        /// incorrectly filter out valid nested results. Many-to-many relationships retain both of their foreign
-        /// key definitions (source -> linking and linking -> target) since both share the relationship name.</param>
         public void AddJoinPredicatesForRelatedEntity(
             string targetEntityName,
             string relatedSourceAlias,
-            BaseSqlQueryStructure subQuery,
-            string? relationshipName = null)
+            BaseSqlQueryStructure subQuery)
         {
             SourceDefinition sourceDefinition = GetUnderlyingSourceDefinition();
             DatabaseObject relatedEntityDbObject = MetadataProvider.EntityToDatabaseObject[targetEntityName];
@@ -317,12 +310,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // Identify the side of the relationship first, then check if its valid
                 // by ensuring the referencing and referenced column count > 0
                 // before adding the predicates.
-                // When the entity pair is connected by multiple relationships (each with its own
-                // foreign key), scope the definitions to the selected relationship so that only its
-                // predicates are emitted.
-                IEnumerable<ForeignKeyDefinition> foreignKeyDefinitionsForRelationship =
-                    FilterForeignKeyDefinitionsByRelationship(foreignKeyDefinitions, relationshipName);
-                foreach (ForeignKeyDefinition foreignKeyDefinition in foreignKeyDefinitionsForRelationship)
+                foreach (ForeignKeyDefinition foreignKeyDefinition in foreignKeyDefinitions)
                 {
                     // First identify which side of the relationship, this fk definition
                     // is looking at.
@@ -401,35 +389,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 statusCode: HttpStatusCode.BadRequest,
                 subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
             }
-        }
-
-        /// <summary>
-        /// Returns the foreign key definitions authored for the selected relationship.
-        /// In an entity pair connected by several relationships, each relationship owns a distinct
-        /// foreign key. Filtering by relationship name ensures the generated join only uses the
-        /// selected relationship's referencing/referenced columns instead of combining predicates
-        /// from every foreign key between the pair.
-        /// When no definition matches the relationship name, all definitions are returned so
-        /// existing behavior is preserved for foreign keys that carry no relationship metadata.
-        /// </summary>
-        /// <param name="foreignKeyDefinitions">Foreign key definitions resolved for the target entity.</param>
-        /// <param name="relationshipName">Name of the selected relationship, if known.</param>
-        private static IEnumerable<ForeignKeyDefinition> FilterForeignKeyDefinitionsByRelationship(
-            List<ForeignKeyDefinition>? foreignKeyDefinitions,
-            string? relationshipName)
-        {
-            if (foreignKeyDefinitions is null || string.IsNullOrWhiteSpace(relationshipName))
-            {
-                return foreignKeyDefinitions ?? Enumerable.Empty<ForeignKeyDefinition>();
-            }
-
-            List<ForeignKeyDefinition> relationshipForeignKeyDefinitions = foreignKeyDefinitions
-                .Where(fk => string.Equals(fk.RelationshipName, relationshipName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            return relationshipForeignKeyDefinitions.Count > 0
-                ? relationshipForeignKeyDefinitions
-                : foreignKeyDefinitions;
         }
 
         /// <summary>
@@ -706,12 +665,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             try
             {
                 DbPolicyPredicatesForOperations[operation] = GetFilterPredicatesFromOdataClause(dbPolicyClause, visitor);
-            }
-            catch (DataApiBuilderException)
-            {
-                // Preserve specific policy errors (e.g. a policy field that does not exist) instead
-                // of replacing them with the generic malformed-policy message.
-                throw;
             }
             catch (Exception ex)
             {

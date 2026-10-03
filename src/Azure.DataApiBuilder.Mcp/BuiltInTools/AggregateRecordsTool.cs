@@ -243,12 +243,12 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 }
 
                 // 5. Validate database type support (mirrors QueryBuilder.AggregationEnabledDatabaseTypes:
-                // aggregation is supported for MSSQL, DWSQL, PostgreSQL, and Oracle).
+                // aggregation is supported for MSSQL, DWSQL, and Oracle).
                 DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
-                if (databaseType is not (DatabaseType.MSSQL or DatabaseType.DWSQL or DatabaseType.PostgreSQL or DatabaseType.Oracle))
+                if (databaseType is not (DatabaseType.MSSQL or DatabaseType.DWSQL or DatabaseType.Oracle))
                 {
                     return McpResponseBuilder.BuildErrorResult(toolName, "UnsupportedDatabase",
-                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, PostgreSQL, and Oracle.", logger);
+                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, and Oracle.", logger);
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
