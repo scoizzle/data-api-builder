@@ -149,7 +149,7 @@
           "if": {
             "properties": {
               "database-type": {
-                "enum": ["mysql", "postgresql", "cosmosdb_postgresql", "oracle"]
+                "enum": ["mysql", "postgresql", "cosmosdb_postgresql"]
               }
             }
           },
