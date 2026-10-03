@@ -8,6 +8,11 @@
       "dotnetRuntimeVersions": "10.0",
       "aspNetCoreRuntimeVersions": "10.0",
       "additionalVersions": "10.0"
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      // Pin the CLI/engine to the version the Oracle integration workflow is verified against
+      // instead of floating "latest", so devcontainer builds stay reproducible.
+      "version": "29.8.0"
     }
   },
   "customizations": {
@@ -18,6 +23,7 @@
   "remoteEnv": {
     // https://docs.github.com/en/codespaces/developing-in-a-codespace/persisting-environment-variables-and-temporary-files#for-all-codespaces-for-a-repository
     // Set .NET tools directory to PATH since not automatically done by SDK image.
-    "PATH": "${containerEnv:PATH}:/root/.dotnet/tools"
+    "PATH": "${containerEnv:PATH}:/root/.dotnet/tools",
+    "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
   }
 }

@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.IO.Abstractions.TestingHelpers;
+using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Config.ObjectModel.Embeddings;
@@ -11,6 +12,7 @@ using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using RegexMatch = System.Text.RegularExpressions.Match;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -597,6 +599,53 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 mcp: new McpRuntimeOptions(Enabled: true, Path: "/mcp", DmlTools: null));
 
             validator.ValidateGlobalEndpointRouteConfig(config);
+        }
+
+        #endregion
+
+        #region IsFieldAccessible
+
+        private static RegexMatch MatchFieldReference(string fieldReference)
+        {
+            return Regex.Match(fieldReference, @"@item\.[a-zA-Z0-9_]*");
+        }
+
+        [TestMethod]
+        public void IsFieldAccessible_ExcludedFieldWithDifferentCasing_ReturnsFalse()
+        {
+            RegexMatch match = MatchFieldReference("@item.CATEGORYNAME");
+            HashSet<string> excludedFields = new() { "categoryName" };
+
+            Assert.IsFalse(RuntimeConfigValidator.IsFieldAccessible(match, includedFields: null, excludedFields));
+        }
+
+        [TestMethod]
+        public void IsFieldAccessible_IncludedFieldWithDifferentCasing_ReturnsTrue()
+        {
+            RegexMatch match = MatchFieldReference("@item.CategoryName");
+            HashSet<string> includedFields = new() { "CATEGORYNAME" };
+            HashSet<string> excludedFields = new();
+
+            Assert.IsTrue(RuntimeConfigValidator.IsFieldAccessible(match, includedFields, excludedFields));
+        }
+
+        [TestMethod]
+        public void IsFieldAccessible_FieldAbsentFromInclude_ReturnsFalse()
+        {
+            RegexMatch match = MatchFieldReference("@item.title");
+            HashSet<string> includedFields = new() { "id" };
+            HashSet<string> excludedFields = new();
+
+            Assert.IsFalse(RuntimeConfigValidator.IsFieldAccessible(match, includedFields, excludedFields));
+        }
+
+        [TestMethod]
+        public void IsFieldAccessible_WildcardExclude_ReturnsFalse()
+        {
+            RegexMatch match = MatchFieldReference("@item.title");
+            HashSet<string> excludedFields = new() { "*" };
+
+            Assert.IsFalse(RuntimeConfigValidator.IsFieldAccessible(match, includedFields: null, excludedFields));
         }
 
         #endregion

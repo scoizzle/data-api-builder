@@ -189,6 +189,45 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(wrongTypes.GetTypedOptions<MsSqlOptions>()!.SetSessionContext);
             Assert.ThrowsException<NotSupportedException>(() => wrongTypes.GetTypedOptions<UnsupportedOptions>());
             StringAssert.Contains(wrongTypes.DatabaseTypeNotSupportedMessage, DatabaseType.MSSQL.ToString());
+
+            // Oracle options: default command timeout, explicit override, and invalid values
+            // falling back to the default.
+            DataSource oracleDefaults = new(DatabaseType.Oracle, string.Empty, new());
+            Assert.AreEqual(
+                OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                oracleDefaults.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource oracleOverride = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["command-timeout"] = 12 });
+            Assert.AreEqual(12, oracleOverride.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource oracleInvalid = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["command-timeout"] = "not-a-number" });
+            Assert.AreEqual(
+                OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                oracleInvalid.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+        }
+
+        /// <summary>
+        /// The data-source converter materializes numeric options as ints so Oracle's
+        /// command-timeout can be read from raw config JSON.
+        /// </summary>
+        [TestMethod]
+        public void DataSourceConverter_MaterializesNumericOptions()
+        {
+            System.Text.Json.JsonSerializerOptions options = new();
+            options.Converters.Add(new Azure.DataApiBuilder.Config.Converters.DataSourceConverterFactory());
+
+            DataSource dataSource = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"command-timeout":45}}""",
+                options)!;
+
+            Assert.AreEqual(DatabaseType.Oracle, dataSource.DatabaseType);
+            Assert.AreEqual(45, dataSource.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
         }
 
         [TestMethod]

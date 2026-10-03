@@ -144,7 +144,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// <code>Check: </code> If book with the expected values of the new book is present in the database and
         /// if the mutation query has returned the correct information
         /// </summary>
-        public async Task InsertMutationWithVariables(string dbQuery)
+        public virtual async Task InsertMutationWithVariables(string dbQuery)
         {
             string graphQLMutationName = "createbook";
             string graphQLMutation = @"
@@ -271,7 +271,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
             Assert.AreEqual(updatedResult.RootElement.GetProperty("maxId").GetInt64(), 20);
         }
 
-        public async Task InsertMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
+        public virtual async Task InsertMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
         {
             // Given input item { id: 4, name: ""Tommy"", salary: 45 }, this test verifies that the selection would return salary = 30.
             // Thus confirming that we return the data being updated by the trigger where,
@@ -294,7 +294,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
             SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
         }
 
-        public async Task InsertMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
+        public virtual async Task InsertMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
         {
             // Given input item { name: ""Joel"", salary: 102 }, this test verifies that the selection would return salary = 100.
             // Thus confirming that we return the data being updated by the trigger where,
@@ -318,7 +318,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
             SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
         }
 
-        public async Task UpdateMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
+        public virtual async Task UpdateMutationOnTableWithTriggerWithNonAutoGenPK(string dbQuery)
         {
             // Given input item { salary: 100 }, this test verifies that the selection would return salary = 50.
             // Thus confirming that we return the data being updated by the trigger where,
@@ -341,7 +341,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
             SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
         }
 
-        public async Task UpdateMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
+        public virtual async Task UpdateMutationOnTableWithTriggerWithAutoGenPK(string dbQuery)
         {
             // Given input item { salary: -9 }, this test verifies that the selection would return salary = 0.
             // Thus confirming that we return the data being updated by the trigger where,
@@ -626,7 +626,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// <code>Check: </code>that the insertion of the entry in the appropriate link table was successful
         /// </summary>
         // IGNORE FOR NOW, SEE: Issue #285
-        public async Task InsertMutationForNonGraphQLTypeTable(string dbQuery)
+        public virtual async Task InsertMutationForNonGraphQLTypeTable(string dbQuery)
         {
             string graphQLMutationName = "addAuthorToBook";
             string graphQLMutation = @"
@@ -780,7 +780,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// <summary>
         /// Insert into a simple view (contains columns from one table)
         /// </summary>
-        public async Task InsertIntoSimpleView(string dbQuery)
+        public virtual async Task InsertIntoSimpleView(string dbQuery)
         {
             string graphQLMutationName = "createbooks_view_all";
             string graphQLMutation = @"
@@ -852,7 +852,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// Insert into an "insertable" complex view (contains columns from one table)
         /// books_publishers_view_composite_insertable has a trigger to handle inserts
         /// </summary>
-        public async Task InsertIntoInsertableComplexView(string dbQuery)
+        public virtual async Task InsertIntoInsertableComplexView(string dbQuery)
         {
             string graphQLMutationName = "createbooks_publishers_view_composite_insertable";
             string graphQLMutation = @"
@@ -874,7 +874,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// <summary>
         /// Demonstrates that using mapped column names for fields within the GraphQL mutation results in successful engine processing.
         /// </summary>
-        public async Task InsertMutationWithVariablesAndMappings(string dbQuery)
+        public virtual async Task InsertMutationWithVariablesAndMappings(string dbQuery)
         {
             string graphQLMutationName = "createGQLmappings";
             string graphQLMutation = @"
@@ -896,7 +896,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// Demonstrates that using mapped column names for fields within the GraphQL mutation results in successful engine processing
         /// of the column2 value update for the record where column1 = $id.
         /// </summary>
-        public async Task UpdateMutationWithVariablesAndMappings(string dbQuery)
+        public virtual async Task UpdateMutationWithVariablesAndMappings(string dbQuery)
         {
             string graphQLMutationName = "updateGQLmappings";
             string graphQLMutation = @"
@@ -918,7 +918,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests
         /// Demonstrates that using mapped column names for fields within the GraphQL mutation results in successful engine processing
         /// of removal of the record where column1 = $id and the returned object representing the deleting record utilizes the mapped column values.
         /// </summary>
-        public async Task DeleteMutationWithVariablesAndMappings(string dbQuery, string dbQueryToVerifyDeletion)
+        public virtual async Task DeleteMutationWithVariablesAndMappings(string dbQuery, string dbQueryToVerifyDeletion)
         {
             string graphQLMutationName = "deleteGQLmappings";
             string graphQLMutation = @"

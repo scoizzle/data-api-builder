@@ -3,6 +3,7 @@
 
 using System.Collections.ObjectModel;
 using System.Data;
+using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Abstractions;
 using System.Text;
@@ -18,6 +19,7 @@ using Azure.DataApiBuilder.Service;
 using Cli.Commands;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Oracle.ManagedDataAccess.Client;
 using Serilog;
 using static Cli.Utils;
 
@@ -131,20 +133,21 @@ namespace Cli
 
             bool isMultipleCreateEnabledForGraphQL;
 
-            // Multiple mutation operations are applicable only for MSSQL database. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
+            // Multiple mutation operations are applicable for MSSQL and Oracle. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
             // a warning is logged.
             // When multiple mutation operations are extended for other database types, this option should be honored.
             // Tracked by issue #2001: https://github.com/Azure/data-api-builder/issues/2001.
-            if (dbType is not DatabaseType.MSSQL && options.MultipleCreateOperationEnabled is not CliBool.None)
+            if (dbType is not DatabaseType.MSSQL and not DatabaseType.Oracle
+                && options.MultipleCreateOperationEnabled is not CliBool.None)
             {
                 _logger.LogWarning($"The option --graphql.multiple-mutations.create.enabled is not supported for the {dbType.ToString()} database type and will not be honored.");
             }
 
             MultipleMutationOptions? multipleMutationOptions = null;
 
-            // Multiple mutation operations are applicable only for MSSQL database. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
+            // Multiple mutation operations are applicable for MSSQL and Oracle. When the option --graphql.multiple-mutations.create.enabled is specified for other database types,
             // it is not honored.
-            if (dbType is DatabaseType.MSSQL && options.MultipleCreateOperationEnabled is not CliBool.None)
+            if ((dbType is DatabaseType.MSSQL or DatabaseType.Oracle) && options.MultipleCreateOperationEnabled is not CliBool.None)
             {
                 isMultipleCreateEnabledForGraphQL = IsMultipleCreateOperationEnabled(options.MultipleCreateOperationEnabled);
                 multipleMutationOptions = new(multipleCreateOptions: new MultipleCreateOptions(enabled: isMultipleCreateEnabledForGraphQL));
@@ -203,6 +206,7 @@ namespace Cli
                 case DatabaseType.MySQL:
                 case DatabaseType.PostgreSQL:
                 case DatabaseType.CosmosDB_PostgreSQL:
+                case DatabaseType.Oracle:
                     break;
                 default:
                     throw new Exception($"DatabaseType: ${dbType} not supported.Please provide a valid database-type.");
@@ -3827,9 +3831,9 @@ namespace Cli
                 return false;
             }
 
-            if (runtimeConfig.DataSource?.DatabaseType != DatabaseType.MSSQL)
+            if (runtimeConfig.DataSource?.DatabaseType is not (DatabaseType.MSSQL or DatabaseType.Oracle))
             {
-                _logger.LogError("The autoentities simulation is only supported for MSSQL databases. Current database type: {DatabaseType}.", runtimeConfig.DataSource?.DatabaseType);
+                _logger.LogError("The autoentities simulation is only supported for MSSQL and Oracle databases. Current database type: {DatabaseType}.", runtimeConfig.DataSource?.DatabaseType);
                 return false;
             }
 
@@ -3846,14 +3850,17 @@ namespace Cli
                 return false;
             }
 
-            MsSqlQueryBuilder queryBuilder = new();
+            bool isOracle = runtimeConfig.DataSource.DatabaseType is DatabaseType.Oracle;
+            IQueryBuilder queryBuilder = isOracle ? new OracleQueryBuilder() : new MsSqlQueryBuilder();
             string query = queryBuilder.BuildGetAutoentitiesQuery();
 
             Dictionary<string, List<(string EntityName, string SchemaName, string ObjectName)>> results = new();
 
             try
             {
-                using SqlConnection connection = new(connectionString);
+                using DbConnection connection = isOracle
+                    ? new OracleConnection(connectionString)
+                    : new SqlConnection(connectionString);
                 connection.Open();
 
                 foreach ((string filterName, Autoentity autoentity) in runtimeConfig.Autoentities.Autoentities)
@@ -3864,24 +3871,19 @@ namespace Cli
 
                     List<(string EntityName, string SchemaName, string ObjectName)> filterResults = new();
 
-                    using SqlCommand command = new(query, connection);
-                    SqlParameter includeParameter = new("@include_pattern", SqlDbType.NVarChar)
+                    using DbCommand command = connection.CreateCommand();
+                    command.CommandText = query;
+                    if (command is OracleCommand oracleCommand)
                     {
-                        Value = include
-                    };
-                    SqlParameter excludeParameter = new("@exclude_pattern", SqlDbType.NVarChar)
-                    {
-                        Value = exclude
-                    };
-                    SqlParameter namePatternParameter = new("@name_pattern", SqlDbType.NVarChar)
-                    {
-                        Value = namePattern
-                    };
+                        // Oracle binds named parameters by name only when BindByName is set.
+                        oracleCommand.BindByName = true;
+                    }
 
-                    command.Parameters.Add(includeParameter);
-                    command.Parameters.Add(excludeParameter);
-                    command.Parameters.Add(namePatternParameter);
-                    using SqlDataReader reader = command.ExecuteReader();
+                    AddCommandParameter(command, "include_pattern", include);
+                    AddCommandParameter(command, "exclude_pattern", exclude);
+                    AddCommandParameter(command, "name_pattern", namePattern);
+
+                    using DbDataReader reader = command.ExecuteReader();
                     while (reader.Read())
                     {
                         string entityName = reader[AUTOENTITIES_COLUMN_ENTITY_NAME]?.ToString() ?? string.Empty;
@@ -3912,6 +3914,20 @@ namespace Cli
                 WriteSimulationResultsToConsole(results);
                 return true;
             }
+        }
+
+        /// <summary>
+        /// Adds a text parameter to a <see cref="DbCommand"/> using the provider's own parameter
+        /// factory (works for both SqlCommand and OracleCommand). The parameter name is the bare
+        /// name (e.g. "include_pattern"); each provider's parameter prefix ("@" / ":") is applied
+        /// automatically by the underlying provider when matching against the command text.
+        /// </summary>
+        private static void AddCommandParameter(DbCommand command, string name, string value)
+        {
+            DbParameter parameter = command.CreateParameter();
+            parameter.ParameterName = name;
+            parameter.Value = value;
+            command.Parameters.Add(parameter);
         }
 
         /// <summary>

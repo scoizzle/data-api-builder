@@ -1,0 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+version: "3.9"
+services:
+  hawaii:
+    image: "mcr.microsoft.com/azure-databases/data-api-builder:latest"
+    ports:
+      - "5000:5000"
+    volumes:
+      - "<LOCAL PATH TO CONFIG FILE>:/App/dab-config.json"

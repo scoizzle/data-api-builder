@@ -24,7 +24,8 @@
             "postgresql",
             "mysql",
             "cosmosdb_nosql",
-            "dwsql"
+            "dwsql",
+            "oracle"
           ]
         },
         "connection-string": {
