@@ -132,6 +132,8 @@ jobs:
         image: gvenzl/oracle-free:23-slim
         env:
           ORACLE_PASSWORD: awesome
+          # The test config connects with SERVICE_NAME=test.
+          ORACLE_DATABASE: test
         ports:
           - 1521:1521
     steps:
@@ -144,14 +146,11 @@ jobs:
       - name: Wait for Oracle to accept connections
         run: |
           for i in $(seq 1 60); do
-            if docker exec "$(docker ps -q -f ancestor=gvenzl/oracle-free:23-slim | head -1)" \
-                /opt/oracle/healthcheck.sh --connect --check-db-status; then
-              exit 0
-            fi
-            sleep 10
+            (echo > /dev/tcp/127.0.0.1/1521) 2>/dev/null && break
+            sleep 5
           done
-          echo "Oracle did not become ready in time" >&2
-          exit 1
+          # The listener accepts connections before the pluggable database finishes opening.
+          sleep 120
       - name: Run Oracle tests
         run: >-
           dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj
