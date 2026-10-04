@@ -56,18 +56,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Quotes a physical column reference for use in raw SQL fragments (OData filters,
-        /// predicate operands). Callers pass names already resolved to the PHYSICAL backing
-        /// casing preserved from Oracle metadata, so no case transformation is applied - a
-        /// quoted lowercase/mixed-case column resolves exactly as Oracle stores it.
-        /// </summary>
-        /// <inheritdoc />
-        public override string QuotePhysicalColumn(string columnName)
-        {
-            return QuoteIdentifier(columnName);
-        }
-
-        /// <summary>
         /// Unquoted catalog objects (schema, table, package, procedure) are stored UPPERCASE.
         /// Always quoted here, so they must be emitted UPPERCASE.
         /// </summary>

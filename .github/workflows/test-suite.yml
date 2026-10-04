@@ -134,11 +134,6 @@ jobs:
           ORACLE_PASSWORD: awesome
         ports:
           - 1521:1521
-        options: >-
-          --health-cmd="healthcheck.sh --connect --check-db-status"
-          --health-interval=15s
-          --health-timeout=10s
-          --health-retries=60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -146,6 +141,17 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build test project
         run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Wait for Oracle to accept connections
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec "$(docker ps -q -f ancestor=gvenzl/oracle-free:23-slim | head -1)" \
+                /opt/oracle/healthcheck.sh --connect --check-db-status; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Oracle did not become ready in time" >&2
+          exit 1
       - name: Run Oracle tests
         run: >-
           dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj

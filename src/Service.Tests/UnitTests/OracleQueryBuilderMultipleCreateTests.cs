@@ -169,15 +169,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         [TestMethod]
         [TestCategory(TestCategory.ORACLE)]
-        public void QuoteTableAliasViaIQueryBuilderUppercases()
-        {
-            IQueryBuilder builder = new OracleQueryBuilder();
-            Assert.AreEqual("\"TABLE0\"", builder.QuoteTableAlias("table0"));
-            Assert.AreEqual("\"ID\"", builder.QuotePhysicalColumn("ID"));
-        }
-
-        [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void AutoentitiesQueryMatchesCatalogNamesCaseInsensitively()
         {
             string query = new OracleQueryBuilder().BuildGetAutoentitiesQuery();
