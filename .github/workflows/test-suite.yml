@@ -1,0 +1,140 @@
+name: test-suite
+
+# Mirrors the per-database integration suites from .pipelines/*.yml using GitHub
+# Actions service containers. DW SQL (Synapse) and Cosmos (emulator) are not covered.
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mysql:
+    name: MySQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mysql:
+        image: mysql:latest
+        env:
+          MYSQL_ROOT_PASSWORD: DabTest123
+          MYSQL_DATABASE: datagatewaytest
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pDabTest123"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build test project
+        run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Point the test config at the container
+        run: sed -i 's/REPLACEME/DabTest123/' src/out/tests/net10.0/dab-config.MySql.json
+      - name: Run MySQL tests
+        run: >-
+          dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj
+          --configuration Release --no-build --filter "TestCategory=MySql"
+
+  postgresql:
+    name: PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_PASSWORD: DabTest123
+          POSTGRES_DB: datagatewaytest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build test project
+        run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Point the test config at the container
+        run: >-
+          sed -i 's/username=REPLACEME;password=REPLACEME/username=postgres;password=DabTest123/'
+          src/out/tests/net10.0/dab-config.PostgreSql.json
+      - name: Run PostgreSQL tests
+        run: >-
+          dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj
+          --configuration Release --no-build --filter "TestCategory=PostgreSql"
+
+  mssql:
+    name: MSSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2025-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: DabTest123!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'DabTest123!' -Q 'SELECT 1'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build test project
+        run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Point the test config at the container
+        run: >-
+          sed -i 's/REPLACEME/DabTest123!/; s/Connection Timeout=30;/Connection Timeout=30;TrustServerCertificate=True;/'
+          src/out/tests/net10.0/dab-config.MsSql.json
+      - name: Run MSSQL tests
+        run: >-
+          dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj
+          --configuration Release --no-build
+          --filter "TestCategory=MsSql&FullyQualifiedName!~ConfigurationHotReloadTests"
+
+  oracle:
+    name: Oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: awesome
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd="bash -c '</dev/tcp/localhost/1521'"
+          --health-interval=15s
+          --health-timeout=5s
+          --health-retries=40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build test project
+        run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Run Oracle tests
+        run: >-
+          dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj
+          --configuration Release --no-build --filter "TestCategory=Oracle"
