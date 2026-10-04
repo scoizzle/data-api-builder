@@ -143,6 +143,10 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build test project
         run: dotnet build src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --configuration Release
+      - name: Bound the ODP.NET statement cache for the full suite
+        run: >-
+          sed -i 's/Password=awesome;/Password=awesome;Statement Cache Size=0;Self Tuning=false;/'
+          src/out/tests/net10.0/dab-config.Oracle.json
       - name: Wait for Oracle to accept connections
         run: |
           for i in $(seq 1 60); do
