@@ -2387,26 +2387,52 @@ namespace Azure.DataApiBuilder.Core.Services
 
             // Build the query required to get the foreign key information.
             BaseSqlQueryBuilder queryBuilder = (BaseSqlQueryBuilder)GetQueryBuilder();
-            string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(numberOfParameters: tableNames.Count);
 
-            // Build the parameters dictionary for the foreign key info query
-            // consisting of all schema names and table names.
-            Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
-                GetForeignKeyQueryParams(
-                    schemaNames.ToArray(),
-                    tableNames.ToArray());
+            // Oracle rejects IN lists with more than 1000 expressions (ORA-01795), and a schema
+            // can have thousands of referencing tables. The metadata query is therefore issued
+            // in batches of (schema, table) pairs and the results are merged; schemas with fewer
+            // than one batch's worth of tables still issue exactly one query.
+            const int foreignKeyMetadataBatchSize = 500;
+            PairToFkDefinition = new Dictionary<RelationShipPair, ForeignKeyDefinition>();
+            for (int start = 0; start < tableNames.Count; start += foreignKeyMetadataBatchSize)
+            {
+                int batchCount = Math.Min(foreignKeyMetadataBatchSize, tableNames.Count - start);
+                string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(numberOfParameters: batchCount);
 
-            // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
-            // RelationShipPair: referencing, referenced tables
-            // ForeignKeyDefinition: referecing, referenced columns
-            PairToFkDefinition = await QueryExecutor.ExecuteQueryAsync(
-                sqltext: foreignKeyMetadataQuery,
-                parameters: foreignKeyMetadataQueryParameters,
-                dataReaderHandler: SummarizeFkMetadata,
-                dataSourceName: _dataSourceName,
-                httpContext: null,
-                args: null,
-                cancellationToken: cancellationToken);
+                // Build the parameters dictionary for the foreign key info query
+                // consisting of the schema names and table names of the current batch.
+                Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
+                    GetForeignKeyQueryParams(
+                        schemaNames.GetRange(start, batchCount).ToArray(),
+                        tableNames.GetRange(start, batchCount).ToArray());
+
+                // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
+                // RelationShipPair: referencing, referenced tables
+                // ForeignKeyDefinition: referecing, referenced columns
+                Dictionary<RelationShipPair, ForeignKeyDefinition>? batchFkDefinitions =
+                    await QueryExecutor.ExecuteQueryAsync(
+                        sqltext: foreignKeyMetadataQuery,
+                        parameters: foreignKeyMetadataQueryParameters,
+                        dataReaderHandler: SummarizeFkMetadata,
+                        dataSourceName: _dataSourceName,
+                        httpContext: null,
+                        args: null,
+                        cancellationToken: cancellationToken);
+
+                if (batchFkDefinitions is not null)
+                {
+                    foreach ((RelationShipPair pair, ForeignKeyDefinition definition) in batchFkDefinitions)
+                    {
+                        PairToFkDefinition[pair] = definition;
+                    }
+                }
+            }
+
+            if (PairToFkDefinition.Count == 0)
+            {
+                // Preserve the previous "no rows" shape for the follow-up inference step.
+                PairToFkDefinition = null;
+            }
 
             if (PairToFkDefinition is not null)
             {
