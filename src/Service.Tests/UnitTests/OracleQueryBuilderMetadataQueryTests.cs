@@ -15,13 +15,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [TestMethod]
         public void ForeignKeyInfoQuery_ComparesUppercasedBindsDirectly()
         {
-            string query = new OracleQueryBuilder().BuildForeignKeyInfoQuery(numberOfParameters: 2);
+            string query = new OracleQueryBuilder().BuildForeignKeyInfoQuery(
+                numberOfSchemaParameters: 1,
+                numberOfTableParameters: 3);
 
             // OracleMetadataProvider.GetForeignKeyQueryParams uppercases the bind values; wrapping
             // the data dictionary columns in UPPER() would make the predicates non-sargable.
             Assert.IsFalse(query.Contains("UPPER("), query);
-            StringAssert.Contains(query, "RefCons.OWNER IN (:schemaName0, :schemaName1)");
-            StringAssert.Contains(query, "RefCons.TABLE_NAME IN (:tableName0, :tableName1)");
+            StringAssert.Contains(query, "RefCons.OWNER IN (:schemaName0)");
+            StringAssert.Contains(query, "RefCons.TABLE_NAME IN (:tableName0, :tableName1, :tableName2)");
         }
     }
 }

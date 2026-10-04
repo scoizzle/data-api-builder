@@ -53,10 +53,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public string Build(BaseSqlQueryStructure structure);
 
         /// <summary>
-        /// Builds the query to obtain foreign key information with the given
-        /// number of parameters.
+        /// Builds the query to obtain foreign key information. Schema names and table names are
+        /// bound as two independent IN lists, so they carry independent counts: callers pass the
+        /// distinct schema names and the (possibly batched) distinct table names. Oracle rejects
+        /// IN lists with more than 1000 expressions, so batching the two lists independently
+        /// keeps large schemas queryable with the fewest possible binds.
         /// </summary>
-        public string BuildForeignKeyInfoQuery(int numberOfParameters);
+        public string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters);
 
         /// <summary>
         /// Builds the query to obtain details about the result set for stored-procedure

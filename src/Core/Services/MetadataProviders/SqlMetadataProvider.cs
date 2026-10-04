@@ -2388,42 +2388,56 @@ namespace Azure.DataApiBuilder.Core.Services
             // Build the query required to get the foreign key information.
             BaseSqlQueryBuilder queryBuilder = (BaseSqlQueryBuilder)GetQueryBuilder();
 
-            // Oracle rejects IN lists with more than 1000 expressions (ORA-01795), and a schema
-            // can have thousands of referencing tables. The metadata query is therefore issued
-            // in batches of (schema, table) pairs and the results are merged; schemas with fewer
-            // than one batch's worth of tables still issue exactly one query.
-            const int foreignKeyMetadataBatchSize = 500;
+            // Schema and table names are bound as two independent IN lists, so only their
+            // distinct values affect the result set: deduplicating minimizes both the bind list
+            // and the number of batches (a single schema no longer emits one bind per table).
+            // Oracle rejects IN lists with more than 1000 expressions (ORA-01795), so each list
+            // is batched at that limit and the results are merged; small schemas still issue
+            // exactly one query.
+            const int maxInListExpressions = 1000;
+            List<string> distinctSchemaNames = schemaNames.Distinct(StringComparer.Ordinal).ToList();
+            List<string> distinctTableNames = tableNames.Distinct(StringComparer.Ordinal).ToList();
+
             PairToFkDefinition = new Dictionary<RelationShipPair, ForeignKeyDefinition>();
-            for (int start = 0; start < tableNames.Count; start += foreignKeyMetadataBatchSize)
+            for (int schemaStart = 0; schemaStart < distinctSchemaNames.Count; schemaStart += maxInListExpressions)
             {
-                int batchCount = Math.Min(foreignKeyMetadataBatchSize, tableNames.Count - start);
-                string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(numberOfParameters: batchCount);
-
-                // Build the parameters dictionary for the foreign key info query
-                // consisting of the schema names and table names of the current batch.
-                Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
-                    GetForeignKeyQueryParams(
-                        schemaNames.GetRange(start, batchCount).ToArray(),
-                        tableNames.GetRange(start, batchCount).ToArray());
-
-                // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
-                // RelationShipPair: referencing, referenced tables
-                // ForeignKeyDefinition: referecing, referenced columns
-                Dictionary<RelationShipPair, ForeignKeyDefinition>? batchFkDefinitions =
-                    await QueryExecutor.ExecuteQueryAsync(
-                        sqltext: foreignKeyMetadataQuery,
-                        parameters: foreignKeyMetadataQueryParameters,
-                        dataReaderHandler: SummarizeFkMetadata,
-                        dataSourceName: _dataSourceName,
-                        httpContext: null,
-                        args: null,
-                        cancellationToken: cancellationToken);
-
-                if (batchFkDefinitions is not null)
+                List<string> schemaNameBatch = distinctSchemaNames.GetRange(
+                    schemaStart, Math.Min(maxInListExpressions, distinctSchemaNames.Count - schemaStart));
+                for (int tableStart = 0; tableStart < distinctTableNames.Count; tableStart += maxInListExpressions)
                 {
-                    foreach ((RelationShipPair pair, ForeignKeyDefinition definition) in batchFkDefinitions)
+                    List<string> tableNameBatch = distinctTableNames.GetRange(
+                        tableStart, Math.Min(maxInListExpressions, distinctTableNames.Count - tableStart));
+
+                    string foreignKeyMetadataQuery = queryBuilder.BuildForeignKeyInfoQuery(
+                        numberOfSchemaParameters: schemaNameBatch.Count,
+                        numberOfTableParameters: tableNameBatch.Count);
+
+                    // Build the parameters dictionary for the foreign key info query
+                    // consisting of the distinct schema names and the current table name batch.
+                    Dictionary<string, DbConnectionParam> foreignKeyMetadataQueryParameters =
+                        GetForeignKeyQueryParams(
+                            schemaNameBatch.ToArray(),
+                            tableNameBatch.ToArray());
+
+                    // Saves the <RelationShipPair, ForeignKeyDefinition> objects returned from query execution.
+                    // RelationShipPair: referencing, referenced tables
+                    // ForeignKeyDefinition: referecing, referenced columns
+                    Dictionary<RelationShipPair, ForeignKeyDefinition>? batchFkDefinitions =
+                        await QueryExecutor.ExecuteQueryAsync(
+                            sqltext: foreignKeyMetadataQuery,
+                            parameters: foreignKeyMetadataQueryParameters,
+                            dataReaderHandler: SummarizeFkMetadata,
+                            dataSourceName: _dataSourceName,
+                            httpContext: null,
+                            args: null,
+                            cancellationToken: cancellationToken);
+
+                    if (batchFkDefinitions is not null)
                     {
-                        PairToFkDefinition[pair] = definition;
+                        foreach ((RelationShipPair pair, ForeignKeyDefinition definition) in batchFkDefinitions)
+                        {
+                            PairToFkDefinition[pair] = definition;
+                        }
                     }
                 }
             }
