@@ -504,7 +504,7 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 "ExecuteAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
-                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool) },
+                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool), typeof(DbConnection), typeof(DbTransaction) },
                 modifiers: null
             );
 
@@ -515,7 +515,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 {
                     mockStructure.Object,
                     dataSourceName,
-                    isMultipleCreateOperation
+                    isMultipleCreateOperation,
+                    null!, // dbConnection
+                    null!  // dbTransaction
                 }
             )!;
 
@@ -558,7 +560,7 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 "ExecuteAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
-                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool) },
+                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool), typeof(DbConnection), typeof(DbTransaction) },
                 modifiers: null
             );
 
@@ -570,7 +572,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 {
                     mockStructure.Object,
                     dataSourceName,
-                    isMultipleCreateOperation
+                    isMultipleCreateOperation,
+                    null!, // dbConnection
+                    null!  // dbTransaction
                 })!;
 
             MaybeValue<JsonElement>? cachedResult = dabCache.TryGet<JsonElement>(queryMetadata, EntityCacheLevel.L1);
@@ -615,7 +619,7 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 "ExecuteAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
-                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool) },
+                types: new[] { typeof(SqlQueryStructure), typeof(string), typeof(bool), typeof(DbConnection), typeof(DbTransaction) },
                 modifiers: null
             );
 
@@ -630,7 +634,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                     {
                         mockStructure.Object,
                         dataSourceName,
-                        isMultipleCreateOperation
+                        isMultipleCreateOperation,
+                    null!, // dbConnection
+                    null!  // dbTransaction
                     }
                 )!;
             }
@@ -659,7 +665,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 {
                     mockStructureToSetCache.Object,
                     dataSourceName,
-                    isMultipleCreateOperation
+                    isMultipleCreateOperation,
+                    null!, // dbConnection
+                    null!  // dbTransaction
                 }
             )!;
 
@@ -671,7 +679,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 {
                     mockStructure.Object,
                     dataSourceName,
-                    isMultipleCreateOperation
+                    isMultipleCreateOperation,
+                    null!, // dbConnection
+                    null!  // dbTransaction
                 }
             )!;
 
