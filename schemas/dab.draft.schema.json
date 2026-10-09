@@ -149,6 +149,35 @@
           "if": {
             "properties": {
               "database-type": {
+                "const": "oracle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "options": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "set-session-context": {
+                    "$ref": "#/$defs/boolean-or-string",
+                    "description": "Enable forwarding the caller's claims to Oracle application contexts. Requires the DAB_SESSION_CONTEXT namespace and DAB_SESSION_CONTEXT_PKG package to be created in the database."
+                  },
+                  "command-timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum time, in seconds, a single Oracle command may run before it is aborted. 0 disables the cap."
+                  }
+                }
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "database-type": {
                 "enum": ["mysql", "postgresql", "cosmosdb_postgresql"]
               }
             }

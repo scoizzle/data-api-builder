@@ -210,6 +210,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(
                 OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 oracleInvalid.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            // Oracle session-context forwarding: defaults to disabled and parses an explicit enable.
+            Assert.IsFalse(oracleDefaults.GetTypedOptions<OracleOptions>()!.SetSessionContext);
+
+            DataSource oracleSessionContext = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["set-session-context"] = true });
+            Assert.IsTrue(oracleSessionContext.GetTypedOptions<OracleOptions>()!.SetSessionContext);
         }
 
         /// <summary>
@@ -228,6 +237,55 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.AreEqual(DatabaseType.Oracle, dataSource.DatabaseType);
             Assert.AreEqual(45, dataSource.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource sessionContext = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"set-session-context":true}}""",
+                options)!;
+
+            Assert.IsTrue(sessionContext.GetTypedOptions<OracleOptions>()!.SetSessionContext);
+        }
+
+        /// <summary>
+        /// Cache eligibility accounts for every data source, not just the default one: a secondary
+        /// Oracle source with set-session-context enabled disables caching even when the default
+        /// source does not enable it.
+        /// </summary>
+        [TestMethod]
+        public void CanUseCache_AnySourceWithSessionContext_IsDisabled()
+        {
+            DataSource defaultSource = new(DatabaseType.MSSQL, "Server=localhost;Database=TestDb;", new());
+            DataSource oracleWithSessionContext = new(
+                DatabaseType.Oracle,
+                "Data Source=localhost:1521/x",
+                new Dictionary<string, object?> { ["set-session-context"] = true });
+            DataSource oracleWithoutSessionContext = new(
+                DatabaseType.Oracle,
+                "Data Source=localhost:1521/x",
+                new Dictionary<string, object?> { ["command-timeout"] = 30 });
+
+            Assert.IsFalse(CreateCacheTestConfig(defaultSource, oracleWithSessionContext).CanUseCache());
+            Assert.IsTrue(CreateCacheTestConfig(defaultSource, oracleWithoutSessionContext).CanUseCache());
+        }
+
+        private static RuntimeConfig CreateCacheTestConfig(DataSource defaultSource, DataSource secondarySource)
+        {
+            return new RuntimeConfig(
+                Schema: string.Empty,
+                DataSource: defaultSource,
+                Runtime: new RuntimeOptions(
+                    Rest: new(),
+                    GraphQL: new(),
+                    Mcp: new(),
+                    Host: new(null, null),
+                    Cache: new RuntimeCacheOptions { Enabled = true }),
+                Entities: new RuntimeEntities(new Dictionary<string, Entity>()),
+                DefaultDataSourceName: "default-source",
+                DataSourceNameToDataSource: new Dictionary<string, DataSource>
+                {
+                    ["default-source"] = defaultSource,
+                    ["secondary-source"] = secondarySource,
+                },
+                EntityNameToDataSourceName: new Dictionary<string, string>());
         }
 
         [TestMethod]

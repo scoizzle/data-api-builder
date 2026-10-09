@@ -203,10 +203,13 @@ namespace Cli
                     dbOptions.Add(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext)), options.SetSessionContext);
 
                     break;
+                case DatabaseType.Oracle:
+                    dbOptions.Add(namingPolicy.ConvertName(nameof(OracleOptions.SetSessionContext)), options.SetSessionContext);
+
+                    break;
                 case DatabaseType.MySQL:
                 case DatabaseType.PostgreSQL:
                 case DatabaseType.CosmosDB_PostgreSQL:
-                case DatabaseType.Oracle:
                     break;
                 default:
                     throw new Exception($"DatabaseType: ${dbType} not supported.Please provide a valid database-type.");
@@ -734,7 +737,8 @@ namespace Cli
             ConfigureOptions options,
             [NotNullWhen(true)] ref RuntimeConfig runtimeConfig)
         {
-            DatabaseType dbType = runtimeConfig.DataSource!.DatabaseType;
+            DatabaseType existingDbType = runtimeConfig.DataSource!.DatabaseType;
+            DatabaseType dbType = existingDbType;
             string dataSourceConnectionString = runtimeConfig.DataSource.ConnectionString;
             DatasourceHealthCheckConfig? datasourceHealthCheckConfig = runtimeConfig.DataSource.Health;
             UserDelegatedAuthOptions? userDelegatedAuthConfig = runtimeConfig.DataSource.UserDelegatedAuth;
@@ -753,7 +757,14 @@ namespace Cli
                 dataSourceConnectionString = options.DataSourceConnectionString;
             }
 
-            Dictionary<string, object?>? dbOptions = new();
+            // Preserve existing options when the database type is unchanged so that updating one
+            // option does not drop the others (e.g. Oracle command-timeout). Options are reset when
+            // the database type changes because option keys are specific to the previous type.
+            Dictionary<string, object?>? dbOptions = existingDbType.Equals(dbType)
+                ? (runtimeConfig.DataSource.Options is null
+                    ? new Dictionary<string, object?>()
+                    : new Dictionary<string, object?>(runtimeConfig.DataSource.Options))
+                : new Dictionary<string, object?>();
             HyphenatedNamingPolicy namingPolicy = new();
 
             if (DatabaseType.CosmosDB_NoSQL.Equals(dbType))
@@ -770,13 +781,13 @@ namespace Cli
 
             if (options.DataSourceOptionsSetSessionContext is not null)
             {
-                if (!(DatabaseType.MSSQL.Equals(dbType) || DatabaseType.DWSQL.Equals(dbType)))
+                if (!(DatabaseType.MSSQL.Equals(dbType) || DatabaseType.DWSQL.Equals(dbType) || DatabaseType.Oracle.Equals(dbType)))
                 {
-                    _logger.LogError("SetSessionContext option is only applicable for MSSQL/DWSQL database type.");
+                    _logger.LogError("SetSessionContext option is only applicable for MSSQL/DWSQL/Oracle database type.");
                     return false;
                 }
 
-                dbOptions.Add(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext)), options.DataSourceOptionsSetSessionContext.Value);
+                dbOptions[namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))] = options.DataSourceOptionsSetSessionContext.Value;
             }
 
             // Handle health options (name, enabled, threshold-ms)
@@ -873,17 +884,17 @@ namespace Cli
         {
             if (!string.IsNullOrWhiteSpace(options.DataSourceOptionsDatabase))
             {
-                dbOptions.Add(namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Database)), options.DataSourceOptionsDatabase);
+                dbOptions[namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Database))] = options.DataSourceOptionsDatabase;
             }
 
             if (!string.IsNullOrWhiteSpace(options.DataSourceOptionsContainer))
             {
-                dbOptions.Add(namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Container)), options.DataSourceOptionsContainer);
+                dbOptions[namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Container))] = options.DataSourceOptionsContainer;
             }
 
             if (!string.IsNullOrWhiteSpace(options.DataSourceOptionsSchema))
             {
-                dbOptions.Add(namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Schema)), options.DataSourceOptionsSchema);
+                dbOptions[namingPolicy.ConvertName(nameof(CosmosDbNoSQLDataSourceOptions.Schema))] = options.DataSourceOptionsSchema;
             }
         }
 

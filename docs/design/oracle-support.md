@@ -16,6 +16,7 @@ Data API builder supports Oracle Database 19c and later through
 - Type-aware `RETURNING INTO` output binds for numeric, date/time, and binary values
 - Managed identity password-token replacement when configured
 - Oracle metadata lookup through `ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, and related views
+- Session-context claim forwarding through Oracle application contexts (`set-session-context`)
 
 ## Hosted and managed-identity security
 
@@ -33,6 +34,52 @@ Data API builder supports Oracle Database 19c and later through
 - Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
   (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
 
+## Session context
+
+Oracle session-context forwarding mirrors MSSQL's `sp_set_session_context` behavior and is opt-in
+through the data-source option `set-session-context` (default `false`; also settable at init with
+`dab init --set-session-context true` or with `dab configure --data-source.options.set-session-context`).
+Before each statement, DAB executes a parameterized PL/SQL block as a **separate command on the same
+connection** (an Oracle anonymous block cannot be prepended to another statement in one
+`OracleCommand`):
+
+```sql
+BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
+      DAB_SESSION_CONTEXT_PKG.SET_CLAIM(:dab_claim_key0, :dab_claim_value0); ... END;
+```
+
+- **Database prerequisite.** A DBA runs `docker/oracle-session-context.sql` once: it creates the
+  `DAB_SESSION_CONTEXT` namespace (`CREATE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG;`)
+  and the `DAB_SESSION_CONTEXT_PKG` package. Oracle only permits a namespace's context to be set from
+  its associated package. The DAB login needs `EXECUTE` on the package.
+- **Claim values.** Claims come from the shared, provider-agnostic pipeline
+  (`AuthorizationResolver.GetProcessedUserClaims`): a single-valued claim is forwarded as a scalar, and
+  multiple claims of the same name as a JSON array string (e.g. `["group1","group2"]`). `roles` resolves
+  to the active `X-MS-API-ROLE` value; the token's roles are exposed as `original_roles`.
+- **No stale claims.** Every execution clears the namespace (`CLEAR_CLAIMS`) before setting the current
+  request's claims, so a pooled connection cannot leak a previous request's values to a request that
+  lacks that claim. (This intentionally differs from MSSQL, which only overwrites the keys it sets.)
+- **Injection safety.** Claim names and values are always bound parameters; claim text is never
+  concatenated into SQL.
+- **Caching.** Enabling the option disables response caching for the data source, the same as MSSQL.
+- **Consumption.** Database-side policies read values with `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>')`
+  (for example in a `DBMS_RLS.ADD_POLICY` predicate function or a view mapped as an entity), and
+  multi-valued claims are expanded with `JSON_TABLE`:
+
+```sql
+WHERE region IN (
+  SELECT jt.value
+  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions'), '$[*]'
+       COLUMNS (value VARCHAR2(4000) PATH '$')) jt)
+```
+
+- **Limits.** `DBMS_SESSION.SET_CONTEXT` values are `VARCHAR2(4000)` (MSSQL session context allows up
+  to 1 MB), and context attribute names are length-limited (30 bytes before Oracle 12.2, 128 after), so
+  a very large claims array or a URI-style claim name cannot be forwarded.
+
+DAB-config database policies (`@claims.x` in `permissions`) are a separate mechanism: they bind claim
+values in-process and use only the first value of a duplicated claim; they do not read session context.
+
 ## Current Limitations
 
 ### Stored procedures
@@ -45,12 +92,6 @@ Known limitations:
 - **Scalar OUT/IN OUT parameters.** Subprograms whose result is a scalar OUT/IN OUT parameter (no REF CURSOR) are invoked with only their IN arguments; the OUT argument is not bound, so such subprograms fail at request time. Only subprograms with IN parameters plus an optional REF CURSOR OUT parameter are supported.
 
 Oracle stored-procedure metadata discovery (including OUT parameters and REF CURSOR metadata) is used to validate signatures for schema generation. Invoking a procedure whose metadata cannot be resolved, or that returns an unsupported result shape, surfaces an error at request time.
-
-### Session context
-
-Oracle session-context forwarding is disabled by default. The current DAB command pipeline prepends session setup text to the SQL command. Oracle requires session-context calls to run inside a PL/SQL block, so prepending a standalone `BEGIN ... END;` block would produce invalid command text.
-
-A future implementation must use a valid Oracle application context package and execute session setup together with the request command, or use a separate command on the same connection. Until then, Oracle database policies must not depend on DAB-forwarded session claims.
 
 ### Autoentities and aggregation
 

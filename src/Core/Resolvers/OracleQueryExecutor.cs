@@ -136,16 +136,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
                 _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder);
 
-                // Session context (application context) forwarding is not enabled by default for Oracle.
-                //
-                // DAB forwards the caller's claims to the database by prepending the session-context
-                // SQL to the query text in QueryExecutor.PrepareDbCommand. For MSSQL this works because
-                // the generated text is a batch of EXEC statements. Oracle, however, does not accept a
-                // PL/SQL anonymous block (BEGIN ... END;) followed by a separate statement in a single
-                // CommandText - prepending one would generate invalid SQL (ORA-00900) for every request.
-                // Until a proper application-context setup (CREATE CONTEXT + package) is implemented
-                // (see GetSessionParamsQuery), keep this disabled so ordinary queries are not broken.
-                _dataSourceToSessionContextUsage[dataSourceName] = false;
+                // Session context (application context) forwarding is opt-in via "set-session-context".
+                // A DBA must first create the context namespace and the package that sets it; DAB then
+                // executes a parameterized anonymous block as a separate command on the same connection
+                // before each statement (see SetSessionContextIfAny and docs/design/oracle-support.md).
+                _dataSourceToSessionContextUsage[dataSourceName] = oracleOptions.SetSessionContext;
             }
         }
 
@@ -183,10 +178,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // Named binding matches each :name in the command text to the parameter of the same name.
             cmd.BindByName = true;
 
-            // Add query to send user data from DAB to the underlying database to enable additional
-            // security the user might have configured at the database level.
-            string sessionParamsQuery = GetSessionParamsQuery(httpContext, parameters, dataSourceName);
-            string translatedSql = sessionParamsQuery + TranslateBindParameters(sqltext);
+            string translatedSql = TranslateBindParameters(sqltext);
             cmd.CommandText = translatedSql;
 
             if (parameters is not null)
@@ -229,6 +221,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // list must be an OUTPUT parameter (ODP.NET requires Size to be set for variable-length
             // string outputs), and the ':dab_result' REF CURSOR must be an OUTPUT RefCursor parameter.
             OracleBindRegistrar.RegisterPlSqlOutputBinds(cmd, translatedSql);
+
+            // Forward the caller's claims to the session before the main statement executes.
+            SetSessionContextIfEnabled(conn, httpContext, dataSourceName);
 
             return cmd;
         }
@@ -526,40 +521,131 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Method to generate the query to send user data to the underlying Oracle database via application contexts
-        /// which can be used for additional security (e.g., using Virtual Private Database policies) at the database level.
-        /// Oracle application contexts are similar to SQL Server's SESSION_CONTEXT.
+        /// Name of the Oracle application context namespace whose attributes receive the caller's
+        /// claims. A DBA creates it once with
+        /// <c>CREATE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG;</c>.
         /// </summary>
-        /// <param name="httpContext">Current user httpContext.</param>
-        /// <param name="parameters">Dictionary of parameters/value required to execute the query.</param>
-        /// <param name="dataSourceName">Name of datasource. Default dbName taken from config if null</param>
-        /// <returns>empty string / query to set session parameters for the connection.</returns>
-        /// <seealso cref="https://docs.oracle.com/en/database/oracle/oracle-database/19/dbseg/using-application-contexts-to-retrieve-user-information.html"/>
-        public override string GetSessionParamsQuery(HttpContext? httpContext, IDictionary<string, DbConnectionParam> parameters, string dataSourceName = "")
+        public const string SESSION_CONTEXT_NAMESPACE = "DAB_SESSION_CONTEXT";
+
+        /// <summary>
+        /// Name of the PL/SQL package associated with <see cref="SESSION_CONTEXT_NAMESPACE"/>. Oracle
+        /// only permits a namespace's context to be set from its associated package, so the package
+        /// (owned by the DBA) exposes the CLEAR_CLAIMS and SET_CLAIM procedures that wrap
+        /// DBMS_SESSION.CLEAR_ALL_CONTEXT / DBMS_SESSION.SET_CONTEXT. See docs/design/oracle-support.md.
+        /// </summary>
+        public const string SESSION_CONTEXT_PACKAGE = "DAB_SESSION_CONTEXT_PKG";
+
+        /// <summary>
+        /// Forwards the caller's claims to the database session as Oracle application context
+        /// attributes before the main statement executes, mirroring MSSQL's sp_set_session_context.
+        /// Oracle receives the setup as a separate parameterized anonymous block on the same
+        /// connection because a PL/SQL block cannot be prepended to a different statement in one
+        /// OracleCommand. Multi-valued claims are forwarded as JSON array strings
+        /// (AuthorizationResolver.GetProcessedUserClaims) so database-side policies can expand them
+        /// with JSON_TABLE and IN. Any context left on the pooled session is cleared first so a
+        /// request can never observe a previous request's claim values.
+        /// </summary>
+        private void SetSessionContextIfEnabled(OracleConnection conn, HttpContext? httpContext, string dataSourceName)
+        {
+            if (!IsSessionContextEnabled(dataSourceName) || httpContext is null)
+            {
+                return;
+            }
+
+            try
+            {
+                using OracleCommand cmd = BuildSessionContextCommand(
+                    conn,
+                    AuthorizationResolver.GetProcessedUserClaims(httpContext),
+                    dataSourceName);
+                cmd.ExecuteNonQuery();
+            }
+            catch (DbException e)
+            {
+                throw DbExceptionParser.Parse(e);
+            }
+        }
+
+        /// <summary>
+        /// Whether claim forwarding is enabled for the data source. Data sources that are unknown to
+        /// this executor (e.g. during startup metadata discovery) are treated as disabled.
+        /// </summary>
+        private bool IsSessionContextEnabled(string dataSourceName)
         {
             if (string.IsNullOrEmpty(dataSourceName))
             {
                 dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
             }
 
-            // Session-context forwarding is disabled by default for Oracle (see ConfigureOracleQueryExecutor)
-            // because a PL/SQL anonymous block cannot be prepended to a separate statement in a single
-            // OracleCommand. When support is enabled via a future config option, the application context
-            // must be created in the database first (CREATE CONTEXT dab_context USING dab_context_pkg;)
-            // and each claim must be set via DBMS_SESSION.SET_CONTEXT inside the same anonymous block as
-            // the main statement. Until that batching mechanism exists, fail loudly rather than emitting
-            // a prepended block that Oracle rejects with ORA-00900.
-            if (httpContext is null
-                || !_dataSourceToSessionContextUsage.TryGetValue(dataSourceName, out bool isSessionContextEnabled)
-                || !isSessionContextEnabled)
+            return _dataSourceToSessionContextUsage.TryGetValue(dataSourceName, out bool isEnabled) && isEnabled;
+        }
+
+        /// <summary>
+        /// Builds the PL/SQL block that clears any claims left on the session and sets the current
+        /// request's claims. Exposed as internal for unit testing.
+        /// </summary>
+        /// <param name="claims">Claim name/value pairs to forward.</param>
+        /// <returns>The anonymous block text and the bind parameters it references.</returns>
+        internal static (string CommandText, List<(string Name, string Value)> Parameters) BuildSessionContextBlock(
+            IEnumerable<KeyValuePair<string, string>> claims)
+        {
+            StringBuilder block = new();
+            block.Append("BEGIN ").Append(SESSION_CONTEXT_PACKAGE).Append(".CLEAR_CLAIMS; ");
+
+            List<(string Name, string Value)> parameters = new();
+            int index = 0;
+            foreach ((string claimType, string claimValue) in claims)
             {
-                return string.Empty;
+                string keyParameter = $"dab_claim_key{index}";
+                string valueParameter = $"dab_claim_value{index}";
+                parameters.Add((keyParameter, claimType));
+                parameters.Add((valueParameter, claimValue));
+
+                block.Append(SESSION_CONTEXT_PACKAGE)
+                    .Append(".SET_CLAIM(:").Append(keyParameter)
+                    .Append(", :").Append(valueParameter)
+                    .Append("); ");
+
+                index++;
             }
 
-            throw new DataApiBuilderException(
-                message: "Oracle session context forwarding is not supported: a PL/SQL anonymous block cannot be prepended to a separate statement in a single OracleCommand.",
-                statusCode: HttpStatusCode.InternalServerError,
-                subStatusCode: DataApiBuilderException.SubStatusCodes.NotSupported);
+            block.Append("END;");
+            return (block.ToString(), parameters);
+        }
+
+        /// <summary>
+        /// Creates the command that forwards the given claims. Claim names and values are always
+        /// bound parameters, never concatenated into the command text.
+        /// </summary>
+        private OracleCommand BuildSessionContextCommand(
+            OracleConnection conn,
+            Dictionary<string, string> claims,
+            string dataSourceName)
+        {
+            (string commandText, List<(string Name, string Value)> claimParameters) = BuildSessionContextBlock(claims);
+
+            OracleCommand cmd = conn.CreateCommand();
+            cmd.CommandType = CommandType.Text;
+            // ODP.NET binds by position by default; named binding matches each :name occurrence.
+            cmd.BindByName = true;
+            cmd.CommandText = commandText;
+            cmd.CommandTimeout = _dataSourceCommandTimeouts.TryGetValue(dataSourceName, out int commandTimeout)
+                ? commandTimeout
+                : OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS;
+
+            foreach ((string parameterName, string parameterValue) in claimParameters)
+            {
+                OracleParameter parameter = new()
+                {
+                    ParameterName = parameterName,
+                    OracleDbType = OracleDbType.Varchar2,
+                    Direction = ParameterDirection.Input,
+                    Value = parameterValue,
+                };
+                cmd.Parameters.Add(parameter);
+            }
+
+            return cmd;
         }
 
         /// <summary>

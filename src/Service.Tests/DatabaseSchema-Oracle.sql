@@ -2890,4 +2890,50 @@ execute immediate q'[
       when others then
          dbms_output.put_line(SQLERRM);
    end;
+
+    -- Oracle session context (claims forwarding) fixture:
+    --   * application context namespace + package used by "set-session-context"
+    --   * a view exposing the forwarded claims for REST/GraphQL integration tests
+   begin
+      execute immediate q'[CREATE OR REPLACE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[CREATE OR REPLACE PACKAGE DAB_SESSION_CONTEXT_PKG AS
+    PROCEDURE CLEAR_CLAIMS;
+    PROCEDURE SET_CLAIM(p_name IN VARCHAR2, p_value IN VARCHAR2);
+END DAB_SESSION_CONTEXT_PKG;]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[CREATE OR REPLACE PACKAGE BODY DAB_SESSION_CONTEXT_PKG AS
+    PROCEDURE CLEAR_CLAIMS IS
+    BEGIN
+        DBMS_SESSION.CLEAR_ALL_CONTEXT('DAB_SESSION_CONTEXT');
+    END CLEAR_CLAIMS;
+
+    PROCEDURE SET_CLAIM(p_name IN VARCHAR2, p_value IN VARCHAR2) IS
+    BEGIN
+        DBMS_SESSION.SET_CONTEXT('DAB_SESSION_CONTEXT', p_name, p_value);
+    END SET_CLAIM;
+END DAB_SESSION_CONTEXT_PKG;]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[CREATE OR REPLACE VIEW DAB_SESSION_CLAIMS AS
+        SELECT 1 AS "id",
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'roles') AS "roles",
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'groups') AS "claim_groups",
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'sub') AS "sub"
+        FROM DUAL]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
 end;

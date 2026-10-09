@@ -2242,6 +2242,43 @@
         "publisher_id": "publisher_id"
       }
     },
+    "session_claims": {
+      "source": {
+        "object": "DAB_SESSION_CLAIMS",
+        "type": "view",
+        "key-fields": [
+          "id"
+        ]
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "session_claim",
+          "plural": "session_claims"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ]
+    },
     "books_view_with_mapping": {
       "source": {
         "object": "books_view_with_mapping",

@@ -1,6 +1,9 @@
 ﻿{
   DataSource: {
-    DatabaseType: Oracle
+    DatabaseType: Oracle,
+    Options: {
+      set-session-context: true
+    }
   },
   Runtime: {
     Rest: {

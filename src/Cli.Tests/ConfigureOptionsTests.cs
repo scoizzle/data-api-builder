@@ -857,6 +857,75 @@ namespace Cli.Tests
         }
 
         /// <summary>
+        /// Tests the update of the database type from CosmosDB_NoSQL to Oracle in the runtime config.
+        /// Verifies that Oracle accepts the 'set-session-context' option and that the CosmosDB-specific
+        /// options are removed.
+        /// Command: dab configure --data-source.database-type oracle --data-source.options.set-session-context true
+        /// </summary>
+        [TestMethod]
+        public void TestDatabaseTypeUpdateCosmosDB_NoSQLToOracle()
+        {
+            // Arrange
+            SetupFileSystemWithInitialConfig(INITIAL_COSMOSDB_NOSQL_CONFIG);
+
+            ConfigureOptions options = new(
+                dataSourceDatabaseType: "oracle",
+                dataSourceOptionsSetSessionContext: true,
+                config: TEST_RUNTIME_CONFIG_FILE
+            );
+
+            // Act
+            bool isSuccess = TryConfigureSettings(options, _runtimeConfigLoader!, _fileSystem!);
+
+            // Assert
+            Assert.IsTrue(isSuccess);
+            string updatedConfig = _fileSystem!.File.ReadAllText(TEST_RUNTIME_CONFIG_FILE);
+            Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(updatedConfig, out RuntimeConfig? config));
+            Assert.IsNotNull(config.Runtime);
+            Assert.AreEqual(config.DataSource!.DatabaseType, DatabaseType.Oracle);
+            Assert.AreEqual(config.DataSource.Options!.GetValueOrDefault("set-session-context", false), true);
+            Assert.IsFalse(config.DataSource.Options!.ContainsKey("database"));
+            Assert.IsFalse(config.DataSource.Options!.ContainsKey("container"));
+            Assert.IsFalse(config.DataSource.Options!.ContainsKey("schema"));
+        }
+
+        /// <summary>
+        /// Tests that updating the 'set-session-context' option on an Oracle data source preserves
+        /// the existing Oracle options (e.g. command-timeout).
+        /// Command: dab configure --data-source.options.set-session-context true
+        /// </summary>
+        [TestMethod]
+        public void TestConfigureOracleSetSessionContextPreservesExistingOptions()
+        {
+            // Arrange
+            string oracleConfig = "{" + SCHEMA_PROPERTY + @",
+                ""data-source"": {
+                  ""database-type"": ""oracle"",
+                  ""connection-string"": """ + SAMPLE_TEST_CONN_STRING + @""",
+                  ""options"": {
+                    ""command-timeout"": 60
+                  }
+                }, " + RUNTIME_SECTION_WITH_EMPTY_ENTITIES + "}";
+            SetupFileSystemWithInitialConfig(oracleConfig);
+
+            ConfigureOptions options = new(
+                dataSourceOptionsSetSessionContext: true,
+                config: TEST_RUNTIME_CONFIG_FILE
+            );
+
+            // Act
+            bool isSuccess = TryConfigureSettings(options, _runtimeConfigLoader!, _fileSystem!);
+
+            // Assert
+            Assert.IsTrue(isSuccess);
+            string updatedConfig = _fileSystem!.File.ReadAllText(TEST_RUNTIME_CONFIG_FILE);
+            Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(updatedConfig, out RuntimeConfig? config));
+            Assert.AreEqual(DatabaseType.Oracle, config.DataSource!.DatabaseType);
+            Assert.AreEqual(true, config.DataSource.Options!.GetValueOrDefault("set-session-context", false));
+            Assert.AreEqual(60, config.DataSource.Options!.GetValueOrDefault("command-timeout"));
+        }
+
+        /// <summary>
         /// Tests the update of the database type from MSSQL to CosmosDB_NoSQL in the runtime config.
         /// This method verifies that the database type can be changed from MSSQL to CosmosDB_NoSQL and that the 
         /// specific CosmosDB_NoSQL options such as database, container, and schema are correctly added to the config.
