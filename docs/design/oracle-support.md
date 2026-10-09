@@ -1,0 +1,215 @@
+# Oracle Support
+
+Data API builder supports Oracle Database 19c and later through
+`Oracle.ManagedDataAccess.Core`.
+
+## Supported
+
+- REST and GraphQL queries, filters, ordering, selection, and cursor pagination
+- REST and GraphQL create, update, delete, and upsert operations
+- GraphQL nested multiple-create (`runtime.graphql.multiple-mutations.create.enabled` / `--graphql.multiple-mutations.create.enabled`), same surface as MSSQL
+- Composite primary keys
+- Database-policy predicates for read, create, update, and delete operations
+- Oracle `NUMBER`, character, date/time, `RAW`, and `BLOB` values
+- Oracle `RAW` and `BLOB` values serialized as base64 byte values
+- Identity and default-valued inserts through Oracle PL/SQL DML blocks
+- Type-aware `RETURNING INTO` output binds for numeric, date/time, and binary values
+- Managed identity password-token replacement when configured
+- Oracle metadata lookup through `ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, and related views
+- Session-context claim forwarding through Oracle application contexts (`set-session-context`)
+
+## Hosted and managed-identity security
+
+- When the runtime config is late-configured (hosted/DAB-as-a-service scenario) the Oracle
+  provider requires native network encryption process-wide
+  (`OracleConfiguration.SqlNetEncryptionClient = "REQUIRED"`). MSSQL/MySQL/PostgreSQL force
+  connection encryption in the same situation, and ODP.NET rejects the SqlClient
+  `Encryption=true` keyword.
+- Managed identity token replacement rewrites only the password. All other connection-string
+  attributes are round-tripped through `OracleConnectionStringBuilder`, so TLS/wallet options
+  carried in the Data Source descriptor (for example `PROTOCOL=TCPS`,
+  `SECURITY=(MY_WALLET_DIRECTORY=...)(SSL_SERVER_DN_MATCH=TRUE)`) are preserved. Those options
+  are only valid inside the descriptor; standalone `Wallet Location`/`SSL_SERVER_DN_MATCH`
+  keywords are rejected by ODP.NET.
+- Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
+  (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
+
+## Session context
+
+Oracle session-context forwarding mirrors MSSQL's `sp_set_session_context` behavior and is opt-in
+through the data-source option `set-session-context` (default `false`; also settable at init with
+`dab init --set-session-context true` or with `dab configure --data-source.options.set-session-context`).
+Before each statement, DAB executes a parameterized PL/SQL block as a **separate command on the same
+connection** (an Oracle anonymous block cannot be prepended to another statement in one
+`OracleCommand`):
+
+```sql
+BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
+      DAB_SESSION_CONTEXT_PKG.SET_CLAIM(:dab_claim_key0, :dab_claim_value0); ... END;
+```
+
+- **Database prerequisite.** A DBA runs `docker/oracle-session-context.sql` once: it creates the
+  `DAB_SESSION_CONTEXT` namespace (`CREATE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG;`)
+  and the `DAB_SESSION_CONTEXT_PKG` package. Oracle only permits a namespace's context to be set from
+  its associated package. The DAB login needs `EXECUTE` on the package.
+- **Claim values.** Claims come from the shared, provider-agnostic pipeline
+  (`AuthorizationResolver.GetProcessedUserClaims`): a single-valued claim is forwarded as a scalar, and
+  multiple claims of the same name as a JSON array string (e.g. `["group1","group2"]`). `roles` resolves
+  to the active `X-MS-API-ROLE` value; the token's roles are exposed as `original_roles`.
+- **No stale claims.** Every execution clears the namespace (`CLEAR_CLAIMS`) before setting the current
+  request's claims, so a pooled connection cannot leak a previous request's values to a request that
+  lacks that claim. (This intentionally differs from MSSQL, which only overwrites the keys it sets.)
+- **Injection safety.** Claim names and values are always bound parameters; claim text is never
+  concatenated into SQL.
+- **Caching.** Enabling the option disables response caching for the data source, the same as MSSQL.
+- **Consumption.** Database-side policies read values with `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>')`
+  (for example in a `DBMS_RLS.ADD_POLICY` predicate function or a view mapped as an entity), and
+  multi-valued claims are expanded with `JSON_TABLE`:
+
+```sql
+WHERE region IN (
+  SELECT jt.value
+  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions'), '$[*]'
+       COLUMNS (value VARCHAR2(4000) PATH '$')) jt)
+```
+
+- **Limits.** `DBMS_SESSION.SET_CONTEXT` values are `VARCHAR2(4000)` (MSSQL session context allows up
+  to 1 MB), and context attribute names are length-limited (30 bytes before Oracle 12.2, 128 after), so
+  a very large claims array or a URI-style claim name cannot be forwarded.
+
+DAB-config database policies (`@claims.x` in `permissions`) are a separate mechanism: they bind claim
+values in-process and use only the first value of a duplicated claim; they do not read session context.
+
+## Current Limitations
+
+### Stored procedures
+
+Oracle stored procedures and functions can be invoked as REST operations, and as GraphQL operations for result sets DAB can describe. `SqlExecuteStructure` is implemented for Oracle: subprograms are invoked from a PL/SQL anonymous block (never the SQL*Plus-only `EXEC` keyword), engine-generated `@paramN` bind references are translated to Oracle `:paramN` syntax, and a trailing `:dab_result` REF CURSOR OUT bind exposes the result set to ODP.NET. Package-qualified subprograms (`schema.package.subprogram`) are supported, as are standalone functions invoked via `SELECT ... FROM DUAL`.
+
+Known limitations:
+
+- **GraphQL stored-procedure result typing.** Oracle metadata discovery describes a subprogram's REF CURSOR by its OUT parameter name (e.g. `CURSOR`), not by the columns the cursor returns. REST invocations are unaffected (the response is keyed by the actual returned columns), but the GraphQL schema for a cursor-returning subprogram exposes the cursor parameter name rather than the rowset's columns, so GraphQL queries over stored-procedure result sets are not reliably typed. Prefer REST for stored-procedure invocations on Oracle until cursor-column discovery is implemented.
+- **Scalar OUT/IN OUT parameters.** Subprograms whose result is a scalar OUT/IN OUT parameter (no REF CURSOR) are invoked with only their IN arguments; the OUT argument is not bound, so such subprograms fail at request time. Only subprograms with IN parameters plus an optional REF CURSOR OUT parameter are supported.
+
+Oracle stored-procedure metadata discovery (including OUT parameters and REF CURSOR metadata) is used to validate signatures for schema generation. Invoking a procedure whose metadata cannot be resolved, or that returns an unsupported result shape, surfaces an error at request time.
+
+### Autoentities and aggregation
+
+Oracle autoentity discovery is supported: tables with a primary key are discovered through `ALL_TABLES` (Oracle-maintained system schemas are excluded) and materialized as entities according to the include/exclude/name patterns, both at engine startup and through `dab auto-config-simulate`. Generated entity names are lowercased so REST paths and GraphQL type names stay stable regardless of catalog folding; unmapped columns still surface as the catalog spelling (see Identifier casing). The SQL aggregation GraphQL surface (groupBy) is enabled for Oracle and emits `GROUP BY`, `HAVING`, and aggregation columns (COUNT/SUM/AVG/MIN/MAX) through the shared query-builder contracts.
+
+### GraphQL multiple-create
+
+Nested GraphQL create (parent/child/linking inserts in FK order, then a follow-up SELECT of created keys) is supported for Oracle when the CLI flag or config option is enabled, the same as MSSQL. The path uses a **local `OracleTransaction`** on a single connection (`ExecuteQueryOnConnection`); it is **not XA** and does not rely on `TransactionScope` promotion.
+
+Oracle rejects the `AS` keyword on table aliases (`INNER JOIN t AS alias`); generated join/FROM/EXISTS SQL omits `AS`.
+
+Create-policy failure on a non-linking insert returns **403** (`DatabasePolicyFailure`). Trigger-assigned primary keys that cannot be returned to the mutation engine result in **500** and **rollback** of the nested graph.
+
+This path is **GraphQL-only**. REST batch/array create does not share it (same as MSSQL).
+
+### Binary values
+
+Oracle `RAW` values are serialized as base64. `BLOB` columns are typed as byte[] and null-guarded during base64 encoding; values larger than roughly 2000 bytes are not covered because `UTL_ENCODE.BASE64_ENCODE` accepts `RAW` and the implicit `BLOB`-to-`RAW` conversion is size-limited.
+
+### Date and time filter values
+
+GraphQL filter literals for `DATE`/`TIMESTAMP` columns arrive as strings. Left as a `VARCHAR2` bind, Oracle converts the string with the session NLS date format (default `DD-MON-RR`), so ISO 8601 filter values raise `ORA-01861`/`ORA-01843` and only the Oracle-specific `DD-MON-RR` spelling works. `BaseSqlQueryStructure.MakeDbConnectionParam` parses such values into the column's date/time type before binding; the invariant-culture parse accepts both ISO 8601 (`2026-01-01`, `2026-01-01T10:23:00Z`) and the `DD-MON-RR` spelling, so filters no longer depend on NLS settings. `TIMESTAMP WITH TIME ZONE` columns keep the offset (bound as `TimeStampTZ` by `OracleQueryExecutor`); plain `DATE`/`TIMESTAMP` values are bound as the UTC wall clock. OData date literals (REST/MCP) are converted by the same executor conversion.
+
+### Synonyms
+
+Oracle resolves an **unqualified** name in this order: object in the current schema, then a **private synonym** owned by the current user, then a **public** synonym (`OWNER = 'PUBLIC'`). A **schema-qualified** name never uses a public synonym.
+
+DAB always schema-qualifies and quotes (`QuoteRelation` → `"USER"."OBJECT"`), so public synonyms would be skipped if the synonym name were emitted as-is. Catalog views (`ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, …) describe the **base** object, not the synonym.
+
+At startup, `OracleMetadataProvider` resolves each source (and FK pair table) to the local base object, then FillSchema and SQL use those physical names.
+
+Resolution (Oracle’s own order):
+
+1. Unqualified source (schema is the connected user, or `PUBLIC`): current-schema table/view/procedure, else private synonym, else public synonym (`OWNER = 'PUBLIC'`).
+2. Schema-qualified source other than the connected user / `PUBLIC`: object or private synonym in that schema only — no public fallback.
+3. Follow nested synonyms with a cycle/depth guard (max 10).
+4. If `DB_LINK` is set, fail startup (local objects only).
+5. Packaged stored procedures (`schema.package.sub`) are left unchanged; standalone subprogram synonyms are resolved.
+
+Autoentity discovery stays on `ALL_TABLES`. Synonym sources are opt-in via entity config.
+
+No change to `QuoteRelation` / shared SQL: after resolve, emit the base catalog names.
+
+## Identifier casing
+
+Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every identifier, so SQL must use the **catalog spelling** (physical backing name). REST/GraphQL/OData names are a separate **exposed** layer.
+
+- Backing names on `SourceDefinition` (columns, primary key, FK column lists) are the catalog spelling: `ID`, `BOOK_ID`, or the exact spelling of a quoted identifier.
+- Exposed names are the name **as provided to the engine**: the entity config mapping / field alias verbatim when one is configured, otherwise the catalog spelling of the column. Unmapped unquoted columns therefore surface as `ID` / `BOOK_ID`, and quoted columns keep their exact catalog spelling (e.g. `"ID Number"`). There is no lowercase fallback.
+- Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject` (uppercase, quoted). DAB-generated aliases go through `QuoteTableAlias`. Quoted mixed-case *tables* are not covered yet.
+- The Oracle test config supplies explicit lowercase mappings for the columns the shared API suite expects (e.g. `publisher_id`, `categoryid`) so the shared contract is preserved; entities injected by the test harness (`magazine`, `bar_magazine`) get the same mappings in `TestHelper.AddMissingEntitiesToConfig`.
+
+Casing translation lives in `OracleMetadataProvider` (config name → physical backing name) and `OracleQueryBuilder` (physical name → SQL identifier). Shared SQL/GraphQL code talks to the existing backing/exposed maps (`TryGetBackingColumn` / `TryGetExposedColumnName`) and does not special-case Oracle.
+
+## Authorization policies
+
+Database policies (`permissions[].actions[].policy.database`) use the shared engine-agnostic pipeline: `AuthorizationPolicyHelpers` resolves the policy for the role/operation (compound upsert operations expand to Update + Create), claim references (`@claims.x`) are replaced with typed bound parameters, `ODataASTVisitor` maps `@item.field` exposed names to physical backing columns and quotes them, and each builder injects the resulting predicate via `GetDbPolicyForOperation`.
+
+Oracle specifics:
+
+- **Predicate placement.** Read/update/delete policies are ANDed into the `WHERE` clause exactly like the other engines. Create (and the insert branch of upsert) cannot use `INSERT … SELECT … WHERE`, so Oracle gates the insert with `SELECT COUNT(*) INTO v FROM (SELECT value AS "COL", … FROM DUAL) WHERE <policy>` and opens an empty REF CURSOR when the policy is unsatisfied, which surfaces as HTTP 403.
+- **Inserts with no column values.** When the request body supplies no insertable columns, the policy cannot be evaluated against a row, so the request is rejected with HTTP 400 `DatabasePolicyFailure` instead of falling back to a `DEFAULT VALUES` insert (this is enforced for all engines; the other engines previously bypassed the create policy in that case).
+- **Empty string is NULL.** Oracle cannot store `''` distinctly from `NULL`, so a policy comparing a column to `''` is rewritten to the equivalent `IS NULL` / `IS NOT NULL` predicate (`@item.col eq ''` → `"COL" IS NULL`, `@item.col ne ''` → `"COL" IS NOT NULL`). Other engines compare against a real empty string.
+- **String comparison is case-sensitive** under Oracle's default binary collation.
+- **Numeric comparisons** bind policy literals for `NUMBER` columns as `decimal`; boolean-style predicates against `NUMBER(1)` columns are not supported.
+- **Invalid policy fields** (a field the entity does not expose) are rejected while processing the policy with a clear authorization error, rather than producing a malformed predicate.
+- **Multiple-create** applies the read policy of each created/related entity, combined with the OR'd primary-key predicate, in the same way as MSSQL.
+
+## Nested reads: keyed CTE aggregation
+
+Nested GraphQL relationship selections are generated as **keyed aggregate CTEs** by `OracleQueryBuilder` instead of correlated `LEFT OUTER JOIN LATERAL` subqueries:
+
+- Each relationship whose correlation predicates are plain column equalities becomes one `WITH "<alias>_cte" AS (…)` block. Inside it, child rows are ranked with `ROW_NUMBER() OVER (PARTITION BY <foreign keys> ORDER BY <child order>)`, the per-parent top-N is kept (`N` is the child's limit, including the extra row used for pagination), and the JSON fragment is aggregated once per parent key (`JSON_ARRAYAGG` for lists, the single `JSON_OBJECT` for to-one).
+- The parent joins the CTE on the foreign keys (`LEFT OUTER JOIN "<alias>_cte" ON …`). CTEs are emitted leaf-first, so a nested CTE can reference the CTEs of its own relationships. List fragments are wrapped in `COALESCE(…, TO_CLOB(JSON_ARRAY()))` so a parent with no children still deserializes as `[]`.
+- Relationships that cannot be de-correlated (non-equality correlation predicates, nested `groupBy`) fall back to the previous correlated LATERAL form, so the JSON contract is unchanged.
+- The request page is materialized first (`dab_page_cte`, with the root filters/policy/keyset predicate/order/limit applied), direct child aggregates are restricted to the page keys through an `INNER JOIN (SELECT DISTINCT …)`, and the final query reads the page CTE when the root has no associative joins so the root predicates run once.
+- The page CTE is emitted with an explicit `MATERIALIZE` hint. It is read by the final query and by every direct child aggregate, and its definition can itself reference a set-based filter CTE; some Oracle versions inline a query name used more than once when its definition references another query name and then fail with `ORA-32036: unsupported case for inlining of query name in WITH clause`. The hint applies Oracle's documented workaround and also keeps the page computation (and its filter scan) from being evaluated once per reader.
+- Nested-relationship filters (GraphQL filters on a related entity) are normally rendered as correlated `EXISTS` subqueries. For the page computation - and for the root query when no page CTE feeds it - ANDed nested filters are rewritten as set-based `SELECT DISTINCT <child correlation columns> …` key CTEs that are joined once, so the query never probes the child table per candidate parent. Filters nested under `OR`/`NOT` keep the correlated `EXISTS` to preserve boolean semantics.
+
+Motivation: Oracle's transformation of the LATERAL form can pick a per-parent plan (`INDEX FULL SCAN` + `WINDOW … PUSHED RANK` that only stops after accumulating `N` matches per parent), which rescans the child table once per parent. On a synthetic skewed shape (2,000 parents, 1M children, 5 parents with 50k children) the generated CTE form measured ~0.4 s / ~6.6k buffer gets versus ~9.6 s / ~1.3M buffer gets for the LATERAL form, with byte-identical JSON (`JSON_EQUAL`). A second motivating case is a 45.6M-row child table where the correlated nested-filter `EXISTS` was planned as an index join over the whole date window (minutes per page); the set-based key CTE turned the same page into a single window scan plus key joins, with the estimated cost dropping from 38M to 5.8K.
+
+## Cursor usage and ODP.NET statement caching
+
+DAB disposes every `DbDataReader`/`DbCommand` after a result is read, including the REF CURSOR output parameters used by the PL/SQL DML blocks, so it does not leak cursors. However, ODP.NET's client-side statement cache retains one open cursor per **distinct** SQL statement on a connection (measured: the cursor count grows by one per distinct statement and stays flat for repeated statements). On a long-lived pooled session that executes many distinct statements this consumes the account's per-session `open_cursors` limit (Oracle default `300`), surfacing at request time as:
+
+```
+ORA-00604: Error occurred at recursive SQL level 1.
+ORA-01000: maximum open cursors for session exceeded
+```
+
+Handle it either at the database or from the DAB connection string:
+
+- **Size the database limit** for the DAB account/host, e.g. `ALTER SYSTEM SET open_cursors = 1500 SCOPE = BOTH;` (applies to new sessions). Recommended for normal deployments.
+- **Bound or disable the ODP.NET statement cache** by adding ODP.NET attributes to the DAB data-source connection string:
+  - `Self Tuning=false` — stop ODP.NET from auto-sizing the cache by workload.
+  - `Statement Cache Size=<n>` — cap the number of retained statements (honored when `Self Tuning=false`).
+  - `Statement Cache Size=0;Self Tuning=false` — disable caching entirely. Cursor usage then stays flat regardless of `open_cursors`, at the cost of re-parsing each statement.
+
+  DAB preserves these attributes when it builds the ODP.NET connection. Example:
+
+  ```json
+  "connection-string": "Data Source=...;User Id=...;Password=...;Statement Cache Size=50;Self Tuning=false;"
+  ```
+
+### Command timeout
+
+ODP.NET's command timeout defaults to 0 (wait forever), while the other ADO.NET providers DAB uses default to 30 seconds. The Oracle executor caps every command (`OracleCommand.CommandTimeout`, applied in `PrepareDbCommand`) so a runaway query fails with `ORA-01013` instead of pinning the request. The default is 30 seconds and can be overridden per data source:
+
+```json
+"data-source": {
+  "database-type": "oracle",
+  "connection-string": "...",
+  "options": { "command-timeout": 60 }
+}
+```
+
+`command-timeout` is in seconds; `0` disables the cap. The cap is applied per command rather than through ODP.NET's process-wide `OracleConfiguration.CommandTimeout`, which ODP.NET rejects once any connection has been opened (`ORA-50099`) and would therefore break hot reload and long-lived processes.
+
+### Test database
+
+The Oracle integration suite issues several hundred distinct statements, so it exhausts the default `open_cursors=300` partway through a full `TestCategory=ORACLE` run. The test container must either set `open_cursors=1500` or the test connection string must bound the statement cache; with either in place the full category passes. This is cursor-cache sizing, not a DAB query-path leak: 500 repeated list queries, 400 repeated upserts, and repeated `DatabaseSchema-Oracle.sql` re-initialization all leave the cursor count flat or plateaued.

@@ -124,6 +124,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow(true, "postgresql", DisplayName = "Replace environment variables when datasource option is null.")]
         [DataRow(false, "dwsql", DisplayName = "Do not replace environment variables when datasource option is not given.")]
         [DataRow(true, "dwsql", DisplayName = "Replace environment variables when datasource option is not given.")]
+        [DataRow(false, "oracle", DisplayName = "Do not replace environment variables when datasource option is not given.")]
+        [DataRow(true, "oracle", DisplayName = "Replace environment variables when datasource option is not given.")]
         public void TestConfigParsingWithEnvVarReplacement(bool replaceEnvVar, string databaseType)
         {
             // Arrange
@@ -157,6 +159,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     break;
                 case "dwsql":
                     Assert.AreEqual(runtimeConfig.DataSource.DatabaseType, DatabaseType.DWSQL);
+                    Assert.AreEqual(runtimeConfig.DataSource.Options, null);
+                    break;
+                case "oracle":
+                    Assert.AreEqual(runtimeConfig.DataSource.DatabaseType, DatabaseType.Oracle);
                     Assert.AreEqual(runtimeConfig.DataSource.Options, null);
                     break;
             }
@@ -704,6 +710,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     databaseTypeEnvVariable = $"@env('DWSQL_DB_TYPE')";
                     options = "";
                     break;
+                case "oracle":
+                    databaseTypeEnvVariable = $"@env('ORACLE_DB_TYPE')";
+                    options = "";
+                    break;
             }
 
             return $@"
@@ -754,6 +764,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             { "MYSQL_DB_TYPE", "mysql" },
             { "POSTGRESQL_DB_TYPE", "postgresql" },
             { "DWSQL_DB_TYPE", "dwsql" },
+            { "ORACLE_DB_TYPE", "oracle" },
             { "MSSQL_SET_SESSION_CONTEXT", "true" },
             { "DATABASE_CONTAINER", "xyz"},
             { "DATABASE_NAME", "planet" },

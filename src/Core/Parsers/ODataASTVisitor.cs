@@ -1,9 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Net;
+using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.OData.Edm;
 using Microsoft.OData.UriParser;
 
@@ -34,6 +38,14 @@ namespace Azure.DataApiBuilder.Core.Parsers
         /// <returns>String concatenation of (left op right).</returns>
         public override string Visit(BinaryOperatorNode nodeIn)
         {
+            // Oracle stores the empty string as NULL, so a policy comparing a column to '' is
+            // rewritten to the equivalent IS [NOT] NULL predicate. Without the rewrite the policy
+            // would compare against a NULL literal and could match the wrong rows (all NULLs).
+            if (TryGetOracleEmptyStringNullPredicate(nodeIn, out string? nullPredicate))
+            {
+                return nullPredicate!;
+            }
+
             // In order traversal but add parens to maintain order of logical operations
             string left = nodeIn.Left.Accept(this);
             string right = nodeIn.Right.Accept(this);
@@ -47,6 +59,76 @@ namespace Azure.DataApiBuilder.Core.Parsers
             }
 
             return CreateResult(nodeIn.OperatorKind, left, right);
+        }
+
+        /// <summary>
+        /// Oracle-only rewrite of a property-vs-empty-string comparison into an IS NULL / IS NOT NULL
+        /// predicate, because Oracle cannot store an empty string distinctly from NULL.
+        /// Returns false for every other database/operator/operand combination.
+        /// </summary>
+        internal static bool TryGetOracleEmptyStringPredicate(
+            DatabaseType databaseType,
+            BinaryOperatorKind operatorKind,
+            SingleValueNode left,
+            SingleValueNode right,
+            out SingleValuePropertyAccessNode? propertyNode,
+            out bool isNullPredicate)
+        {
+            propertyNode = null;
+            isNullPredicate = false;
+
+            if (databaseType is not DatabaseType.Oracle
+                || operatorKind is not (BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual))
+            {
+                return false;
+            }
+
+            SingleValueNode unwrappedLeft = UnwrapConvertNode(left);
+            SingleValueNode unwrappedRight = UnwrapConvertNode(right);
+
+            SingleValueNode? constantSide = unwrappedRight;
+            SingleValuePropertyAccessNode? property = unwrappedLeft as SingleValuePropertyAccessNode;
+            if (property is null)
+            {
+                property = unwrappedRight as SingleValuePropertyAccessNode;
+                constantSide = unwrappedLeft;
+            }
+
+            if (property is null
+                || constantSide is not ConstantNode constant
+                || constant.Value is not string constantString
+                || constantString.Length != 0)
+            {
+                return false;
+            }
+
+            propertyNode = property;
+            isNullPredicate = operatorKind is BinaryOperatorKind.Equal;
+            return true;
+        }
+
+        private static SingleValueNode UnwrapConvertNode(SingleValueNode node)
+        {
+            return node is ConvertNode convert ? convert.Source : node;
+        }
+
+        private bool TryGetOracleEmptyStringNullPredicate(BinaryOperatorNode nodeIn, out string? predicate)
+        {
+            predicate = null;
+            if (TryGetOracleEmptyStringPredicate(
+                    _metadataProvider.GetDatabaseType(),
+                    nodeIn.OperatorKind,
+                    nodeIn.Left,
+                    nodeIn.Right,
+                    out SingleValuePropertyAccessNode? propertyNode,
+                    out bool isNullPredicate))
+            {
+                string column = Visit(propertyNode!);
+                predicate = $"({column} {(isNullPredicate ? "IS NULL" : "IS NOT NULL")})";
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -275,6 +357,7 @@ namespace Azure.DataApiBuilder.Core.Parsers
             SingleValuePropertyAccessNode propertyNode = nodeIn.Left.GetType() == typeof(SingleValuePropertyAccessNode) ?
                     (SingleValuePropertyAccessNode)nodeIn.Left : (SingleValuePropertyAccessNode)nodeIn.Right;
             string? paramName = BaseQueryStructure.GetEncodedParamName(_struct.Counter.Current() - 1);
+
             _metadataProvider.TryGetBackingColumn(_struct.EntityName, propertyNode.Property.Name, out string? backingColumnName);
             _struct.Parameters[paramName].DbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].DbType;
             _struct.Parameters[paramName].SqlDbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].SqlDbType;

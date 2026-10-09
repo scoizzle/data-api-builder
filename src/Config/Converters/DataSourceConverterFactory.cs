@@ -125,6 +125,17 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                         {
                                             optionsSubpropertyValue = reader.GetBoolean();
                                         }
+                                        else if (reader.TokenType is JsonTokenType.Number)
+                                        {
+                                            // Numeric options (e.g. Oracle's command-timeout) are
+                                            // materialized as ints, mirroring the string/bool cases.
+                                            if (!reader.TryGetInt32(out int numberValue))
+                                            {
+                                                throw new JsonException($"Unexpected numeric value for options {optionsSubproperty} while deserializing DataSource options.");
+                                            }
+
+                                            optionsSubpropertyValue = numberValue;
+                                        }
                                         else if (reader.TokenType is JsonTokenType.Null)
                                         {
                                             optionsSubpropertyValue = null;

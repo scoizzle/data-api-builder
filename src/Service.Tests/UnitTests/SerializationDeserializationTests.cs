@@ -108,7 +108,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             // Note: On Addition of property make sure it is added in following object creation _databaseStoredProcedure and include in serialization
             // and deserialization test.
             int fields = typeof(DatabaseStoredProcedure).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).Length;
-            Assert.AreEqual(fields, 6);
+            // 9: the six base properties plus PackageName, IsFunction and Overload (Oracle package support).
+            Assert.AreEqual(fields, 9);
 
             string serializedDatabaseSP = JsonSerializer.Serialize(_databaseStoredProcedure, _options);
             DatabaseStoredProcedure deserializedDatabaseSP = JsonSerializer.Deserialize<DatabaseStoredProcedure>(serializedDatabaseSP, _options)!;
@@ -367,7 +368,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             // Note: On Addition of property make sure it is added in following object creation _databaseStoredProcedure and include in serialization
             // and deserialization test.
             int fields = typeof(DatabaseStoredProcedure).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).Length;
-            Assert.AreEqual(fields, 6);
+            // 9: the six base properties plus PackageName, IsFunction and Overload (Oracle package support).
+            Assert.AreEqual(fields, 9);
 
             string serializedDatabaseSP = JsonSerializer.Serialize(dict, _options);
             // Assert that the serialized JSON contains the escaped dollar sign in column name
@@ -526,7 +528,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             // test number of properties/fields defined in Column Definition
             int fields = typeof(ColumnDefinition).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).Length;
-            Assert.AreEqual(fields, 11);
+            // 13: the eleven previous backing fields plus IsClob and IsBlob (Oracle LOB output binds).
+            Assert.AreEqual(fields, 13);
 
             // test values
             expectedColumnDefinition.Equals(deserializedColumnDefinition);

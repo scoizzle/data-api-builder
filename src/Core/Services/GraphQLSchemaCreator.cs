@@ -607,9 +607,31 @@ namespace Azure.DataApiBuilder.Core.Services
                 {
                     IEnumerable<ForeignKeyDefinition> foreignKeyDefinitionsFromSourceToTarget = sourceDbo.SourceDefinition.SourceEntityRelationshipMap[sourceEntityName].TargetEntityToFkDefinitionMap[targetEntityName];
 
-                    // Get list of all referencing columns from the foreign key definition. For an M:N relationship,
-                    // all the referencing columns belong to the linking entity.
-                    HashSet<string> referencingColumnNamesInLinkingEntity = new(foreignKeyDefinitionsFromSourceToTarget.SelectMany(foreignKeyDefinition => foreignKeyDefinition.ReferencingColumns).ToList());
+                    // ReferencingColumns are backing (physical) names. GraphQL field names on the
+                    // linking node are exposed names. Convert through the metadata map so engines
+                    // where backing != exposed (Oracle) still match; identity for the others.
+                    HashSet<string> referencingColumnNamesInLinkingEntity = new();
+                    foreach (ForeignKeyDefinition foreignKeyDefinition in foreignKeyDefinitionsFromSourceToTarget)
+                    {
+                        foreach (string referencingColumn in foreignKeyDefinition.ReferencingColumns)
+                        {
+                            string nameForGraphQL = referencingColumn;
+                            try
+                            {
+                                if (sqlMetadataProvider.TryGetExposedColumnName(linkingEntityName, referencingColumn, out string? exposedName)
+                                    && !string.IsNullOrEmpty(exposedName))
+                                {
+                                    nameForGraphQL = exposedName;
+                                }
+                            }
+                            catch (System.Collections.Generic.KeyNotFoundException)
+                            {
+                                // Linking entity maps are not always populated (e.g. multiple-create off).
+                            }
+
+                            referencingColumnNamesInLinkingEntity.Add(nameForGraphQL);
+                        }
+                    }
 
                     // Store the names of relationship/column fields in the target entity to prevent conflicting names
                     // with the linking table's column fields.
@@ -732,7 +754,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     case DatabaseType.CosmosDB_NoSQL:
                         cosmosDataSourceNames.Add(_runtimeConfigProvider.GetConfig().GetDataSourceNameFromEntityName(entityName));
                         break;
-                    case DatabaseType.MSSQL or DatabaseType.MySQL or DatabaseType.PostgreSQL or DatabaseType.DWSQL:
+                    case DatabaseType.MSSQL or DatabaseType.MySQL or DatabaseType.PostgreSQL or DatabaseType.DWSQL or DatabaseType.Oracle:
                         sqlEntities.TryAdd(entityName, entity);
                         break;
                     default:

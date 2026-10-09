@@ -461,7 +461,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Write the join in sql
         /// INNER JOIN {TableName} AS {SourceAlias} ON {JoinPredicates}
         /// </summary>
-        protected string Build(SqlJoinStructure join)
+        protected virtual string Build(SqlJoinStructure join)
         {
             if (join is null)
             {
@@ -517,13 +517,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc />
-        public virtual string BuildForeignKeyInfoQuery(int numberOfParameters)
+        public virtual string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
         {
             string[] schemaNameParams =
-                CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfParameters);
+                CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);
 
             string[] tableNameParams =
-                CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfParameters);
+                CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfTableParameters);
             string tableSchemaParamsForInClause = string.Join(", @", schemaNameParams);
             string tableNameParamsForInClause = string.Join(", @", tableNameParams);
 

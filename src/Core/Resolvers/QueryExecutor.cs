@@ -319,6 +319,116 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return result;
         }
 
+        /// <inheritdoc/>
+        public virtual async Task<TResult?> ExecuteQueryOnConnectionAsync<TResult>(
+            DbConnection connection,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            Func<DbDataReader, List<string>?, Task<TResult>>? dataReaderHandler,
+            string dataSourceName,
+            DbTransaction? transaction,
+            HttpContext? httpContext = null,
+            List<string>? args = null)
+        {
+            if (string.IsNullOrEmpty(dataSourceName))
+            {
+                dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
+            }
+
+            TConnection conn = (TConnection)connection;
+
+            if (transaction is not null)
+            {
+                QueryExecutorLogger.LogDebug(
+                    "{correlationId} Executing query on a local transaction; Polly retry is skipped because a failed statement must not retry on a doomed transaction.",
+                    HttpContextExtensions.GetLoggerCorrelationId(httpContext));
+            }
+
+            try
+            {
+                if (!ConfigProvider.IsLateConfigured)
+                {
+                    string correlationId = HttpContextExtensions.GetLoggerCorrelationId(httpContext);
+                    QueryExecutorLogger.LogDebug("{correlationId} Executing query: {queryText}", correlationId, sqltext);
+                }
+
+                return await ExecuteQueryAgainstDbAsync(
+                    conn,
+                    sqltext,
+                    parameters,
+                    dataReaderHandler,
+                    httpContext,
+                    dataSourceName,
+                    args,
+                    transaction,
+                    reuseConnection: true);
+            }
+            catch (DbException e)
+            {
+                QueryExecutorLogger.LogError(
+                    exception: e,
+                    message: "{correlationId} Query execution error due to:\n{errorMessage}",
+                    HttpContextExtensions.GetLoggerCorrelationId(httpContext),
+                    e.Message);
+                throw DbExceptionParser.Parse(e);
+            }
+        }
+
+        /// <inheritdoc/>
+        public virtual TResult? ExecuteQueryOnConnection<TResult>(
+            DbConnection connection,
+            string sqltext,
+            IDictionary<string, DbConnectionParam> parameters,
+            Func<DbDataReader, List<string>?, TResult>? dataReaderHandler,
+            HttpContext? httpContext,
+            List<string>? args,
+            string dataSourceName,
+            DbTransaction? transaction)
+        {
+            if (string.IsNullOrEmpty(dataSourceName))
+            {
+                dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
+            }
+
+            TConnection conn = (TConnection)connection;
+
+            if (transaction is not null)
+            {
+                QueryExecutorLogger.LogDebug(
+                    "{correlationId} Executing query on a local transaction; Polly retry is skipped because a failed statement must not retry on a doomed transaction.",
+                    HttpContextExtensions.GetLoggerCorrelationId(httpContext));
+            }
+
+            try
+            {
+                if (!ConfigProvider.IsLateConfigured)
+                {
+                    string correlationId = HttpContextExtensions.GetLoggerCorrelationId(httpContext);
+                    QueryExecutorLogger.LogDebug("{correlationId} Executing query: {queryText}", correlationId, sqltext);
+                }
+
+                return ExecuteQueryAgainstDb(
+                    conn,
+                    sqltext,
+                    parameters,
+                    dataReaderHandler,
+                    httpContext,
+                    dataSourceName,
+                    args,
+                    transaction,
+                    reuseConnection: true);
+            }
+            catch (DbException e)
+            {
+                QueryExecutorLogger.LogError(
+                    exception: e,
+                    message: "{correlationId} Query execution error due to:\n{errorMessage}",
+                    HttpContextExtensions.GetLoggerCorrelationId(httpContext),
+                    e.Message);
+                throw DbExceptionParser.Parse(e);
+            }
+        }
+
         /// <summary>
         /// Creates and setups a TConnection to the data source of given name
         /// </summary>
@@ -361,7 +471,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             Func<DbDataReader, List<string>?, Task<TResult>>? dataReaderHandler,
             HttpContext? httpContext,
             string dataSourceName,
-            List<string>? args = null)
+            List<string>? args = null,
+            DbTransaction? transaction = null,
+            bool reuseConnection = false)
         {
             return await ExecuteQueryAgainstDbAsyncCore(
                 conn,
@@ -371,7 +483,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 httpContext,
                 dataSourceName,
                 args,
-                httpContext?.RequestAborted ?? CancellationToken.None);
+                httpContext?.RequestAborted ?? CancellationToken.None,
+                transaction,
+                reuseConnection);
         }
 
         public virtual async Task<TResult?> ExecuteQueryAgainstDbAsync<TResult>(
@@ -392,7 +506,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 httpContext,
                 dataSourceName,
                 args,
-                cancellationToken);
+                cancellationToken,
+                transaction: null,
+                reuseConnection: false);
         }
 
         private async Task<TResult?> ExecuteQueryAgainstDbAsyncCore<TResult>(
@@ -403,18 +519,29 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             HttpContext? httpContext,
             string dataSourceName,
             List<string>? args,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            DbTransaction? transaction = null,
+            bool reuseConnection = false)
         {
             Stopwatch queryExecutionTimer = new();
             queryExecutionTimer.Start();
             try
             {
-                await conn.OpenAsync(cancellationToken);
-                DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                if (!reuseConnection || conn.State != ConnectionState.Open)
+                {
+                    await conn.OpenAsync(cancellationToken);
+                }
+
+                using DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                if (transaction is not null)
+                {
+                    cmd.Transaction = transaction;
+                }
+
                 TResult? result = default(TResult);
                 try
                 {
-                    CommandBehavior commandBehavior = ConfigProvider.GetConfig().MaxResponseSizeLogicEnabled() ? CommandBehavior.SequentialAccess : CommandBehavior.CloseConnection;
+                    CommandBehavior commandBehavior = GetCommandBehavior(reuseConnection);
                     // CancellationToken is passed to ExecuteReaderAsync to ensure that if the client times out while the query is executing, the execution will be cancelled and resources will be freed up.
                     using DbDataReader dbDataReader = await cmd.ExecuteReaderAsync(commandBehavior, cancellationToken);
 
@@ -494,19 +621,28 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             Func<DbDataReader, List<string>?, TResult>? dataReaderHandler,
             HttpContext? httpContext,
             string dataSourceName,
-            List<string>? args = null)
+            List<string>? args = null,
+            DbTransaction? transaction = null,
+            bool reuseConnection = false)
         {
             Stopwatch queryExecutionTimer = new();
             queryExecutionTimer.Start();
             try
             {
-                conn.Open();
-                DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                if (!reuseConnection || conn.State != ConnectionState.Open)
+                {
+                    conn.Open();
+                }
+
+                using DbCommand cmd = PrepareDbCommand(conn, sqltext, parameters, httpContext, dataSourceName);
+                if (transaction is not null)
+                {
+                    cmd.Transaction = transaction;
+                }
 
                 try
                 {
-                    using DbDataReader dbDataReader = ConfigProvider.GetConfig().MaxResponseSizeLogicEnabled() ?
-                        cmd.ExecuteReader(CommandBehavior.SequentialAccess) : cmd.ExecuteReader(CommandBehavior.CloseConnection);
+                    using DbDataReader dbDataReader = cmd.ExecuteReader(GetCommandBehavior(reuseConnection));
                     if (dataReaderHandler is not null && dbDataReader is not null)
                     {
                         return dataReaderHandler(dbDataReader, args);
@@ -532,6 +668,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 queryExecutionTimer.Stop();
                 AddDbExecutionTimeToMiddlewareContext(queryExecutionTimer.ElapsedMilliseconds);
             }
+        }
+
+        /// <summary>
+        /// When reusing a connection enlisted in a local transaction, the reader must not close the connection.
+        /// SequentialAccess is still used when max-response-size logic is enabled.
+        /// </summary>
+        private CommandBehavior GetCommandBehavior(bool reuseConnection)
+        {
+            if (reuseConnection)
+            {
+                return ConfigProvider.GetConfig().MaxResponseSizeLogicEnabled()
+                    ? CommandBehavior.SequentialAccess
+                    : CommandBehavior.Default;
+            }
+
+            return ConfigProvider.GetConfig().MaxResponseSizeLogicEnabled()
+                ? CommandBehavior.SequentialAccess
+                : CommandBehavior.CloseConnection;
         }
 
         /// <inheritdoc />
@@ -608,6 +762,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 throw DbExceptionParser.Parse(e);
             }
         }
+
         /// <inheritdoc />
         public async Task<DbResultSet>
             ExtractResultSetFromDbDataReaderAsync(DbDataReader dbDataReader, List<string>? args = null)
@@ -986,6 +1141,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 while (await ReadAsync(dbDataReader))
                 {
+                    if (dbDataReader.IsDBNull(0))
+                    {
+                        continue;
+                    }
+
                     jsonString.Append(dbDataReader.GetString(0));
                 }
             }

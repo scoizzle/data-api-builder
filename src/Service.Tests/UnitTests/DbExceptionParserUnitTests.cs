@@ -138,5 +138,31 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 DataApiBuilderException.SubStatusCodes.DatabaseInputError,
                 dbExceptionParser.GetResultSubStatusCodeForException(sqlException));
         }
+
+        [DataTestMethod]
+        [DataRow("1031", System.Net.HttpStatusCode.Forbidden, DisplayName = "ORA-01031 insufficient privileges maps to 403")]
+        [DataRow("1400", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01400 still maps to 400")]
+        [DataRow("1", System.Net.HttpStatusCode.Conflict, DisplayName = "ORA-00001 unique constraint maps to 409")]
+        public void OracleErrorCodesMapToExpectedHttpStatus(string errorCode, System.Net.HttpStatusCode expected)
+        {
+            RuntimeConfig mockConfig = new(
+                Schema: "",
+                DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", new()),
+                Runtime: new(
+                    Rest: new(),
+                    GraphQL: new(),
+                    Mcp: new(),
+                    Host: new(null, null, HostMode.Development)
+                ),
+                Entities: new(new Dictionary<string, Entity>())
+            );
+            MockFileSystem fileSystem = new();
+            fileSystem.AddFile(FileSystemRuntimeConfigLoader.DEFAULT_CONFIG_FILE_NAME, new MockFileData(mockConfig.ToJson()));
+            FileSystemRuntimeConfigLoader loader = new(fileSystem);
+            RuntimeConfigProvider provider = new(loader);
+            OracleDbExceptionParser parser = new(provider);
+
+            Assert.AreEqual(expected, parser.MapStatusCode(errorCode));
+        }
     }
 }
