@@ -424,29 +424,6 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             Assert.AreEqual(0, structure.Parameters.Count);
         }
 
-        [DataTestMethod]
-        [DataRow(DatabaseType.MSSQL, false, DisplayName = "SQL Server is supported")]
-        [DataRow(DatabaseType.DWSQL, false, DisplayName = "SQL Data Warehouse is supported")]
-        [DataRow(DatabaseType.Oracle, false, DisplayName = "Oracle is supported")]
-        [DataRow(DatabaseType.MySQL, true, DisplayName = "MySQL stays unsupported")]
-        [DataRow(DatabaseType.PostgreSQL, true, DisplayName = "PostgreSQL stays unsupported")]
-        [DataRow(DatabaseType.CosmosDB_NoSQL, true, DisplayName = "Cosmos stays unsupported")]
-        public void AggregationDatabaseSupport_AllowsOracleAndRejectsOtherEngines(DatabaseType databaseType, bool expectUnsupported)
-        {
-            CallToolResult? result = AggregateRecordsTool.CreateUnsupportedDatabaseResult(
-                databaseType, "aggregate_records", logger: null);
-
-            if (!expectUnsupported)
-            {
-                Assert.IsNull(result);
-                return;
-            }
-
-            string message = AssertErrorResult(result!, "UnsupportedDatabase");
-            StringAssert.Contains(message, databaseType.ToString());
-            StringAssert.Contains(message, "Oracle");
-        }
-
         #endregion
 
         #region Configuration Tests

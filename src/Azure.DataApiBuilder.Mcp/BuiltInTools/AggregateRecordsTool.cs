@@ -244,10 +244,10 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 // 5. Validate database type support
                 DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
-                CallToolResult? unsupportedDatabase = CreateUnsupportedDatabaseResult(databaseType, toolName, logger);
-                if (unsupportedDatabase != null)
+                if (databaseType != DatabaseType.MSSQL && databaseType != DatabaseType.DWSQL && databaseType != DatabaseType.Oracle)
                 {
-                    return unsupportedDatabase;
+                    return McpResponseBuilder.BuildErrorResult(toolName, "UnsupportedDatabase",
+                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, and Oracle.", logger);
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
@@ -936,28 +936,6 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
             }
 
             return combinedHaving;
-        }
-
-        /// <summary>
-        /// Returns UnsupportedDatabase for engines that cannot run aggregate_records.
-        /// Azure SQL, SQL Server, SQL Data Warehouse, and Oracle are supported.
-        /// PostgreSQL would receive the SQL Server splice, and MySQL does not emit aggregate SQL.
-        /// </summary>
-        internal static CallToolResult? CreateUnsupportedDatabaseResult(
-            DatabaseType databaseType,
-            string toolName,
-            ILogger? logger)
-        {
-            if (databaseType is DatabaseType.MSSQL or DatabaseType.DWSQL or DatabaseType.Oracle)
-            {
-                return null;
-            }
-
-            return McpResponseBuilder.BuildErrorResult(
-                toolName,
-                "UnsupportedDatabase",
-                $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, and Oracle.",
-                logger);
         }
 
         /// <summary>
