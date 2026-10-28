@@ -20,6 +20,7 @@ using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Mcp.Model;
 using Azure.DataApiBuilder.Mcp.Utils;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -253,6 +254,12 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 // 6. Build SQL query structure with aggregation, groupby, having
                 IAuthorizationResolver authResolver = serviceProvider.GetRequiredService<IAuthorizationResolver>();
                 GQLFilterParser gQLFilterParser = serviceProvider.GetRequiredService<GQLFilterParser>();
+                if (databaseType == DatabaseType.Oracle && args.Groupby.Count > 0 && args.First.HasValue)
+                {
+                    // The builder emits FETCH NEXT from this value inside the aggregate select.
+                    authCtx!.RequestContext.First = args.First;
+                }
+
                 SqlQueryStructure structure = new(
                     authCtx!.RequestContext, sqlMetadataProvider, authResolver, runtimeConfigProvider, gQLFilterParser, authCtx.HttpContext);
 
@@ -264,6 +271,10 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 string alias = ComputeAlias(args.Function, args.Field);
                 BuildAggregationStructure(args, structure, dbObject, backingField!, alias, entityName, sqlMetadataProvider);
+                if (databaseType == DatabaseType.Oracle && args.Groupby.Count > 0)
+                {
+                    AddOracleAggregateOrder(structure, args, alias);
+                }
 
                 // 7. Generate and post-process SQL
                 IAbstractQueryManagerFactory queryManagerFactory = serviceProvider.GetRequiredService<IAbstractQueryManagerFactory>();
@@ -939,47 +950,67 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
         }
 
         /// <summary>
-        /// Oracle already emitted <c>OFFSET 0 ROWS FETCH NEXT n ROWS ONLY</c> on the aggregate
-        /// select inside the JSON wrapper. Edit that clause in place. Appending ORDER BY or
-        /// OFFSET after the wrapper references an alias that is out of scope (ORA-00904).
+        /// Orders a grouped Oracle aggregate by its select alias, with no table qualifier.
+        /// OracleQueryBuilder emits this ORDER BY on the aggregate select, before OFFSET/FETCH
+        /// and inside the JSON wrapper. Qualifying the alias with SourceAlias does not match
+        /// QuoteTableAlias, and that column is out of scope on the outer JSON query (ORA-00904).
         /// </summary>
-        private static string ApplyOracleGroupedOrderBy(
+        internal static void AddOracleAggregateOrder(
+            SqlQueryStructure structure,
+            AggregateArguments args,
+            string alias)
+        {
+            OrderBy direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase)
+                ? OrderBy.ASC
+                : OrderBy.DESC;
+            structure.OrderByColumns.Add(new OrderByColumn(
+                tableSchema: string.Empty,
+                tableName: string.Empty,
+                columnName: alias,
+                tableAlias: null,
+                direction: direction));
+        }
+
+        /// <summary>
+        /// Replaces the builder's <c>OFFSET 0</c> when a grouped page has a non-zero cursor.
+        /// The ORDER BY and FETCH count are already inside the aggregate select. This does not
+        /// append a row limit after the JSON wrapper. A zero cursor, a null limit, or a missing
+        /// inner clause leaves the SQL unchanged.
+        /// </summary>
+        private static string ApplyOracleRowOffset(
             string sql,
             AggregateArguments args,
-            SqlQueryStructure structure,
-            IQueryBuilder queryBuilder)
+            SqlQueryStructure structure)
         {
-            MatchCollection limits = Regex.Matches(sql, @" OFFSET 0 ROWS FETCH NEXT \d+ ROWS ONLY");
-            if (limits.Count == 0)
+            int offset = DecodeCursorOffset(args.After);
+            if (offset == 0)
             {
                 return sql;
             }
 
-            // The aggregate select is built last, so its cap is the last OFFSET 0 clause.
-            Match innerLimit = limits[limits.Count - 1];
-            string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
-            string quotedAlias = queryBuilder.QuoteIdentifier(ComputeAlias(args.Function, args.Field));
-            string orderByClause = $" ORDER BY {quotedAlias} {direction}";
-
-            if (!args.First.HasValue)
+            uint? limit = structure.Limit();
+            if (limit is null)
             {
-                return sql.Insert(innerLimit.Index, orderByClause);
+                return sql;
             }
 
-            int offset = DecodeCursorOffset(args.After);
-            int fetchCount = args.First.Value + 1;
+            string clause = $" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY";
+            int index = sql.LastIndexOf(clause, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                return sql;
+            }
+
             string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
             structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
-            string limitParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
-            structure.Parameters.Add(limitParam, new DbConnectionParam(fetchCount));
-            string replacement = $"{orderByClause} OFFSET {offsetParam} ROWS FETCH NEXT {limitParam} ROWS ONLY";
-            return sql.Remove(innerLimit.Index, innerLimit.Length).Insert(innerLimit.Index, replacement);
+            string replacement = $" OFFSET {offsetParam} ROWS FETCH NEXT {limit} ROWS ONLY";
+            return sql.Remove(index, clause.Length).Insert(index, replacement);
         }
 
         /// <summary>
         /// Post-processes grouped aggregation SQL to add ORDER BY and pagination.
         /// SQL Server and SQL Data Warehouse insert clauses around FOR JSON PATH.
-        /// Oracle edits the inner OFFSET 0 clause already emitted inside the JSON wrapper.
+        /// Oracle order is emitted by the query builder. A non-zero cursor only replaces OFFSET 0.
         /// </summary>
         private static string ApplyOrderByAndPagination(
             string sql,
@@ -991,7 +1022,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
         {
             if (databaseType == DatabaseType.Oracle)
             {
-                return ApplyOracleGroupedOrderBy(sql, args, structure, queryBuilder);
+                return ApplyOracleRowOffset(sql, args, structure);
             }
 
             string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";

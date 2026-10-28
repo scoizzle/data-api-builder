@@ -23,6 +23,7 @@ using Azure.DataApiBuilder.Mcp.BuiltInTools;
 using Azure.DataApiBuilder.Mcp.Model;
 using Azure.DataApiBuilder.Mcp.Utils;
 using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
+using AggregationType = Azure.DataApiBuilder.Service.GraphQLBuilder.Sql.SchemaConverter.AggregationType;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -351,32 +352,103 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
         }
 
         [DataTestMethod]
-        [DataRow(false, "desc", false, "count", "*", "\"count\" DESC", DisplayName = "Grouped count orders by the alias before the inner OFFSET")]
-        [DataRow(true, "asc", false, "sum", "price", "\"sum_price\" ASC", DisplayName = "first replaces the inner OFFSET 0 clause")]
-        [DataRow(false, "desc", true, "count", "publisher_id", "\"count_publisher_id\" DESC", DisplayName = "Distinct still orders by the aggregate alias")]
-        public void ApplyOrderByAndPagination_OracleEditsInnerOffset(
-            bool paginate,
+        [DataRow("desc", false, "count", "*", "count", "DESC", DisplayName = "Grouped count orders by the alias")]
+        [DataRow("asc", false, "sum", "price", "sum_price", "ASC", DisplayName = "Ascending sum orders by its alias")]
+        [DataRow("desc", true, "count", "publisher_id", "count_publisher_id", "DESC", DisplayName = "Distinct still orders by the aggregate alias")]
+        public void AddOracleAggregateOrder_UsesUnqualifiedAggregateAlias(
             string orderby,
             bool distinct,
             string function,
             string field,
-            string expectedOrderBy)
+            string expectedAlias,
+            string expectedDirection)
         {
-            const string outerPrefix = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT JSON_OBJECT(* RETURNING CLOB) AS \"json_doc\", ROWNUM AS \"__dab_ord\" FROM ( ";
-            const string innerSelect = "SELECT COUNT(\"HR_BOOKS\".\"ID\") AS \"count\" FROM \"HR\".\"BOOKS\" \"HR_BOOKS\" WHERE 1 = 1 GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"";
-            const string innerLimit = " OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
-            const string outerSuffix = " ) ) \"subq1\"";
-            string sql = outerPrefix + innerSelect + innerLimit + outerSuffix;
-
             SqlQueryStructure structure = CreateUninitializedQueryStructure();
-            Mock<IQueryBuilder> builder = new();
-            builder.Setup(x => x.QuoteIdentifier(It.IsAny<string>()))
-                .Returns((string value) => $"\"{value}\"");
+            structure.OrderByColumns.Clear();
             AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
                 function: function,
                 field: field,
                 distinct: distinct,
                 orderby: orderby,
+                groupby: new() { "publisher_id" });
+            string alias = InvokePrivate<string>("ComputeAlias", function, field);
+
+            AggregateRecordsTool.AddOracleAggregateOrder(structure, args, alias);
+
+            Assert.AreEqual(expectedAlias, alias);
+            Assert.AreEqual(1, structure.OrderByColumns.Count);
+            OrderByColumn column = structure.OrderByColumns[0];
+            Assert.AreEqual(expectedAlias, column.ColumnName);
+            Assert.IsNull(column.TableAlias);
+            Assert.AreEqual(string.Empty, column.TableSchema);
+            Assert.AreEqual(string.Empty, column.TableName);
+            Assert.AreEqual(expectedDirection == "ASC" ? OrderBy.ASC : OrderBy.DESC, column.Direction);
+            Assert.IsFalse(column.ColumnName.Contains('.'));
+            Assert.IsFalse(column.ColumnName.Contains("DISTINCT", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [DataTestMethod]
+        [DataRow("desc", false, "count", "*", "ID", "count", "DESC", DisplayName = "Grouped count orders inside the JSON wrapper")]
+        [DataRow("asc", false, "sum", "price", "PRICE", "sum_price", "ASC", DisplayName = "Ascending sum orders inside the JSON wrapper")]
+        [DataRow("desc", true, "count", "publisher_id", "PUBLISHER_ID", "count_publisher_id", "DESC", DisplayName = "Distinct orders by the alias, not the DISTINCT expression")]
+        public void OracleQueryBuilder_GroupedAggregateOrdersByAliasInsideJsonWrapper(
+            string orderby,
+            bool distinct,
+            string function,
+            string field,
+            string backingField,
+            string expectedAlias,
+            string expectedDirection)
+        {
+            SqlQueryStructure structure = CreateGroupedOracleAggregateStructure(function, backingField, expectedAlias, distinct);
+            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
+                function: function,
+                field: field,
+                distinct: distinct,
+                orderby: orderby,
+                groupby: new() { "publisher_id" });
+            string alias = InvokePrivate<string>("ComputeAlias", function, field);
+            AggregateRecordsTool.AddOracleAggregateOrder(structure, args, alias);
+
+            string sql = new OracleQueryBuilder().Build(structure);
+
+            string orderLimit = $"ORDER BY \"{expectedAlias}\" {expectedDirection} OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
+            StringAssert.Contains(sql, orderLimit);
+            StringAssert.Contains(sql, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB)");
+            StringAssert.Contains(sql, $"AS \"{expectedAlias}\"");
+            StringAssert.Contains(sql, "GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"");
+            Assert.AreEqual(1, Regex.Matches(sql, "OFFSET").Count);
+            Assert.IsFalse(sql.Contains($"\"HR_BOOKS\".\"{expectedAlias}\""));
+            int groupAt = sql.IndexOf("GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"", StringComparison.Ordinal);
+            int orderAt = sql.IndexOf(orderLimit, StringComparison.Ordinal);
+            int wrapperClose = sql.LastIndexOf(" ) ) ", StringComparison.Ordinal);
+            Assert.IsTrue(groupAt >= 0 && orderAt > groupAt && wrapperClose > orderAt);
+            if (distinct)
+            {
+                StringAssert.Contains(sql, $"DISTINCT (\"HR_BOOKS\".\"{backingField}\")");
+                Assert.IsFalse(sql.Contains("ORDER BY DISTINCT", StringComparison.Ordinal));
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow(false, DisplayName = "A zero cursor leaves the builder OFFSET in place")]
+        [DataRow(true, DisplayName = "A non-zero cursor replaces only OFFSET 0")]
+        public void ApplyOrderByAndPagination_OracleReplacesNonZeroCursorOffset(bool paginate)
+        {
+            const string outerPrefix = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT JSON_OBJECT(* RETURNING CLOB) AS \"json_doc\", ROWNUM AS \"__dab_ord\" FROM ( ";
+            const string innerSelect = "SELECT COUNT(\"HR_BOOKS\".\"ID\") AS \"count\" FROM \"HR\".\"BOOKS\" \"HR_BOOKS\" WHERE 1 = 1 GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\" ORDER BY \"count\" DESC";
+            const string innerLimit = " OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
+            const string outerSuffix = " ) ) \"subq1\"";
+            string sql = outerPrefix + innerSelect + innerLimit + outerSuffix;
+
+            SqlQueryStructure structure = CreateUninitializedQueryStructure();
+            structure.IsListQuery = true;
+            SetLimit(structure, 101);
+            Mock<IQueryBuilder> builder = new();
+            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
+                function: "count",
+                field: "*",
+                orderby: "desc",
                 first: paginate ? 9 : null,
                 after: paginate ? Convert.ToBase64String(Encoding.UTF8.GetBytes("4")) : null,
                 groupby: new() { "publisher_id" });
@@ -384,18 +456,17 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             string result = InvokePrivate<string>(
                 "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "ID", DatabaseType.Oracle);
 
-            string expectedLimit = paginate
-                ? $" ORDER BY {expectedOrderBy} OFFSET @param0 ROWS FETCH NEXT @param1 ROWS ONLY"
-                : $" ORDER BY {expectedOrderBy} OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
-            Assert.AreEqual(outerPrefix + innerSelect + expectedLimit + outerSuffix, result);
+            string expected = paginate
+                ? outerPrefix + innerSelect + " OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY" + outerSuffix
+                : sql;
+            Assert.AreEqual(expected, result);
             Assert.AreEqual(1, Regex.Matches(result, "OFFSET").Count);
             Assert.IsTrue(result.StartsWith(outerPrefix, StringComparison.Ordinal));
             Assert.IsTrue(result.EndsWith(outerSuffix, StringComparison.Ordinal));
-            Assert.AreEqual(paginate ? 2 : 0, structure.Parameters.Count);
+            Assert.AreEqual(paginate ? 1 : 0, structure.Parameters.Count);
             if (paginate)
             {
                 Assert.AreEqual(4, structure.Parameters["@param0"].Value);
-                Assert.AreEqual(10, structure.Parameters["@param1"].Value);
             }
         }
 
@@ -406,6 +477,8 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
         {
             const string sql = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT 1 FROM DUAL ) \"subq1\"";
             SqlQueryStructure structure = CreateUninitializedQueryStructure();
+            structure.IsListQuery = true;
+            SetLimit(structure, 101);
             Mock<IQueryBuilder> builder = new();
             builder.Setup(x => x.QuoteIdentifier(It.IsAny<string>()))
                 .Returns((string value) => $"\"{value}\"");
@@ -1150,6 +1223,61 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             });
             SetBackingField(structure, nameof(SqlQueryStructure.GroupByMetadata), new GroupByMetadata());
             return structure;
+        }
+
+        private static SqlQueryStructure CreateGroupedOracleAggregateStructure(
+            string function,
+            string backingField,
+            string alias,
+            bool distinct)
+        {
+            SourceDefinition source = new();
+            source.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("PUBLISHER_ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("PRICE", new ColumnDefinition { SystemType = typeof(decimal) });
+            DatabaseTable table = new("HR", "BOOKS") { TableDefinition = source };
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(x => x.GetSourceDefinition("Book")).Returns(source);
+
+            SqlQueryStructure structure = (SqlQueryStructure)RuntimeHelpers.GetUninitializedObject(typeof(SqlQueryStructure));
+            structure.IsListQuery = true;
+            SetLimit(structure, 101);
+            SetBackingField(structure, nameof(BaseQueryStructure.EntityName), "Book");
+            SetBackingField(structure, nameof(BaseQueryStructure.MetadataProvider), metadata.Object);
+            SetBackingField(structure, nameof(BaseQueryStructure.DatabaseObject), table);
+            SetBackingField(structure, nameof(BaseQueryStructure.SourceAlias), "HR_BOOKS");
+            SetBackingField(structure, nameof(BaseQueryStructure.Columns), new List<LabelledColumn>
+            {
+                new("HR", "BOOKS", "PUBLISHER_ID", "publisher_id", "HR_BOOKS")
+            });
+            SetBackingField(structure, nameof(BaseQueryStructure.Predicates), new List<Predicate>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.DbPolicyPredicatesForOperations), new Dictionary<EntityActionOperation, string?>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.Joins), new List<SqlJoinStructure>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.FilterPredicates), string.Empty);
+            SetBackingField(structure, nameof(SqlQueryStructure.OrderByColumns), new List<OrderByColumn>());
+            SetBackingField(structure, nameof(SqlQueryStructure.JoinQueries), new Dictionary<string, SqlQueryStructure>());
+            SetBackingField(structure, nameof(SqlQueryStructure.PaginationMetadata), new PaginationMetadata(structure));
+
+            GroupByMetadata groupBy = new();
+            groupBy.Fields["PUBLISHER_ID"] = new Column("HR", "BOOKS", "PUBLISHER_ID", "HR_BOOKS");
+            AggregationType aggregationType = Enum.Parse<AggregationType>(function, ignoreCase: true);
+            groupBy.Aggregations.Add(new AggregationOperation(
+                new AggregationColumn("HR", "BOOKS", backingField, aggregationType, alias, distinct, "HR_BOOKS"),
+                having: null));
+            groupBy.RequestedAggregations = true;
+            SetBackingField(structure, nameof(SqlQueryStructure.GroupByMetadata), groupBy);
+            SetBackingField(structure, nameof(BaseQueryStructure.Counter), new IncrementingInteger());
+            structure.Parameters = new();
+            return structure;
+        }
+
+        private static void SetLimit(SqlQueryStructure structure, uint? limit)
+        {
+            FieldInfo? field = typeof(SqlQueryStructure).GetField(
+                "_limit",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            field.SetValue(structure, limit);
         }
 
         private static void SetBackingField(object instance, string propertyName, object value)
