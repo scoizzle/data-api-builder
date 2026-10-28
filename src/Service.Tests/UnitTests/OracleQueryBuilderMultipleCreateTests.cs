@@ -29,7 +29,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         private const string ENTITY_NAME = "Book";
         private const string SCHEMA_NAME = "SYSTEM";
         private const string TABLE_NAME = "books";
-        private const string READ_POLICY = "(\"SYSTEM_BOOKS\".\"PUBLISHER_ID\" != 0)";
+        private const string READ_POLICY = "(publisher_id != 0)";
 
         private delegate void TryGetColumnCallback(string entity, string field, out string? column);
 

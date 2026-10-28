@@ -96,7 +96,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             string query = new OracleQueryBuilder().Build(parent);
 
-            // @item.id eq 1 is visited after SourceAlias is table1, so Oracle quotes the alias.
+            // @item.id eq 1 is stored as a bare "ID". OracleQueryBuilder qualifies it with the child alias.
             StringAssert.Contains(query, "(\"TABLE1\".\"ID\" = @param0)", query);
             StringAssert.Contains(query, "INNER JOIN \"SYSTEM\".\"BOOK_AUTHOR_LINK\" \"TABLE3\"", query);
             Assert.IsFalse(query.Contains("(\"ID\""), query);
