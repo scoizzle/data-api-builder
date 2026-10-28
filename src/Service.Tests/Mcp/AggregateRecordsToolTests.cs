@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -343,10 +344,107 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
                 groupby: new() { "category" });
 
             string result = InvokePrivate<string>(
-                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "price");
+                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "price", DatabaseType.MSSQL);
 
             Assert.AreEqual(expected, result);
             Assert.AreEqual(paginate ? 2 : 0, structure.Parameters.Count);
+        }
+
+        [DataTestMethod]
+        [DataRow(false, "desc", false, "count", "*", "\"count\" DESC", DisplayName = "Grouped count orders by the alias before the inner OFFSET")]
+        [DataRow(true, "asc", false, "sum", "price", "\"sum_price\" ASC", DisplayName = "first replaces the inner OFFSET 0 clause")]
+        [DataRow(false, "desc", true, "count", "publisher_id", "\"count_publisher_id\" DESC", DisplayName = "Distinct still orders by the aggregate alias")]
+        public void ApplyOrderByAndPagination_OracleEditsInnerOffset(
+            bool paginate,
+            string orderby,
+            bool distinct,
+            string function,
+            string field,
+            string expectedOrderBy)
+        {
+            const string outerPrefix = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT JSON_OBJECT(* RETURNING CLOB) AS \"json_doc\", ROWNUM AS \"__dab_ord\" FROM ( ";
+            const string innerSelect = "SELECT COUNT(\"HR_BOOKS\".\"ID\") AS \"count\" FROM \"HR\".\"BOOKS\" \"HR_BOOKS\" WHERE 1 = 1 GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"";
+            const string innerLimit = " OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
+            const string outerSuffix = " ) ) \"subq1\"";
+            string sql = outerPrefix + innerSelect + innerLimit + outerSuffix;
+
+            SqlQueryStructure structure = CreateUninitializedQueryStructure();
+            Mock<IQueryBuilder> builder = new();
+            builder.Setup(x => x.QuoteIdentifier(It.IsAny<string>()))
+                .Returns((string value) => $"\"{value}\"");
+            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
+                function: function,
+                field: field,
+                distinct: distinct,
+                orderby: orderby,
+                first: paginate ? 9 : null,
+                after: paginate ? Convert.ToBase64String(Encoding.UTF8.GetBytes("4")) : null,
+                groupby: new() { "publisher_id" });
+
+            string result = InvokePrivate<string>(
+                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "ID", DatabaseType.Oracle);
+
+            string expectedLimit = paginate
+                ? $" ORDER BY {expectedOrderBy} OFFSET @param0 ROWS FETCH NEXT @param1 ROWS ONLY"
+                : $" ORDER BY {expectedOrderBy} OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
+            Assert.AreEqual(outerPrefix + innerSelect + expectedLimit + outerSuffix, result);
+            Assert.AreEqual(1, Regex.Matches(result, "OFFSET").Count);
+            Assert.IsTrue(result.StartsWith(outerPrefix, StringComparison.Ordinal));
+            Assert.IsTrue(result.EndsWith(outerSuffix, StringComparison.Ordinal));
+            Assert.AreEqual(paginate ? 2 : 0, structure.Parameters.Count);
+            if (paginate)
+            {
+                Assert.AreEqual(4, structure.Parameters["@param0"].Value);
+                Assert.AreEqual(10, structure.Parameters["@param1"].Value);
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow(false, DisplayName = "Missing inner OFFSET is left unchanged")]
+        [DataRow(true, DisplayName = "Missing inner OFFSET does not append a second row limit")]
+        public void ApplyOrderByAndPagination_OracleWithoutInnerOffset_LeavesSqlUnchanged(bool paginate)
+        {
+            const string sql = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT 1 FROM DUAL ) \"subq1\"";
+            SqlQueryStructure structure = CreateUninitializedQueryStructure();
+            Mock<IQueryBuilder> builder = new();
+            builder.Setup(x => x.QuoteIdentifier(It.IsAny<string>()))
+                .Returns((string value) => $"\"{value}\"");
+            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
+                function: "count",
+                field: "*",
+                orderby: "desc",
+                first: paginate ? 9 : null,
+                after: paginate ? Convert.ToBase64String(Encoding.UTF8.GetBytes("4")) : null,
+                groupby: new() { "publisher_id" });
+
+            string result = InvokePrivate<string>(
+                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "ID", DatabaseType.Oracle);
+
+            Assert.AreEqual(sql, result);
+            Assert.AreEqual(0, structure.Parameters.Count);
+        }
+
+        [DataTestMethod]
+        [DataRow(DatabaseType.MSSQL, false, DisplayName = "SQL Server is supported")]
+        [DataRow(DatabaseType.DWSQL, false, DisplayName = "SQL Data Warehouse is supported")]
+        [DataRow(DatabaseType.Oracle, false, DisplayName = "Oracle is supported")]
+        [DataRow(DatabaseType.MySQL, true, DisplayName = "MySQL stays unsupported")]
+        [DataRow(DatabaseType.PostgreSQL, true, DisplayName = "PostgreSQL stays unsupported")]
+        [DataRow(DatabaseType.CosmosDB_NoSQL, true, DisplayName = "Cosmos stays unsupported")]
+        public void AggregationDatabaseSupport_AllowsOracleAndRejectsOtherEngines(DatabaseType databaseType, bool expectUnsupported)
+        {
+            CallToolResult? result = AggregateRecordsTool.CreateUnsupportedDatabaseResult(
+                databaseType, "aggregate_records", logger: null);
+
+            if (!expectUnsupported)
+            {
+                Assert.IsNull(result);
+                return;
+            }
+
+            string message = AssertErrorResult(result!, "UnsupportedDatabase");
+            StringAssert.Contains(message, databaseType.ToString());
+            StringAssert.Contains(message, "Oracle");
         }
 
         #endregion

@@ -244,10 +244,10 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 // 5. Validate database type support
                 DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
-                if (databaseType != DatabaseType.MSSQL && databaseType != DatabaseType.DWSQL)
+                CallToolResult? unsupportedDatabase = CreateUnsupportedDatabaseResult(databaseType, toolName, logger);
+                if (unsupportedDatabase != null)
                 {
-                    return McpResponseBuilder.BuildErrorResult(toolName, "UnsupportedDatabase",
-                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, and SQL Data Warehouse.", logger);
+                    return unsupportedDatabase;
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
@@ -273,7 +273,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 string sql = queryBuilder.Build(structure);
                 if (args.Groupby.Count > 0)
                 {
-                    sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
+                    sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!, databaseType);
                 }
 
                 // 8. Execute query and return results
@@ -939,16 +939,83 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
         }
 
         /// <summary>
-        /// Post-processes the generated SQL to add ORDER BY and OFFSET/FETCH pagination
-        /// for grouped aggregation queries.
+        /// Returns UnsupportedDatabase for engines that cannot run aggregate_records.
+        /// Azure SQL, SQL Server, SQL Data Warehouse, and Oracle are supported.
+        /// PostgreSQL would receive the SQL Server splice, and MySQL does not emit aggregate SQL.
+        /// </summary>
+        internal static CallToolResult? CreateUnsupportedDatabaseResult(
+            DatabaseType databaseType,
+            string toolName,
+            ILogger? logger)
+        {
+            if (databaseType is DatabaseType.MSSQL or DatabaseType.DWSQL or DatabaseType.Oracle)
+            {
+                return null;
+            }
+
+            return McpResponseBuilder.BuildErrorResult(
+                toolName,
+                "UnsupportedDatabase",
+                $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, and Oracle.",
+                logger);
+        }
+
+        /// <summary>
+        /// Oracle already emitted <c>OFFSET 0 ROWS FETCH NEXT n ROWS ONLY</c> on the aggregate
+        /// select inside the JSON wrapper. Edit that clause in place. Appending ORDER BY or
+        /// OFFSET after the wrapper references an alias that is out of scope (ORA-00904).
+        /// </summary>
+        private static string ApplyOracleGroupedOrderBy(
+            string sql,
+            AggregateArguments args,
+            SqlQueryStructure structure,
+            IQueryBuilder queryBuilder)
+        {
+            MatchCollection limits = Regex.Matches(sql, @" OFFSET 0 ROWS FETCH NEXT \d+ ROWS ONLY");
+            if (limits.Count == 0)
+            {
+                return sql;
+            }
+
+            // The aggregate select is built last, so its cap is the last OFFSET 0 clause.
+            Match innerLimit = limits[limits.Count - 1];
+            string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
+            string quotedAlias = queryBuilder.QuoteIdentifier(ComputeAlias(args.Function, args.Field));
+            string orderByClause = $" ORDER BY {quotedAlias} {direction}";
+
+            if (!args.First.HasValue)
+            {
+                return sql.Insert(innerLimit.Index, orderByClause);
+            }
+
+            int offset = DecodeCursorOffset(args.After);
+            int fetchCount = args.First.Value + 1;
+            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+            string limitParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(limitParam, new DbConnectionParam(fetchCount));
+            string replacement = $"{orderByClause} OFFSET {offsetParam} ROWS FETCH NEXT {limitParam} ROWS ONLY";
+            return sql.Remove(innerLimit.Index, innerLimit.Length).Insert(innerLimit.Index, replacement);
+        }
+
+        /// <summary>
+        /// Post-processes grouped aggregation SQL to add ORDER BY and pagination.
+        /// SQL Server and SQL Data Warehouse insert clauses around FOR JSON PATH.
+        /// Oracle edits the inner OFFSET 0 clause already emitted inside the JSON wrapper.
         /// </summary>
         private static string ApplyOrderByAndPagination(
             string sql,
             AggregateArguments args,
             SqlQueryStructure structure,
             IQueryBuilder queryBuilder,
-            string backingField)
+            string backingField,
+            DatabaseType databaseType)
         {
+            if (databaseType == DatabaseType.Oracle)
+            {
+                return ApplyOracleGroupedOrderBy(sql, args, structure, queryBuilder);
+            }
+
             string direction = args.Orderby.Equals("asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
             string quotedCol = $"{queryBuilder.QuoteIdentifier(structure.SourceAlias)}.{queryBuilder.QuoteIdentifier(backingField)}";
             string orderByAggExpr = args.Distinct
