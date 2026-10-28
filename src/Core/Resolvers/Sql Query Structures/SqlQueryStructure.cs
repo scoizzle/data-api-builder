@@ -275,10 +275,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 predicates: null,
                 entityName: context.EntityName,
                 counter: new IncrementingInteger(),
-                httpContext: httpContext)
+                // Defer the policy until SourceAlias is the REST alias (schema_table).
+                // Rendering it in the base constructor would qualify columns with a
+                // CreateTableAlias() name that this body then replaces. FilterPredicates
+                // below still run after that final alias. A second visit would rebind.
+                httpContext: null)
         {
             IsListQuery = context.IsMany;
             SourceAlias = $"{DatabaseObject.SchemaName}_{DatabaseObject.Name}";
+            if (httpContext is not null)
+            {
+                AuthorizationPolicyHelpers.ProcessAuthorizationPolicies(
+                    EntityActionOperation.Read,
+                    this,
+                    httpContext,
+                    authorizationResolver,
+                    sqlMetadataProvider);
+            }
             AddFields(context, sqlMetadataProvider);
             foreach (KeyValuePair<string, object> predicate in context.PrimaryKeyValuePairs)
             {

@@ -4,11 +4,15 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Core.Parsers;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
+using Microsoft.OData.Edm;
+using Microsoft.OData.UriParser;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 
@@ -70,7 +74,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [TestMethod]
         public void Build_ToOneRelationshipWithPrimaryKeyCorrelation_IsFlattened()
         {
-            SqlQueryStructure parent = CreateParentWithToOneChild();
+            (SqlQueryStructure parent, _) = CreateParentWithToOneChild();
 
             string query = new OracleQueryBuilder().Build(parent);
 
@@ -83,6 +87,53 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             // The child's JSON object is built inline over the flattened join, guarded so a
             // missing child stays JSON null instead of becoming an all-null object.
             StringAssert.Contains(query, "CASE WHEN \"TABLE1\".\"ID\" IS NOT NULL THEN JSON_OBJECT('ID' VALUE \"TABLE1\".\"ID\" NULL ON NULL RETURNING VARCHAR2(4000)) ELSE NULL END AS \"child\"");
+        }
+
+        [TestMethod]
+        public void Build_AuthorsChildWithLinkIdAndReadPolicy_QualifiesPolicyColumn()
+        {
+            SqlQueryStructure parent = CreateAuthorsChildWithLinkId();
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            // @item.id eq 1 is visited after SourceAlias is table1, so Oracle quotes the alias.
+            StringAssert.Contains(query, "(\"TABLE1\".\"ID\" = @param0)", query);
+            StringAssert.Contains(query, "INNER JOIN \"SYSTEM\".\"BOOK_AUTHOR_LINK\" \"TABLE3\"", query);
+            Assert.IsFalse(query.Contains("(\"ID\""), query);
+            Assert.IsFalse(Regex.IsMatch(query, "(?<!\\.)\"ID\" ="), query);
+        }
+
+        [TestMethod]
+        public void Build_ToOneWithReadPolicy_IsNotFlattened()
+        {
+            (SqlQueryStructure parent, SqlQueryStructure child) = CreateParentWithToOneChild();
+            child.DbPolicyPredicatesForOperations[EntityActionOperation.Read] = VisitItemIdEqualsOne(child);
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            // A qualified policy is still a policy string. Flattening stays off.
+            Assert.IsTrue(query.StartsWith("WITH "), query);
+            Assert.IsFalse(query.Contains("LEFT OUTER JOIN \"DBO\".\"CHILDREN\""), query);
+            StringAssert.Contains(query, "(\"TABLE1\".\"ID\" = @param0)", query);
+            Assert.IsFalse(query.Contains("(\"ID\""), query);
+        }
+
+        [TestMethod]
+        public void Build_NestedListRelationship_AliasesEveryRankedKey()
+        {
+            (SqlQueryStructure parent, SqlQueryStructure child) = CreateParentWithListChild(PredicateOperation.Equal);
+            child.Predicates.Add(new Predicate(
+                new PredicateOperand(new Column(string.Empty, string.Empty, "tenant_id", "table1")),
+                PredicateOperation.Equal,
+                new PredicateOperand(new Column(string.Empty, string.Empty, "TENANT", "table0"))));
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            StringAssert.Contains(query, "\"TABLE1\".\"k0\" AS \"k0\", \"TABLE1\".\"k1\" AS \"k1\"", query);
+            Assert.IsFalse(query.Contains("\"TABLE1\".\"k0\", \"TABLE1\".\"k1\" AS"), query);
+            StringAssert.Contains(query, "GROUP BY \"k0\", \"k1\"", query);
+            // The one-key shape stays a single aliased key. Covered by Build_NestedListRelationship_UsesKeyedAggregateCte.
+            StringAssert.Contains(query, "\"TABLE1\".\"k0\" AS \"k0\"");
         }
 
         private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithListChild(
@@ -156,7 +207,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             return (parent, child);
         }
 
-        private static SqlQueryStructure CreateParentWithToOneChild()
+        private static (SqlQueryStructure Parent, SqlQueryStructure Child) CreateParentWithToOneChild()
         {
             SourceDefinition childSource = new();
             childSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
@@ -223,7 +274,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SetField(parent, "Counter", new IncrementingInteger());
             SetLimit(parent, 100);
 
-            return parent;
+            return (parent, child);
         }
 
         private static SqlQueryStructure CreateStructure(bool isList)
@@ -274,6 +325,87 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             typeof(BaseQueryStructure).GetField($"<{name}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .SetValue(structure, value);
+        }
+
+        /// <summary>
+        /// Authors nested under books through book_author_link. The link table has its own ID,
+        /// so an unqualified policy column "ID" is ambiguous (ORA-00918).
+        /// </summary>
+        private static SqlQueryStructure CreateAuthorsChildWithLinkId()
+        {
+            (SqlQueryStructure parent, SqlQueryStructure child) = CreateParentWithListChild(PredicateOperation.Equal);
+
+            SourceDefinition authorSource = new();
+            authorSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            authorSource.Columns.Add("NAME", new ColumnDefinition { SystemType = typeof(string) });
+            authorSource.PrimaryKey.Add("ID");
+            DatabaseTable authorTable = new("SYSTEM", "AUTHORS") { TableDefinition = authorSource };
+
+            SourceDefinition linkSource = new();
+            linkSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            linkSource.Columns.Add("BOOK_ID", new ColumnDefinition { SystemType = typeof(int) });
+            linkSource.Columns.Add("AUTHOR_ID", new ColumnDefinition { SystemType = typeof(int) });
+            DatabaseTable linkTable = new("SYSTEM", "BOOK_AUTHOR_LINK") { TableDefinition = linkSource };
+
+            Mock.Get(child.MetadataProvider).Setup(provider => provider.GetSourceDefinition("Author")).Returns(authorSource);
+            SetField(child, "EntityName", "Author");
+            SetField(child, "DatabaseObject", authorTable);
+            SetBaseProperty(child, "Columns", new List<LabelledColumn>
+            {
+                new("SYSTEM", "AUTHORS", "ID", "id", "table1"),
+                new("SYSTEM", "AUTHORS", "NAME", "name", "table1"),
+                new("SYSTEM", "BOOK_AUTHOR_LINK", "ID", "linkId", "table3")
+            });
+            child.Joins.Add(new SqlJoinStructure(
+                linkTable,
+                "table3",
+                new List<Predicate>
+                {
+                    new(
+                        new PredicateOperand(new Column("SYSTEM", "BOOK_AUTHOR_LINK", "AUTHOR_ID", "table3")),
+                        PredicateOperation.Equal,
+                        new PredicateOperand(new Column("SYSTEM", "AUTHORS", "ID", "table1")))
+                }));
+            child.Predicates.Clear();
+            child.Predicates.Add(new Predicate(
+                new PredicateOperand(new Column("SYSTEM", "BOOK_AUTHOR_LINK", "BOOK_ID", "table3")),
+                PredicateOperation.Equal,
+                new PredicateOperand(new Column("SYSTEM", "BOOKS", "ID", "table0"))));
+            child.DbPolicyPredicatesForOperations[EntityActionOperation.Read] = VisitItemIdEqualsOne(child);
+
+            SourceDefinition parentSource = new();
+            parentSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            Mock.Get(parent.MetadataProvider).Setup(provider => provider.GetSourceDefinition("Parent")).Returns(parentSource);
+            SetField(parent, "DatabaseObject", new DatabaseTable("SYSTEM", "BOOKS") { TableDefinition = parentSource });
+            return parent;
+        }
+
+        private delegate void TryGetBackingColumnCallback(string entity, string field, out string? column);
+
+        /// <summary>
+        /// Runs ODataASTVisitor on the property access left by stripping @item. from @item.id eq 1.
+        /// </summary>
+        private static string VisitItemIdEqualsOne(SqlQueryStructure structure)
+        {
+            Mock<ISqlMetadataProvider> metadata = Mock.Get(structure.MetadataProvider);
+            metadata.Setup(provider => provider.GetQueryBuilder()).Returns(new OracleQueryBuilder());
+            metadata.Setup(provider => provider.GetDatabaseType()).Returns(DatabaseType.Oracle);
+
+            string? backingColumn;
+            metadata.Setup(provider => provider.TryGetBackingColumn(It.IsAny<string>(), It.IsAny<string>(), out backingColumn))
+                .Callback(new TryGetBackingColumnCallback((string _, string _, out string? column) => column = "ID"))
+                .Returns(true);
+
+            SetField(structure, "Parameters", new Dictionary<string, DbConnectionParam>());
+
+            EdmEntityType entityType = new("Test", "Entity");
+            IEdmStructuralProperty property = entityType.AddStructuralProperty("id", EdmPrimitiveTypeKind.Int32);
+            EdmPrimitiveTypeReference intType = new(
+                EdmCoreModel.Instance.GetPrimitiveType(EdmPrimitiveTypeKind.Int32), isNullable: false);
+            SingleValuePropertyAccessNode propertyNode = new(new ConstantNode(0, "0", intType), property);
+            ConstantNode one = new(1, "1", intType);
+            BinaryOperatorNode comparison = new(BinaryOperatorKind.Equal, propertyNode, one);
+            return new ODataASTVisitor(structure, metadata.Object, EntityActionOperation.Read).Visit(comparison);
         }
     }
 }

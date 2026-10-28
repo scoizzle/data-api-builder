@@ -40,10 +40,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                   predicates,
                   entityName,
                   counter,
-                  httpContext,
+                  // The base constructor renders the read policy. SourceAlias is still empty
+                  // there, so the visitor would emit an unqualified column. A second visit
+                  // would also bind each policy parameter twice.
+                  httpContext: null,
                   EntityActionOperation.Read)
         {
             SourceAlias = CreateTableAlias();
+            if (httpContext is not null)
+            {
+                AuthorizationPolicyHelpers.ProcessAuthorizationPolicies(
+                    EntityActionOperation.Read,
+                    this,
+                    httpContext,
+                    authorizationResolver,
+                    metadataProvider);
+            }
         }
     }
 }

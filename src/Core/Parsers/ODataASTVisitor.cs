@@ -159,7 +159,20 @@ namespace Azure.DataApiBuilder.Core.Parsers
                 _struct.FieldsReferencedInDbPolicyForCreateAction.Add(backingColumnName!);
             }
 
-            return _metadataProvider.GetQueryBuilder().QuoteIdentifier(backingColumnName!);
+            IQueryBuilder queryBuilder = _metadataProvider.GetQueryBuilder();
+            string quotedColumn = queryBuilder.QuoteIdentifier(backingColumnName!);
+            if (string.IsNullOrEmpty(_struct.SourceAlias))
+            {
+                return quotedColumn;
+            }
+
+            // Oracle quoted aliases are case-sensitive. QuoteTableAlias uppercases DAB aliases
+            // (table1 -> "TABLE1") so the policy matches FROM/JOIN. Other engines quote the
+            // alias with QuoteIdentifier, the same way they quote it in the FROM clause.
+            string quotedAlias = queryBuilder is OracleQueryBuilder oracleQueryBuilder
+                ? oracleQueryBuilder.QuoteTableAlias(_struct.SourceAlias)
+                : queryBuilder.QuoteIdentifier(_struct.SourceAlias);
+            return $"{quotedAlias}.{quotedColumn}";
         }
 
         /// <summary>

@@ -915,6 +915,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
             string qualifiedKeys = string.Join(", ", keyAliases.Select(
                 keyAlias => $"{childAlias}.{QuoteIdentifier(keyAlias)}"));
+            // Oracle binds AS to the last select item only. "k0", "k1" AS "k0", "k1"
+            // leaves two columns named k0 (ORA-00918). Alias each key, matching keySelect.
+            string qualifiedKeySelect = string.Join(", ", keyAliases.Select(
+                keyAlias => $"{childAlias}.{QuoteIdentifier(keyAlias)} AS {QuoteIdentifier(keyAlias)}"));
 
             if (skipRanking)
             {
@@ -932,7 +936,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return $"SELECT {keyList}, " +
                    $"COALESCE(JSON_ARRAYAGG(json_doc ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
                    $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
-                   $"FROM ( SELECT {jsonObject} AS json_doc, {qualifiedKeys} AS {keyList}, " +
+                   $"FROM ( SELECT {jsonObject} AS json_doc, {qualifiedKeySelect}, " +
                    $"{childAlias}.\"rn\" AS \"rn\" FROM {rankedFrom} " +
                    $"WHERE {childAlias}.\"rn\" <= {rowLimit} ) ranked_rows GROUP BY {keyList}";
         }
