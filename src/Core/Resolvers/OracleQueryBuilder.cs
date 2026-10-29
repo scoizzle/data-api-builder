@@ -53,6 +53,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // Absent means this is not an aggregate page, and the row limit stays OFFSET 0.
         private static readonly ConditionalWeakTable<SqlQueryStructure, string> AggregateRowOffsetParameters = new();
 
+        // A quoted identifier with no alias dot on either side. Already-qualified
+        // "ALIAS"."COLUMN" pairs are skipped so emission does not double-prefix them.
+        private static readonly Regex UnqualifiedQuotedIdentifier = new(
+            "(?<!\\.)\"(?:[^\"]|\"\")*\"(?!\\s*\\.)",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
         /// <inheritdoc />
@@ -151,6 +157,33 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Database policies and REST/$filter OData strings are stored as bare quoted columns.
+        /// Prefix each unqualified identifier with this structure's alias at emission time.
+        /// An identifier that is already <c>"ALIAS"."COLUMN"</c> is left alone. Other engines
+        /// keep the stored string.
+        /// </summary>
+        private string? QualifyStoredPredicate(BaseSqlQueryStructure structure, string? predicate)
+        {
+            if (string.IsNullOrEmpty(predicate) || string.IsNullOrEmpty(structure.SourceAlias))
+            {
+                return predicate;
+            }
+
+            string prefix = QuoteTableAlias(structure.SourceAlias) + ".";
+            return UnqualifiedQuotedIdentifier.Replace(predicate, match => prefix + match.Value);
+        }
+
+        private string? QualifiedReadPolicy(BaseSqlQueryStructure structure)
+        {
+            return QualifyStoredPredicate(structure, structure.GetDbPolicyForOperation(EntityActionOperation.Read));
+        }
+
+        private string? QualifiedFilter(BaseSqlQueryStructure structure)
+        {
+            return QualifyStoredPredicate(structure, structure.FilterPredicates);
+        }
+
+        /// <summary>
         /// Helper method to add ESCAPE clause to the LIKE clauses in the query.
         /// </summary>
         private static string AddEscapeToLikeClauses(string predicate)
@@ -172,7 +205,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public override string Build(BaseSqlQueryStructure structure)
         {
             string predicates = new(JoinPredicateStrings(
-                       structure.GetDbPolicyForOperation(EntityActionOperation.Read),
+                       QualifiedReadPolicy(structure),
                        Build(structure.Predicates)));
 
             string query = $"SELECT 1 " +
@@ -354,9 +387,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
             }
 
-            // Policy/filter predicates are emitted as unqualified column strings. Flattening adds
-            // sibling tables to this row source, which would make those strings ambiguous, so
-            // flattening is disabled anywhere in the chain that carries such a predicate.
+            // Stored policy and filter strings are still bare columns. They are qualified when
+            // this builder emits them. Flattening stays off while either string is present, so a
+            // sibling table is not added to a row source whose predicate was written for one table.
             bool allowFlatten = context is not null && !HasUnqualifiedPredicates(structure);
             AddRelationshipJoins(structure, context, applyPageRestriction: isRoot, allowFlatten, ref fromSql);
             return fromSql;
@@ -766,8 +799,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             string predicates = JoinPredicateStrings(
-                exists.GetDbPolicyForOperation(EntityActionOperation.Read),
-                exists.FilterPredicates,
+                QualifiedReadPolicy(exists),
+                QualifiedFilter(exists),
                 Build(exists.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()));
             predicates = AddEscapeToLikeClauses(predicates);
 
@@ -843,16 +876,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (structure.IsMultipleCreateOperation)
             {
                 predicateString = JoinPredicateStrings(
-                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
-                                    structure.FilterPredicates,
+                                    QualifiedReadPolicy(structure),
+                                    QualifiedFilter(structure),
                                     Build(predicates, " OR ", isMultipleCreateOperation: true),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
             }
             else
             {
                 predicateString = JoinPredicateStrings(
-                                    structure.GetDbPolicyForOperation(EntityActionOperation.Read),
-                                    structure.FilterPredicates,
+                                    QualifiedReadPolicy(structure),
+                                    QualifiedFilter(structure),
                                     Build(predicates),
                                     Build(structure.PaginationMetadata.PaginationPredicate));
             }
@@ -943,8 +976,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             bool skipRanking)
         {
             string predicates = JoinPredicateStrings(
-                child.GetDbPolicyForOperation(EntityActionOperation.Read),
-                child.FilterPredicates,
+                QualifiedReadPolicy(child),
+                QualifiedFilter(child),
                 Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
                 Build(child.PaginationMetadata.PaginationPredicate));
             predicates = AddEscapeToLikeClauses(predicates);
@@ -978,6 +1011,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
             string qualifiedKeys = string.Join(", ", keyAliases.Select(
                 keyAlias => $"{childAlias}.{QuoteIdentifier(keyAlias)}"));
+            // Oracle binds AS to the last select item only. "k0", "k1" AS "k0", "k1"
+            // leaves two columns named k0 (ORA-00918). Alias each key, matching keySelect.
+            string qualifiedKeySelect = string.Join(", ", keyAliases.Select(
+                keyAlias => $"{childAlias}.{QuoteIdentifier(keyAlias)} AS {QuoteIdentifier(keyAlias)}"));
 
             if (skipRanking)
             {
@@ -995,7 +1032,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return $"SELECT {keyList}, " +
                    $"COALESCE(JSON_ARRAYAGG(json_doc ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
                    $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
-                   $"FROM ( SELECT {jsonObject} AS json_doc, {qualifiedKeys} AS {keyList}, " +
+                   $"FROM ( SELECT {jsonObject} AS json_doc, {qualifiedKeySelect}, " +
                    $"{childAlias}.\"rn\" AS \"rn\" FROM {rankedFrom} " +
                    $"WHERE {childAlias}.\"rn\" <= {rowLimit} ) ranked_rows GROUP BY {keyList}";
         }
@@ -1057,8 +1094,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string fromSql = BuildFromSql(child, context) + (pageJoin ?? string.Empty);
 
             string predicates = JoinPredicateStrings(
-                child.GetDbPolicyForOperation(EntityActionOperation.Read),
-                child.FilterPredicates,
+                QualifiedReadPolicy(child),
+                QualifiedFilter(child),
                 Build(child.Predicates.Where(predicate => !correlationPredicates.Contains(predicate)).ToList()),
                 Build(child.PaginationMetadata.PaginationPredicate));
             predicates = AddEscapeToLikeClauses(predicates);
