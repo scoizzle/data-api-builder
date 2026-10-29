@@ -282,7 +282,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 IQueryExecutor queryExecutor = queryManagerFactory.GetQueryExecutor(databaseType);
 
                 string sql = queryBuilder.Build(structure);
-                if (args.Groupby.Count > 0 && queryBuilder is not OracleQueryBuilder)
+                if (args.Groupby.Count > 0 && databaseType != DatabaseType.Oracle)
                 {
                     sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
                 }
