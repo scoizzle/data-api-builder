@@ -1713,14 +1713,11 @@ namespace Azure.DataApiBuilder.Core.Services
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // The primary-key names are resolved to the physical column spelling AFTER the column
-            // metadata is populated below (the Columns keys). The pkFields can come from the
-            // runtime config (entity.Fields or key-fields) where the authored casing may differ
-            // from the driver-reported physical column name (e.g. Oracle stores unquoted
-            // identifiers UPPERCASE while configs author lowercase key-fields), or from the
-            // driver's constraint metadata (already physical). Failing to resolve the casing
-            // leaves sourceDefinition.PrimaryKey inconsistent with the Columns keys, which breaks
-            // GraphQL @primaryKey directive generation and REST by-PK routes.
+            // Primary-key names are passed through ResolvePhysicalColumnName after Columns is
+            // populated. The shared implementation returns the authored spelling. Oracle overrides
+            // the hook and matches ignore-case once, at metadata load, so a lowercase key-field
+            // becomes the uppercase catalog name. Leaving them unmatched makes PrimaryKey disagree
+            // with the Columns keys and breaks GraphQL @primaryKey generation and REST by-PK routes.
             if (pkFields.Count == 0)
             {
                 throw new DataApiBuilderException(
@@ -1795,11 +1792,8 @@ namespace Azure.DataApiBuilder.Core.Services
                 sourceDefinition.Columns.TryAdd(columnName, column);
             }
 
-            // Resolve the primary-key names to the exact physical spelling of the column metadata
-            // keys now that the Columns dictionary is populated. A case-insensitive match keeps
-            // PrimaryKey consistent with Columns regardless of whether the pkFields originated
-            // from the runtime config (key-fields/entity.Fields) or the driver's constraint
-            // metadata (see the guard above PopulateTriggerMetadataForTable).
+            // Store the spelling ResolvePhysicalColumnName returns. Shared providers keep the
+            // authored name. Only the Oracle override matches ignore-case, and only at this load.
             sourceDefinition.PrimaryKey = [.. pkFields.Select(pk => ResolvePhysicalColumnName(sourceDefinition, pk))];
 
             DataTable columnsInTable = await GetColumnsAsync(

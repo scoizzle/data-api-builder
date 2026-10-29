@@ -939,9 +939,9 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Oracle only supports 2 restrictions (Owner, Name) for the Procedures collection,
         /// unlike SQL Server which supports 4 (Database, Schema, Table, Column).
         /// For a subprogram inside a package (source "schema.package.subprogram"), the underlying
-        /// <see cref="DatabaseStoredProcedure"/> carries the PackageName and whether the subprogram
-        /// is a function, which the ODP.NET schema collections have no direct representation for,
-        /// so those are resolved against ALL_ARGUMENTS/ALL_PROCEDURES below.
+        /// <see cref="OracleObjectFacts"/> holds the package name and whether the subprogram
+        /// is a function. ODP.NET schema collections have no direct representation for those,
+        /// so they are resolved against ALL_ARGUMENTS/ALL_PROCEDURES below.
         /// </summary>
         protected override async Task FillSchemaForStoredProcedureAsync(
             Azure.DataApiBuilder.Config.ObjectModel.Entity procedureEntity,
@@ -951,9 +951,8 @@ namespace Azure.DataApiBuilder.Core.Services
             StoredProcedureDefinition storedProcedureDefinition,
             CancellationToken cancellationToken)
         {
-            // The database object already carries the Oracle package/function metadata parsed from
-            // the config source in PopulateDatabaseObjectForEntity. Surface it here so downstream
-            // discovery branches on it.
+            // Package name and function-ness were parsed from the config source onto
+            // OracleObjectFacts during PopulateDatabaseObjectForEntity.
             DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
 
             using OracleConnection conn = new();
