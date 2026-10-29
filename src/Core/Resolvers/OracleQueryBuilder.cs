@@ -4,6 +4,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
@@ -47,6 +48,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // RETURNING ... INTO therefore uses generated safe bind names; the REF CURSOR still aliases
         // them back to the exposed labels so the mutation response is unchanged.
         private const string OUTPUT_BIND_PREFIX = "dab_out_";
+
+        // Bind name for a grouped aggregate's row offset, keyed by the query being built.
+        // Absent means this is not an aggregate page, and the row limit stays OFFSET 0.
+        private static readonly ConditionalWeakTable<SqlQueryStructure, string> AggregateRowOffsetParameters = new();
 
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
@@ -122,45 +127,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Emits <c>OFFSET 0 ROWS FETCH NEXT {limit}</c> for the aggregate select, inside the
-        /// JSON wrapper. <see cref="ApplyAggregateCursorOffset"/> replaces the zero offset
-        /// when a cursor is present.
+        /// Binds the grouped aggregate row offset before <see cref="Build(SqlQueryStructure)"/>.
+        /// Zero is the first page and is still a bind, so the select does not emit a literal
+        /// <c>OFFSET 0</c> that a later pass would have to find and replace.
         /// </summary>
-        private static string BuildAggregateRowLimit(SqlQueryStructure structure)
+        public static void BindAggregateRowOffset(SqlQueryStructure structure, int offset)
         {
-            return $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
+            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+            AggregateRowOffsetParameters.Add(structure, offsetParam);
         }
 
         /// <summary>
-        /// Replaces the aggregate select's <c>OFFSET 0</c> with a bind when the cursor is
-        /// non-zero. <c>FETCH NEXT</c> stays at the limit already emitted for this structure.
-        /// A zero cursor, a null limit, or a missing clause leaves the SQL unchanged, so a
-        /// second row limit is not appended after the JSON wrapper.
+        /// Row limit for the select inside the JSON wrapper. A bound aggregate offset is emitted
+        /// as its parameter. Every other query starts at the first row, so the offset is 0.
         /// </summary>
-        public static string ApplyAggregateCursorOffset(string sql, int offset, SqlQueryStructure structure)
+        private static string BuildAggregateRowLimit(SqlQueryStructure structure)
         {
-            if (offset == 0)
-            {
-                return sql;
-            }
-
-            uint? limit = structure.Limit();
-            if (limit is null)
-            {
-                return sql;
-            }
-
-            string clause = BuildAggregateRowLimit(structure);
-            int index = sql.LastIndexOf(clause, StringComparison.Ordinal);
-            if (index < 0)
-            {
-                return sql;
-            }
-
-            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
-            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
-            string replacement = $" OFFSET {offsetParam} ROWS FETCH NEXT {limit} ROWS ONLY";
-            return sql.Remove(index, clause.Length).Insert(index, replacement);
+            string offsetSql = AggregateRowOffsetParameters.TryGetValue(structure, out string? offsetParam)
+                ? offsetParam
+                : "0";
+            return $" OFFSET {offsetSql} ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
         }
 
         /// <summary>

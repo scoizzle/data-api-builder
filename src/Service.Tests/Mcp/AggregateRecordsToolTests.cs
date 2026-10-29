@@ -397,15 +397,18 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             SqlQueryStructure structure = CreateGroupedOracleAggregateStructure(function, backingField, expectedAlias, distinct);
             string alias = InvokePrivate<string>("ComputeAlias", function, field);
             OracleQueryBuilder.AddAggregateAliasOrder(structure, orderby, alias);
+            OracleQueryBuilder.BindAggregateRowOffset(structure, 0);
 
             string sql = new OracleQueryBuilder().Build(structure);
 
-            string orderLimit = $"ORDER BY \"{expectedAlias}\" {expectedDirection} OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
+            string orderLimit = $"ORDER BY \"{expectedAlias}\" {expectedDirection} OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY";
             StringAssert.Contains(sql, orderLimit);
             StringAssert.Contains(sql, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB)");
             StringAssert.Contains(sql, $"AS \"{expectedAlias}\"");
             StringAssert.Contains(sql, "GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"");
             Assert.AreEqual(1, Regex.Matches(sql, "OFFSET").Count);
+            Assert.AreEqual(0, structure.Parameters["@param0"].Value);
+            Assert.IsFalse(sql.Contains("OFFSET 0"));
             Assert.IsFalse(sql.Contains($"\"HR_BOOKS\".\"{expectedAlias}\""));
             int groupAt = sql.IndexOf("GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"", StringComparison.Ordinal);
             int orderAt = sql.IndexOf(orderLimit, StringComparison.Ordinal);
@@ -419,50 +422,24 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
         }
 
         [DataTestMethod]
-        [DataRow(false, DisplayName = "A zero cursor leaves the builder OFFSET in place")]
-        [DataRow(true, DisplayName = "A non-zero cursor replaces only OFFSET 0")]
-        public void ApplyOrderByAndPagination_OracleReplacesNonZeroCursorOffset(bool paginate)
+        [DataRow(0, DisplayName = "The first page binds offset 0")]
+        [DataRow(4, DisplayName = "A cursor binds its offset")]
+        public void GroupedAggregate_BindsRowOffsetInsideJsonWrapper(int offset)
         {
-            const string outerPrefix = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT JSON_OBJECT(* RETURNING CLOB) AS \"json_doc\", ROWNUM AS \"__dab_ord\" FROM ( ";
-            const string innerSelect = "SELECT COUNT(\"HR_BOOKS\".\"ID\") AS \"count\" FROM \"HR\".\"BOOKS\" \"HR_BOOKS\" WHERE 1 = 1 GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\" ORDER BY \"count\" DESC";
-            const string innerLimit = " OFFSET 0 ROWS FETCH NEXT 101 ROWS ONLY";
-            const string outerSuffix = " ) ) \"subq1\"";
-            string sql = outerPrefix + innerSelect + innerLimit + outerSuffix;
+            SqlQueryStructure structure = CreateGroupedOracleAggregateStructure("count", "ID", "count", distinct: false);
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, "desc", "count");
+            OracleQueryBuilder.BindAggregateRowOffset(structure, offset);
 
-            SqlQueryStructure structure = CreateUninitializedQueryStructure();
-            structure.IsListQuery = true;
-            SetLimit(structure, 101);
+            string sql = new OracleQueryBuilder().Build(structure);
 
-            string result = OracleQueryBuilder.ApplyAggregateCursorOffset(sql, paginate ? 4 : 0, structure);
-
-            string expected = paginate
-                ? outerPrefix + innerSelect + " OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY" + outerSuffix
-                : sql;
-            Assert.AreEqual(expected, result);
-            Assert.AreEqual(1, Regex.Matches(result, "OFFSET").Count);
-            Assert.IsTrue(result.StartsWith(outerPrefix, StringComparison.Ordinal));
-            Assert.IsTrue(result.EndsWith(outerSuffix, StringComparison.Ordinal));
-            Assert.AreEqual(paginate ? 1 : 0, structure.Parameters.Count);
-            if (paginate)
-            {
-                Assert.AreEqual(4, structure.Parameters["@param0"].Value);
-            }
-        }
-
-        [DataTestMethod]
-        [DataRow(false, DisplayName = "Missing inner OFFSET is left unchanged")]
-        [DataRow(true, DisplayName = "Missing inner OFFSET does not append a second row limit")]
-        public void ApplyOrderByAndPagination_OracleWithoutInnerOffset_LeavesSqlUnchanged(bool paginate)
-        {
-            const string sql = "SELECT COALESCE(JSON_ARRAYAGG(\"json_doc\" FORMAT JSON RETURNING CLOB), TO_CLOB(JSON_ARRAY())) AS \"data\" FROM ( SELECT 1 FROM DUAL ) \"subq1\"";
-            SqlQueryStructure structure = CreateUninitializedQueryStructure();
-            structure.IsListQuery = true;
-            SetLimit(structure, 101);
-
-            string result = OracleQueryBuilder.ApplyAggregateCursorOffset(sql, paginate ? 4 : 0, structure);
-
-            Assert.AreEqual(sql, result);
-            Assert.AreEqual(0, structure.Parameters.Count);
+            const string clause = "OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY";
+            StringAssert.Contains(sql, clause);
+            Assert.AreEqual(1, Regex.Matches(sql, "OFFSET").Count);
+            Assert.IsFalse(sql.Contains("OFFSET 0"));
+            Assert.AreEqual(offset, structure.Parameters["@param0"].Value);
+            int clauseAt = sql.IndexOf(clause, StringComparison.Ordinal);
+            int wrapperClose = sql.LastIndexOf(" ) ) ", StringComparison.Ordinal);
+            Assert.IsTrue(clauseAt >= 0 && wrapperClose > clauseAt);
         }
 
         #endregion

@@ -273,6 +273,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 if (databaseType == DatabaseType.Oracle && args.Groupby.Count > 0)
                 {
                     OracleQueryBuilder.AddAggregateAliasOrder(structure, args.Orderby, alias);
+                    OracleQueryBuilder.BindAggregateRowOffset(structure, DecodeCursorOffset(args.After));
                 }
 
                 // 7. Generate and post-process SQL
@@ -281,11 +282,9 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 IQueryExecutor queryExecutor = queryManagerFactory.GetQueryExecutor(databaseType);
 
                 string sql = queryBuilder.Build(structure);
-                if (args.Groupby.Count > 0)
+                if (args.Groupby.Count > 0 && queryBuilder is not OracleQueryBuilder)
                 {
-                    sql = queryBuilder is OracleQueryBuilder
-                        ? OracleQueryBuilder.ApplyAggregateCursorOffset(sql, DecodeCursorOffset(args.After), structure)
-                        : ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
+                    sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
                 }
 
                 // 8. Execute query and return results
