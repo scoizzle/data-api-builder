@@ -1071,11 +1071,22 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 foreach (ParameterMetadata paramMeta in configParameters)
                 {
-                    string configParamKey = paramMeta.Name;
-                    if (!storedProcedureDefinition.Parameters.TryGetValue(configParamKey, out ParameterDefinition? parameterDefinition))
+                    // ALL_ARGUMENTS stores unquoted names in uppercase. Match once here and
+                    // re-key to the configured spelling so later lookups stay ordinal-exact.
+                    string? catalogKey = null;
+                    foreach (string key in storedProcedureDefinition.Parameters.Keys)
+                    {
+                        if (string.Equals(key, paramMeta.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            catalogKey = key;
+                            break;
+                        }
+                    }
+
+                    if (catalogKey is null)
                     {
                         var exception = new DataApiBuilderException(
-                            message: $"Could not find parameter \"{configParamKey}\" specified in config for procedure \"{schemaName}.{storedProcedureSourceName}\"",
+                            message: $"Could not find parameter \"{paramMeta.Name}\" specified in config for procedure \"{schemaName}.{storedProcedureSourceName}\"",
                             statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
                             subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
 
@@ -1090,6 +1101,13 @@ namespace Azure.DataApiBuilder.Core.Services
                     }
                     else
                     {
+                        ParameterDefinition parameterDefinition = storedProcedureDefinition.Parameters[catalogKey];
+                        if (!string.Equals(catalogKey, paramMeta.Name, StringComparison.Ordinal))
+                        {
+                            storedProcedureDefinition.Parameters.Remove(catalogKey);
+                            storedProcedureDefinition.Parameters.Add(paramMeta.Name, parameterDefinition);
+                        }
+
                         // Map all metadata from config
                         parameterDefinition.Description = paramMeta.Description;
                         parameterDefinition.Required = paramMeta.Required;
