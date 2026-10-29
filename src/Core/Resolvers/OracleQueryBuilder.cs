@@ -4,12 +4,14 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
@@ -46,6 +48,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // RETURNING ... INTO therefore uses generated safe bind names; the REF CURSOR still aliases
         // them back to the exposed labels so the mutation response is unchanged.
         private const string OUTPUT_BIND_PREFIX = "dab_out_";
+
+        // Bind name for a grouped aggregate's row offset, keyed by the query being built.
+        // Absent means this is not an aggregate page, and the row limit stays OFFSET 0.
+        private static readonly ConditionalWeakTable<SqlQueryStructure, string> AggregateRowOffsetParameters = new();
 
         // A quoted identifier with no alias dot on either side. Already-qualified
         // "ALIAS"."COLUMN" pairs are skipped so emission does not double-prefix them.
@@ -91,6 +97,63 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public string QuoteTableAlias(string alias)
         {
             return QuoteCatalogObject(alias);
+        }
+
+        /// <summary>
+        /// Copies a grouped aggregate page size onto the REST context before
+        /// <see cref="SqlQueryStructure"/> reads it. The aggregate select then emits
+        /// <c>FETCH NEXT</c> from <see cref="SqlQueryStructure.Limit"/>. An unset first
+        /// leaves the default page size in place.
+        /// </summary>
+        public static void UseAggregateFetchLimit(RestRequestContext context, int? first)
+        {
+            if (first.HasValue)
+            {
+                context.First = first;
+            }
+        }
+
+        /// <summary>
+        /// Orders a grouped aggregate by its select alias, with no table qualifier.
+        /// The alias is not a column of the source table. Qualifying it with the table
+        /// alias does not match <see cref="QuoteTableAlias"/>, and that name is out of
+        /// scope on the outer JSON query (ORA-00904).
+        /// </summary>
+        public static void AddAggregateAliasOrder(SqlQueryStructure structure, string orderBy, string alias)
+        {
+            OrderBy direction = orderBy.Equals("asc", StringComparison.OrdinalIgnoreCase)
+                ? OrderBy.ASC
+                : OrderBy.DESC;
+            structure.OrderByColumns.Add(new OrderByColumn(
+                tableSchema: string.Empty,
+                tableName: string.Empty,
+                columnName: alias,
+                tableAlias: null,
+                direction: direction));
+        }
+
+        /// <summary>
+        /// Binds the grouped aggregate row offset before <see cref="Build(SqlQueryStructure)"/>.
+        /// Zero is the first page and is still a bind, so the select does not emit a literal
+        /// <c>OFFSET 0</c> that a later pass would have to find and replace.
+        /// </summary>
+        public static void BindAggregateRowOffset(SqlQueryStructure structure, int offset)
+        {
+            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+            AggregateRowOffsetParameters.Add(structure, offsetParam);
+        }
+
+        /// <summary>
+        /// Row limit for the select inside the JSON wrapper. A bound aggregate offset is emitted
+        /// as its parameter. Every other query starts at the first row, so the offset is 0.
+        /// </summary>
+        private static string BuildAggregateRowLimit(SqlQueryStructure structure)
+        {
+            string offsetSql = AggregateRowOffsetParameters.TryGetValue(structure, out string? offsetParam)
+                ? offsetParam
+                : "0";
+            return $" OFFSET {offsetSql} ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
         }
 
         /// <summary>
@@ -196,7 +259,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 + BuildGroupBy(structure)
                 + BuildHaving(structure)
                 + BuildOrderBy(structure)
-                + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
+                + BuildAggregateRowLimit(structure);
 
             string subqueryName = QuoteIdentifier($"subq{structure.Counter.Next()}");
             string jsonDocAlias = QuoteIdentifier("json_doc");
