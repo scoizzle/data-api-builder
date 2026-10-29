@@ -1070,8 +1070,10 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 foreach (ParameterMetadata paramMeta in configParameters)
                 {
-                    // ALL_ARGUMENTS stores unquoted names in uppercase. Match once here and
-                    // re-key to the configured spelling so later lookups stay ordinal-exact.
+                    // ALL_ARGUMENTS stores unquoted names in uppercase. Match once here.
+                    // The exposed key becomes the configured spelling so REST and GraphQL
+                    // stay ordinal-exact. The catalog name is stored beside the entry and
+                    // is what the quoted PL/SQL association emits.
                     string? catalogKey = null;
                     foreach (string key in storedProcedureDefinition.Parameters.Keys)
                     {
@@ -1101,6 +1103,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     else
                     {
                         ParameterDefinition parameterDefinition = storedProcedureDefinition.Parameters[catalogKey];
+                        OracleObjectFacts.Argument(parameterDefinition).CatalogName = catalogKey;
                         if (!string.Equals(catalogKey, paramMeta.Name, StringComparison.Ordinal))
                         {
                             storedProcedureDefinition.Parameters.Remove(catalogKey);

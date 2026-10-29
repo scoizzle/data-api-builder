@@ -1473,9 +1473,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ? QuoteRelation(sp.SchemaName, sp.Name)
                 : $"{QuoteRelation(sp.SchemaName, packageName)}.{QuoteCatalogObject(sp.Name)}";
 
-            // ProcedureParameters maps each subprogram argument NAME (catalog spelling) to the
-            // engine-generated bind reference (e.g. "@param0"). The call must reference the VALUES.
-            // Emitting the keys (":id") would produce binds with no matching DbConnectionParam.
+            // ProcedureParameters maps each exposed argument name (configured spelling when the
+            // config lists it, otherwise the catalog spelling) to the engine-generated bind
+            // reference (e.g. "@param0"). The call quotes the catalog name when one was stored.
+            // Emitting the bind keys (":id") would produce binds with no matching DbConnectionParam.
             // StoredProcedureDefinition.Columns holds OUT/RETURN metadata. An IDataReader column is
             // the REF CURSOR argument (procedures) or the function RETURN (functions).
             bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Values
@@ -1509,10 +1510,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private List<string> BuildNamedCallArguments(SqlExecuteStructure structure, bool includeRefCursor)
         {
             List<string> callArgs = new();
+            StoredProcedureDefinition definition = (StoredProcedureDefinition)structure.GetUnderlyingSourceDefinition();
             foreach ((string argumentName, object bind) in structure.ProcedureParameters)
             {
+                string formalName = argumentName;
+                if (definition.Parameters.TryGetValue(argumentName, out ParameterDefinition? parameter)
+                    && OracleObjectFacts.Argument(parameter).CatalogName is string catalogName
+                    && !string.IsNullOrEmpty(catalogName))
+                {
+                    formalName = catalogName;
+                }
+
                 string bindName = bind.ToString()!.TrimStart('@');
-                callArgs.Add($"{QuoteIdentifier(argumentName)} => :{bindName}");
+                callArgs.Add($"{QuoteIdentifier(formalName)} => :{bindName}");
             }
 
             if (!includeRefCursor)

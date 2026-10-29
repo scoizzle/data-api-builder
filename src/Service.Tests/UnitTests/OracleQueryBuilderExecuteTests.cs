@@ -175,6 +175,35 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// Config may spell an argument <c>id</c> while ALL_ARGUMENTS stores <c>ID</c>.
+        /// The exposed key stays <c>id</c>. The quoted association uses the catalog name.
+        /// </summary>
+        [TestMethod]
+        [TestCategory(TestCategory.ORACLE)]
+        public void OracleExecuteQuotesCatalogArgumentNameWhenConfigSpellingDiffers()
+        {
+            ParameterDefinition id = new()
+            {
+                SystemType = typeof(int),
+                DbType = DbType.Int32
+            };
+            OracleObjectFacts.Argument(id).CatalogName = "ID";
+
+            StoredProcedureDefinition spDef = new();
+            spDef.Parameters.Add("id", id);
+
+            SqlExecuteStructure structure = CreateExecuteStructure(
+                spDef,
+                requestParams: new Dictionary<string, object?> { { "id", 14 } });
+
+            string query = new OracleQueryBuilder().Build(structure);
+
+            Assert.AreEqual(
+                "BEGIN \"SYSTEM\".\"INSERT_BOOK\"(\"ID\" => :param0); END;",
+                query);
+        }
+
+        /// <summary>
         /// A procedure inside a package (source "schema.package.subprogram") must be invoked with the
         /// package qualifier and named arguments:
         /// <c>BEGIN "SYSTEM"."PKG_TEST"."GET_BOOK_BY_ID"("id" => :param0, "cursor" => :dab_result); END;</c>.

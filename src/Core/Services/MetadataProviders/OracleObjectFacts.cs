@@ -14,6 +14,7 @@ namespace Azure.DataApiBuilder.Core.Services
     {
         private static readonly ConditionalWeakTable<DatabaseStoredProcedure, ProcedureFacts> Procedures = new();
         private static readonly ConditionalWeakTable<ColumnDefinition, LobFacts> Columns = new();
+        private static readonly ConditionalWeakTable<ParameterDefinition, ArgumentFacts> Arguments = new();
 
         public static ProcedureFacts Procedure(DatabaseStoredProcedure procedure)
         {
@@ -23,6 +24,11 @@ namespace Azure.DataApiBuilder.Core.Services
         public static LobFacts Column(ColumnDefinition column)
         {
             return Columns.GetOrCreateValue(column);
+        }
+
+        public static ArgumentFacts Argument(ParameterDefinition parameter)
+        {
+            return Arguments.GetOrCreateValue(parameter);
         }
 
         internal sealed class ProcedureFacts
@@ -39,6 +45,15 @@ namespace Azure.DataApiBuilder.Core.Services
             public bool IsClob { get; set; }
 
             public bool IsBlob { get; set; }
+        }
+
+        /// <summary>
+        /// Formal argument name from ALL_ARGUMENTS. The exposed dictionary key may be the
+        /// configured spelling; the quoted call must use this catalog name.
+        /// </summary>
+        internal sealed class ArgumentFacts
+        {
+            public string? CatalogName { get; set; }
         }
     }
 }
