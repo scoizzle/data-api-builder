@@ -252,9 +252,13 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
+                // Groupby and databaseType are fixed for this call. Oracle sets the fetch
+                // limit before the structure is built, then orders and binds after it exists.
+                bool grouped = args.Groupby.Count > 0;
+                bool groupedOracle = grouped && databaseType == DatabaseType.Oracle;
                 IAuthorizationResolver authResolver = serviceProvider.GetRequiredService<IAuthorizationResolver>();
                 GQLFilterParser gQLFilterParser = serviceProvider.GetRequiredService<GQLFilterParser>();
-                if (databaseType == DatabaseType.Oracle && args.Groupby.Count > 0)
+                if (groupedOracle)
                 {
                     OracleQueryBuilder.UseAggregateFetchLimit(authCtx!.RequestContext, args.First);
                 }
@@ -270,7 +274,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 string alias = ComputeAlias(args.Function, args.Field);
                 BuildAggregationStructure(args, structure, dbObject, backingField!, alias, entityName, sqlMetadataProvider);
-                if (databaseType == DatabaseType.Oracle && args.Groupby.Count > 0)
+                if (groupedOracle)
                 {
                     OracleQueryBuilder.AddAggregateAliasOrder(structure, args.Orderby, alias);
                     OracleQueryBuilder.BindAggregateRowOffset(structure, DecodeCursorOffset(args.After));
@@ -282,7 +286,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 IQueryExecutor queryExecutor = queryManagerFactory.GetQueryExecutor(databaseType);
 
                 string sql = queryBuilder.Build(structure);
-                if (args.Groupby.Count > 0 && databaseType != DatabaseType.Oracle)
+                if (grouped && !groupedOracle)
                 {
                     sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
                 }
@@ -297,7 +301,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                     ? JsonSerializer.Deserialize<JsonArray>(queryResult.RootElement.GetRawText())
                     : null;
 
-                return args.First.HasValue && args.Groupby.Count > 0
+                return args.First.HasValue && grouped
                     ? BuildPaginatedResponse(resultArray, args.First.Value, args.After, entityName, logger)
                     : BuildSimpleResponse(resultArray, entityName, alias, logger);
             }
