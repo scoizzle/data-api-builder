@@ -368,10 +368,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             DatabaseStoredProcedure databaseObject = new(SCHEMA_NAME, name ?? spDefinitionName(spDefinition))
             {
                 SourceType = EntitySourceType.StoredProcedure,
-                StoredProcedureDefinition = spDefinition,
-                PackageName = packageName,
-                IsFunction = isFunction
+                StoredProcedureDefinition = spDefinition
             };
+            OracleObjectFacts.ProcedureFacts procedureFacts = OracleObjectFacts.Procedure(databaseObject);
+            procedureFacts.PackageName = packageName;
+            procedureFacts.IsFunction = isFunction;
 
             Mock<ISqlMetadataProvider> metadataProvider = new();
             metadataProvider.Setup(x => x.EntityToDatabaseObject)

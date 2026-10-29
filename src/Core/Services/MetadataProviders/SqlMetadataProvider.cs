@@ -30,12 +30,19 @@ namespace Azure.DataApiBuilder.Core.Services
     /// Reads schema information from the database to make it
     /// available for the GraphQL/REST services.
     /// </summary>
-    public abstract class SqlMetadataProvider<ConnectionT, DataAdapterT, CommandT> : ISqlMetadataProvider
+    public abstract class SqlMetadataProvider<ConnectionT, DataAdapterT, CommandT> : ISqlMetadataProvider, ISqlLiteralSource
         where ConnectionT : DbConnection, new()
         where DataAdapterT : DbDataAdapter, new()
         where CommandT : DbCommand, new()
     {
         private ODataParser _oDataParser = new();
+        
+        /// <summary>
+        /// Literal adjustments for this engine. The default leaves values and predicates unchanged.
+        /// </summary>
+        internal virtual SqlLiteralRewriter LiteralRewriter => SqlLiteralRewriter.Shared;
+
+        SqlLiteralRewriter ISqlLiteralSource.LiteralRewriter => LiteralRewriter;
 
         private readonly DatabaseType _databaseType;
 
@@ -877,31 +884,11 @@ namespace Azure.DataApiBuilder.Core.Services
 
                         if (sourceType is EntitySourceType.StoredProcedure)
                         {
-                            // Oracle stored-procedure entities may name a standalone subprogram
-                            // ("schema.subprogram") or a subprogram inside a package
-                            // ("schema.package.subprogram"). The generic 2-token parser rejects 3
-                            // tokens, so for Oracle we split the package qualifier out of the source
-                            // BEFORE the generic parse and record it on the database object.
-                            string subprogramSource = entity.Source.Object!;
-                            string? packageName = null;
-                            if (_databaseType is DatabaseType.Oracle)
-                            {
-                                (packageName, subprogramSource) = SplitOraclePackageQualifier(entity.Source.Object!);
-                            }
-
-                            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(subprogramSource)!;
-
-                            sourceObject = new DatabaseStoredProcedure(schemaName, dbObjectName)
-                            {
-                                SourceType = sourceType,
-                                StoredProcedureDefinition = new(),
-                                PackageName = packageName
-                            };
+                            sourceObject = CreateStoredProcedureDatabaseObject(entity.Source.Object!, sourceType);
                         }
                         else
                         {
-                            // parse source name into a tuple of (schemaName, databaseObjectName). Oracle
-                            // packages are irrelevant here - this is a table or view path.
+                            // parse source name into a tuple of (schemaName, databaseObjectName).
                             (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(entity.Source.Object!);
 
                             if (sourceType is EntitySourceType.Table)
@@ -1234,103 +1221,18 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// For Oracle stored-procedure entities, splits a package-qualified source string of the
-        /// form <c>schema.package.subprogram</c> into its package name and the <c>schema.subprogram</c>
-        /// remainder that <see cref="ParseSchemaAndDbTableName"/> can handle. Sources that are NOT
-        /// package-qualified (standalone subprograms <c>schema.subprogram</c>, or a bare
-        /// <c>subprogram</c>) are returned unchanged with a null package name. This is Oracle-only;
-        /// the generic shared parser used elsewhere still accepts at most 2 dot-separated tokens.
+        /// Parses an entity source into a stored-procedure database object.
+        /// The default accepts the shared two-token form (schema and object). Engines with a
+        /// richer source grammar override this.
         /// </summary>
-        /// <param name="source">The raw <c>source.object</c> value from the runtime config.</param>
-        /// <returns>A tuple of (packageName, subprogramSource).</returns>
-        internal static (string? packageName, string subprogramSource) SplitOraclePackageQualifier(string source)
+        protected virtual DatabaseObject CreateStoredProcedureDatabaseObject(string source, EntitySourceType sourceType)
         {
-            if (string.IsNullOrEmpty(source))
+            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(source);
+            return new DatabaseStoredProcedure(schemaName, dbObjectName)
             {
-                return (null, source);
-            }
-
-            // Count top-level '.' separators, honoring bracket-escaped identifiers ([a.b]) so a
-            // package/object name that itself contains a dot is not mis-split.
-            int firstDot = -1;
-            int secondDot = -1;
-            bool inBracket = false;
-            for (int i = 0; i < source.Length; i++)
-            {
-                char c = source[i];
-                if (c == '[')
-                {
-                    inBracket = true;
-                }
-                else if (c == ']')
-                {
-                    inBracket = false;
-                }
-                else if (c == '.' && !inBracket)
-                {
-                    if (firstDot == -1)
-                    {
-                        firstDot = i;
-                    }
-                    else if (secondDot == -1)
-                    {
-                        secondDot = i;
-                        break;
-                    }
-                }
-            }
-
-            // A package-qualified Oracle subprogram has exactly three parts
-            // (schema.package.subprogram). A three-token source is the only case we consume here;
-            // anything else (0-2 tokens) is left to the 2-token shared parser.
-            if (secondDot == -1)
-            {
-                return (null, source);
-            }
-
-            // Ensure there is no FOURTH top-level token, which would be an invalid source.
-            bool hasFourthToken = false;
-            bool nestedBracket = false;
-            for (int i = secondDot + 1; i < source.Length; i++)
-            {
-                char c = source[i];
-                if (c == '[')
-                {
-                    nestedBracket = true;
-                }
-                else if (c == ']')
-                {
-                    nestedBracket = false;
-                }
-                else if (c == '.' && !nestedBracket)
-                {
-                    hasFourthToken = true;
-                    break;
-                }
-            }
-
-            if (hasFourthToken)
-            {
-                throw new DataApiBuilderException(
-                    message: $"Invalid Oracle stored procedure source: \"{source}\". Expected " +
-                             "\"schema.subprogram\" (standalone) or \"schema.package.subprogram\" (packaged).",
-                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
-            }
-
-            // Bracket-escaped identifiers are "[quoted]"; unescape the package part only (the
-            // remainder is handed to the shared 2-token parser which applies its own unescaping).
-            string packagePart = source[(firstDot + 1)..secondDot].Replace("[[", "[").Replace("]]", "]");
-            if (packagePart.StartsWith('[') && packagePart.EndsWith(']') && packagePart.Length >= 2)
-            {
-                packagePart = packagePart[1..^1];
-            }
-
-            // Reconstruct the schema-qualified subprogram remainder (schema + "." + subprogram) so
-            // the shared 2-token parser still receives the parts it expects. Dropping the schema here
-            // would silently resolve the subprogram against the wrong (default) schema.
-            string subprogramPart = source[..firstDot] + "." + source[(secondDot + 1)..];
-            return (packagePart, subprogramPart);
+                SourceType = sourceType,
+                StoredProcedureDefinition = new()
+            };
         }
 
         /// <summary>
@@ -1669,6 +1571,26 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 GenerateExposedToBackingColumnMapUtil(entityName);
             }
+
+            foreach ((string entityName, Entity entity) in Entities)
+            {
+                EntityExposedNamesToBackingColumnNames.TryGetValue(entityName, out Dictionary<string, string>? exposedToBacking);
+                NormalizeConfiguredIdentifiers(entityName, entity, exposedToBacking);
+            }
+        }
+
+        /// <summary>
+        /// Engines that need authored names to match catalog spelling do that here, after the
+        /// exposed and backing maps exist. The default keeps every name as authored.
+        /// </summary>
+        /// <param name="entityName">Configured entity whose names may be rewritten.</param>
+        /// <param name="entity">The entity object from the runtime config.</param>
+        /// <param name="exposedToBacking">Exposed-to-backing map for this entity, when one was built.</param>
+        protected virtual void NormalizeConfiguredIdentifiers(
+            string entityName,
+            Entity entity,
+            IReadOnlyDictionary<string, string>? exposedToBacking)
+        {
         }
 
         /// <summary>
@@ -1757,26 +1679,11 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Resolves a config-authored column name (from entity fields or mappings) to the physical
-        /// backing column name stored on <see cref="SourceDefinition.Columns"/>. Config names are
-        /// matched case-insensitively because the physical casing is engine-specific (e.g. Oracle
-        /// stores unquoted identifiers UPPERCASE while configs commonly author lowercase names).
-        /// Returns the input unchanged when no column matches (e.g. computed/invalid names, which
-        /// validation surfaces elsewhere).
+        /// Resolves a config-authored column name to the spelling stored on
+        /// <see cref="SourceDefinition.Columns"/>. The default keeps the authored name.
         /// </summary>
-        /// <param name="sourceDefinition">The entity's source definition holding physical column keys.</param>
-        /// <param name="configColumnName">The column name as authored in the runtime config.</param>
-        /// <returns>The physical column name, or the input when no match is found.</returns>
-        protected static string ResolvePhysicalColumnName(SourceDefinition sourceDefinition, string configColumnName)
+        protected virtual string ResolvePhysicalColumnName(SourceDefinition sourceDefinition, string configColumnName)
         {
-            foreach (string physicalName in sourceDefinition.Columns.Keys)
-            {
-                if (string.Equals(physicalName, configColumnName, StringComparison.OrdinalIgnoreCase))
-                {
-                    return physicalName;
-                }
-            }
-
             return configColumnName;
         }
 
@@ -2394,7 +2301,7 @@ namespace Azure.DataApiBuilder.Core.Services
             // Oracle rejects IN lists with more than 1000 expressions (ORA-01795), so each list
             // is batched at that limit and the results are merged; small schemas still issue
             // exactly one query.
-            const int maxInListExpressions = 1000;
+            int maxInListExpressions = ((BaseSqlQueryBuilder)GetQueryBuilder()).ForeignKeyInListBatchSize;
             List<string> distinctSchemaNames = schemaNames.Distinct(StringComparer.Ordinal).ToList();
             List<string> distinctTableNames = tableNames.Distinct(StringComparer.Ordinal).ToList();
 
@@ -2440,12 +2347,6 @@ namespace Azure.DataApiBuilder.Core.Services
                         }
                     }
                 }
-            }
-
-            if (PairToFkDefinition.Count == 0)
-            {
-                // Preserve the previous "no rows" shape for the follow-up inference step.
-                PairToFkDefinition = null;
             }
 
             if (PairToFkDefinition is not null)

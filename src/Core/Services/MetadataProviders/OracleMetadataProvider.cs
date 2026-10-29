@@ -25,7 +25,7 @@ namespace Azure.DataApiBuilder.Core.Services
     /// <summary>
     /// Oracle specific override for SqlMetadataProvider.
     /// </summary>
-    public class OracleMetadataProvider :
+    public partial class OracleMetadataProvider :
         SqlMetadataProvider<OracleConnection, OracleDataAdapter, OracleCommand>
     {
         /// <summary>
@@ -176,7 +176,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             if (databaseObject is DatabaseStoredProcedure storedProcedure
-                && !string.IsNullOrEmpty(storedProcedure.PackageName))
+                && !string.IsNullOrEmpty(OracleObjectFacts.Procedure(storedProcedure).PackageName))
             {
                 return;
             }
@@ -678,8 +678,8 @@ namespace Azure.DataApiBuilder.Core.Services
                         columnDefinition.SystemType = typeof(byte[]);
                         columnDefinition.DbType = DbType.Binary;
                         // RAW is a bounded binary type. BLOB and LONG RAW need a LOB output bind.
-                        columnDefinition.IsBlob = !physicalType.Equals("RAW", StringComparison.OrdinalIgnoreCase);
-                        if (!columnDefinition.IsBlob)
+                        OracleObjectFacts.Column(columnDefinition).IsBlob = !physicalType.Equals("RAW", StringComparison.OrdinalIgnoreCase);
+                        if (!OracleObjectFacts.Column(columnDefinition).IsBlob)
                         {
                             columnDefinition.Length = TryReadOracleColumnLength(columnInfo, allColumnsInTable);
                         }
@@ -695,14 +695,14 @@ namespace Azure.DataApiBuilder.Core.Services
                         && (physicalType.Equals("CLOB", StringComparison.OrdinalIgnoreCase)
                             || physicalType.Equals("NCLOB", StringComparison.OrdinalIgnoreCase)))
                     {
-                        columnDefinition.IsClob = true;
+                        OracleObjectFacts.Column(columnDefinition).IsClob = true;
                     }
 
                     // Bounded string columns expose their maximum length so the query builder can
                     // choose between VARCHAR2 and CLOB for generated JSON output. CLOB/NCLOB (and
                     // LONG) are unbounded and stay on the LOB path.
                     if (columnDefinition.SystemType == typeof(string)
-                        && !columnDefinition.IsClob
+                        && !OracleObjectFacts.Column(columnDefinition).IsClob
                         && physicalType is not null
                         && !physicalType.Equals("LONG", StringComparison.OrdinalIgnoreCase))
                     {
@@ -967,7 +967,7 @@ namespace Azure.DataApiBuilder.Core.Services
             // ALL_ARGUMENTS keys a standalone subprogram by (OWNER, OBJECT_NAME) with PACKAGE_NAME IS
             // NULL, and a packaged subprogram by (OWNER, PACKAGE_NAME, OBJECT_NAME). A function
             // additionally exposes its RETURN value as a POSITION 0 row with a NULL ARGUMENT_NAME.
-            string packageClause = dbSp.PackageName is null
+            string packageClause = OracleObjectFacts.Procedure(dbSp).PackageName is null
                 ? "PACKAGE_NAME IS NULL"
                 : "PACKAGE_NAME = :package_name";
             string argumentsQuery =
@@ -986,9 +986,9 @@ namespace Azure.DataApiBuilder.Core.Services
                 command.CommandText = argumentsQuery;
                 command.Parameters.Add(new OracleParameter("owner", schemaFilter));
                 command.Parameters.Add(new OracleParameter("object_name", objectFilter));
-                if (dbSp.PackageName is not null)
+                if (OracleObjectFacts.Procedure(dbSp).PackageName is string packageName)
                 {
-                    command.Parameters.Add(new OracleParameter("package_name", dbSp.PackageName.ToUpperInvariant()));
+                    command.Parameters.Add(new OracleParameter("package_name", packageName.ToUpperInvariant()));
                 }
 
                 using OracleDataReader reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1007,7 +1007,7 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 IEnumerable<string>? configuredNames = procedureEntity.Source.Parameters?.Select(parameter => parameter.Name);
                 List<OracleArgumentRow> selected = SelectOracleOverload(argumentRows, configuredNames);
-                dbSp.Overload = selected.Count > 0 ? selected[0].Overload : null;
+                OracleObjectFacts.Procedure(dbSp).Overload = selected.Count > 0 ? selected[0].Overload : null;
 
                 foreach (OracleArgumentRow row in selected.OrderBy(argument => argument.Position))
                 {
@@ -1061,7 +1061,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     }
             }
 
-            dbSp.IsFunction = isFunction;
+            OracleObjectFacts.Procedure(dbSp).IsFunction = isFunction;
 
             // Loop through parameters specified in config, throw error if not found in schema
             // else set runtime config defined default values.
@@ -1117,7 +1117,7 @@ namespace Azure.DataApiBuilder.Core.Services
             string objectFilter,
             CancellationToken cancellationToken)
         {
-            string query = dbSp.PackageName is null
+            string query = OracleObjectFacts.Procedure(dbSp).PackageName is null
                 ? "SELECT 1 FROM ALL_PROCEDURES " +
                   "WHERE OWNER = :owner AND OBJECT_NAME = :object_name " +
                   "AND PROCEDURE_NAME IS NULL AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') " +
@@ -1131,9 +1131,9 @@ namespace Azure.DataApiBuilder.Core.Services
             command.CommandText = query;
             command.Parameters.Add(new OracleParameter("owner", schema));
             command.Parameters.Add(new OracleParameter("object_name", objectFilter));
-            if (dbSp.PackageName is not null)
+            if (OracleObjectFacts.Procedure(dbSp).PackageName is string packageName)
             {
-                command.Parameters.Add(new OracleParameter("package_name", dbSp.PackageName.ToUpperInvariant()));
+                command.Parameters.Add(new OracleParameter("package_name", packageName.ToUpperInvariant()));
             }
 
             using OracleDataReader reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1162,19 +1162,19 @@ namespace Azure.DataApiBuilder.Core.Services
             // the same way arguments were chosen in FillSchemaForStoredProcedureAsync.
             string resultQuery = ((OracleQueryBuilder)SqlQueryBuilder).BuildStoredProcedureResultDetailsQuery(
                 schemaName: schemaName,
-                packageName: dbSp.PackageName,
+                packageName: OracleObjectFacts.Procedure(dbSp).PackageName,
                 subprogramName: storedProcedureName,
-                isFunction: dbSp.IsFunction,
-                overload: dbSp.Overload);
+                isFunction: OracleObjectFacts.Procedure(dbSp).IsFunction,
+                overload: OracleObjectFacts.Procedure(dbSp).Overload);
             Dictionary<string, DbConnectionParam> resultQueryParameters = new()
             {
                 { "@param0", new DbConnectionParam(schemaName, DbType.String) },
-                { "@param1", new DbConnectionParam(dbSp.PackageName, DbType.String) },
+                { "@param1", new DbConnectionParam(OracleObjectFacts.Procedure(dbSp).PackageName, DbType.String) },
                 { "@param2", new DbConnectionParam(storedProcedureName, DbType.String) },
             };
-            if (!string.IsNullOrEmpty(dbSp.Overload))
+            if (!string.IsNullOrEmpty(OracleObjectFacts.Procedure(dbSp).Overload))
             {
-                resultQueryParameters.Add("@param3", new DbConnectionParam(dbSp.Overload, DbType.String));
+                resultQueryParameters.Add("@param3", new DbConnectionParam(OracleObjectFacts.Procedure(dbSp).Overload, DbType.String));
             }
 
             JsonArray? resultArray = await QueryExecutor.ExecuteQueryAsync(
@@ -1213,7 +1213,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 // that returns a REF CURSOR declares a result set (captured through the :dab_result
                 // bind); a scalar function has no result-set definition and is invoked by
                 // OracleQueryBuilder as SELECT ... FROM DUAL, so skip it here.
-                if (dbSp.IsFunction && resultFieldType != typeof(IDataReader))
+                if (OracleObjectFacts.Procedure(dbSp).IsFunction && resultFieldType != typeof(IDataReader))
                 {
                     continue;
                 }
@@ -1221,7 +1221,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 if (string.IsNullOrWhiteSpace(resultFieldName))
                 {
                     // Name a function's cursor result after the subprogram so it is addressable.
-                    resultFieldName = dbSp.IsFunction ? storedProcedureName : resultFieldName;
+                    resultFieldName = OracleObjectFacts.Procedure(dbSp).IsFunction ? storedProcedureName : resultFieldName;
                 }
 
                 if (string.IsNullOrWhiteSpace(resultFieldName))

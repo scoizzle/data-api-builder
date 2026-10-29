@@ -611,22 +611,24 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        public void IsFieldAccessible_ExcludedFieldWithDifferentCasing_ReturnsFalse()
+        public void IsFieldAccessible_ExcludedFieldWithDifferentCasing_StaysAccessible()
         {
             RegexMatch match = MatchFieldReference("@item.CATEGORYNAME");
             HashSet<string> excludedFields = new() { "categoryName" };
 
-            Assert.IsFalse(RuntimeConfigValidator.IsFieldAccessible(match, includedFields: null, excludedFields));
+            // Exclude matching is ordinal. A different case is a different field.
+            Assert.IsTrue(RuntimeConfigValidator.IsFieldAccessible(match, includedFields: null, excludedFields));
         }
 
         [TestMethod]
-        public void IsFieldAccessible_IncludedFieldWithDifferentCasing_ReturnsTrue()
+        public void IsFieldAccessible_IncludedFieldWithDifferentCasing_ReturnsFalse()
         {
             RegexMatch match = MatchFieldReference("@item.CategoryName");
             HashSet<string> includedFields = new() { "CATEGORYNAME" };
             HashSet<string> excludedFields = new();
 
-            Assert.IsTrue(RuntimeConfigValidator.IsFieldAccessible(match, includedFields, excludedFields));
+            // Include matching is ordinal. A different case fails closed.
+            Assert.IsFalse(RuntimeConfigValidator.IsFieldAccessible(match, includedFields, excludedFields));
         }
 
         [TestMethod]

@@ -6,7 +6,6 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Transactions;
-using Oracle.ManagedDataAccess.Client;
 using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
@@ -128,12 +127,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             try
             {
-                // A second ODP.NET Open inside one TransactionScope promotes to XA/MSDTC, which
-                // .NET does not support. Every Oracle GraphQL mutation (create, update, delete)
-                // shares one local transaction so the write and the follow-up read use one connection.
-                if (sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle)
-                {
-                    await ExecuteInOracleLocalTransactionAsync(dataSourceName, async (conn, tx) =>
+                // GraphQL writes and their selection-set reads share one transaction. Engines that
+                // cannot enlist a second connection open one local transaction; the others use TransactionScope.
+                IMutationTransactionExecutor transactionExecutor =
+                    _queryManagerFactory.GetMutationTransactionExecutor(sqlMetadataProvider.GetDatabaseType());
+                await transactionExecutor.ExecuteAsync(
+                    dataSourceName,
+                    MutationConnectionSharing.GraphQL,
+                    async _ =>
                     {
                         result = await ExecuteGraphQLMutationCoreAsync(
                             context,
@@ -143,28 +144,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             sqlMetadataProvider,
                             queryEngine,
                             mutationOperation,
-                            isReadPermissionConfigured,
-                            conn,
-                            tx);
-                    });
-                }
-                else
-                {
-                    using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
-                    result = await ExecuteGraphQLMutationCoreAsync(
-                        context,
-                        parameters,
-                        dataSourceName,
-                        entityName,
-                        sqlMetadataProvider,
-                        queryEngine,
-                        mutationOperation,
-                        isReadPermissionConfigured,
-                        dbConnection: null,
-                        dbTransaction: null);
-                    transactionScope.Complete();
-                }
-
+                            isReadPermissionConfigured);
+                    },
+                    CancellationToken.None);
             }
             // All the exceptions that can be thrown by .Complete() and .Dispose() methods of transactionScope
             // derive from TransactionException. Hence, TransactionException acts as a catch-all.
@@ -517,19 +499,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         try
                         {
-                            // A read policy issues a second command. On Oracle that must share the
-                            // write's connection; TransactionScope would promote the second Open.
-                            bool useOracleLocalTransaction = sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle
-                                && isDatabasePolicyDefinedForReadAction;
+                            MutationConnectionSharing sharing = isDatabasePolicyDefinedForReadAction
+                                ? MutationConnectionSharing.RestFollowUpRead
+                                : MutationConnectionSharing.None;
 
-                            async Task RunUpsertAsync(DbConnection? conn, DbTransaction? tx)
+                            async Task RunUpsertAsync()
                             {
                                 upsertOperationResult = await PerformUpsertOperation(
                                                                     parameters: parameters,
                                                                     context: context,
-                                                                    sqlMetadataProvider: sqlMetadataProvider,
-                                                                    dbConnection: conn,
-                                                                    dbTransaction: tx);
+                                                                    sqlMetadataProvider: sqlMetadataProvider);
 
                                 if (upsertOperationResult is null)
                                 {
@@ -551,20 +530,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                 {
                                     FindRequestContext findRequestContext = ConstructFindRequestContext(context, upsertOperationResultSetRow, roleName, sqlMetadataProvider);
                                     IQueryEngine queryEngine = _queryEngineFactory.GetQueryEngine(sqlMetadataProvider.GetDatabaseType());
-                                    selectOperationResponse = await ExecuteFindOnSameConnectionAsync(queryEngine, findRequestContext, conn, tx);
+                                    selectOperationResponse = await queryEngine.ExecuteAsync(findRequestContext);
                                 }
                             }
 
-                            if (useOracleLocalTransaction)
-                            {
-                                await ExecuteInOracleLocalTransactionAsync(dataSourceName, (conn, tx) => RunUpsertAsync(conn, tx));
-                            }
-                            else
-                            {
-                                using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
-                                await RunUpsertAsync(conn: null, tx: null);
-                                transactionScope.Complete();
-                            }
+                            IMutationTransactionExecutor transactionExecutor =
+                                _queryManagerFactory.GetMutationTransactionExecutor(sqlMetadataProvider.GetDatabaseType());
+                            await transactionExecutor.ExecuteAsync(
+                                dataSourceName,
+                                sharing,
+                                _ => RunUpsertAsync(),
+                                CancellationToken.None);
                         }
 
                         // All the exceptions that can be thrown by .Complete() and .Dispose() methods of transactionScope
@@ -628,19 +604,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         try
                         {
-                            bool useOracleLocalTransaction = sqlMetadataProvider.GetDatabaseType() is DatabaseType.Oracle
-                                && isDatabasePolicyDefinedForReadAction;
+                            MutationConnectionSharing sharing = isDatabasePolicyDefinedForReadAction
+                                ? MutationConnectionSharing.RestFollowUpRead
+                                : MutationConnectionSharing.None;
 
-                            async Task RunMutationAsync(DbConnection? conn, DbTransaction? tx)
+                            async Task RunMutationAsync()
                             {
                                 mutationResultRow =
                                         await PerformMutationOperation(
                                             entityName: context.EntityName,
                                             operationType: effectiveOperationType,
                                             parameters: parameters,
-                                            sqlMetadataProvider: sqlMetadataProvider,
-                                            dbConnection: conn,
-                                            dbTransaction: tx);
+                                            sqlMetadataProvider: sqlMetadataProvider);
 
                                 if (mutationResultRow is null)
                                 {
@@ -674,20 +649,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                 {
                                     FindRequestContext findRequestContext = ConstructFindRequestContext(context, mutationResultRow, roleName, sqlMetadataProvider);
                                     IQueryEngine queryEngine = _queryEngineFactory.GetQueryEngine(sqlMetadataProvider.GetDatabaseType());
-                                    selectOperationResponse = await ExecuteFindOnSameConnectionAsync(queryEngine, findRequestContext, conn, tx);
+                                    selectOperationResponse = await queryEngine.ExecuteAsync(findRequestContext);
                                 }
                             }
 
-                            if (useOracleLocalTransaction)
-                            {
-                                await ExecuteInOracleLocalTransactionAsync(dataSourceName, (conn, tx) => RunMutationAsync(conn, tx));
-                            }
-                            else
-                            {
-                                using TransactionScope transactionScope = ConstructTransactionScopeBasedOnDbType(sqlMetadataProvider);
-                                await RunMutationAsync(conn: null, tx: null);
-                                transactionScope.Complete();
-                            }
+                            IMutationTransactionExecutor transactionExecutor =
+                                _queryManagerFactory.GetMutationTransactionExecutor(sqlMetadataProvider.GetDatabaseType());
+                            await transactionExecutor.ExecuteAsync(
+                                dataSourceName,
+                                sharing,
+                                _ => RunMutationAsync(),
+                                CancellationToken.None);
                         }
 
                         // All the exceptions that can be thrown by .Complete() and .Dispose() methods of transactionScope
@@ -804,41 +776,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Runs one Oracle mutation on a single connection and local transaction.
-        /// ODP.NET promotes a second connection opened inside TransactionScope, and that
-        /// promotion is unsupported on .NET.
-        /// </summary>
-        private async Task ExecuteInOracleLocalTransactionAsync(
-            string dataSourceName,
-            Func<OracleConnection, OracleTransaction, Task> action)
-        {
-            OracleQueryExecutor oracleExecutor = (OracleQueryExecutor)_queryManagerFactory.GetQueryExecutor(DatabaseType.Oracle);
-            using OracleConnection conn = oracleExecutor.CreateConnection(dataSourceName);
-            await oracleExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName);
-            try
-            {
-                await conn.OpenAsync();
-                using OracleTransaction tx = oracleExecutor.BeginLocalReadCommittedTransaction(conn, dataSourceName);
-                try
-                {
-                    await action(conn, tx);
-                    tx.Commit();
-                }
-                catch
-                {
-                    tx.Rollback();
-                    throw;
-                }
-            }
-            catch (DbException dbException)
-            {
-                throw _queryManagerFactory.GetDbExceptionParser(DatabaseType.Oracle).Parse(dbException);
-            }
-        }
-
-        /// <summary>
-        /// GraphQL create, update, and delete. When <paramref name="dbConnection"/> is set, the
-        /// DML and the follow-up selection-set read share that connection.
+        /// GraphQL create, update, and delete. A follow-up read on an uncommitted local transaction
+        /// uses the ambient mutation session.
         /// </summary>
         private async Task<Tuple<JsonDocument?, IMetadata?>?> ExecuteGraphQLMutationCoreAsync(
             IMiddlewareContext context,
@@ -848,9 +787,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             ISqlMetadataProvider sqlMetadataProvider,
             IQueryEngine queryEngine,
             EntityActionOperation mutationOperation,
-            bool isReadPermissionConfigured,
-            DbConnection? dbConnection,
-            DbTransaction? dbTransaction)
+            bool isReadPermissionConfigured)
         {
             Tuple<JsonDocument?, IMetadata?>? result = null;
             if (mutationOperation is EntityActionOperation.Delete)
@@ -863,9 +800,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             queryEngine,
                             context,
                             GetBackingColumnsFromCollection(entityName: entityName, parameters: parameters, sqlMetadataProvider: sqlMetadataProvider),
-                            dataSourceName,
-                            dbConnection,
-                            dbTransaction);
+                            dataSourceName);
                     }
                 }
 
@@ -873,9 +808,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     await PerformDeleteOperation(
                         entityName,
                         parameters,
-                        sqlMetadataProvider,
-                        dbConnection,
-                        dbTransaction);
+                        sqlMetadataProvider);
 
                 if (resultProperties is not null
                     && resultProperties.TryGetValue(nameof(DbDataReader.RecordsAffected), out object? value)
@@ -906,9 +839,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     parameters,
                     sqlMetadataProvider,
                     _runtimeConfigProvider.GetConfig(),
-                    !isPointMutation,
-                    dbConnection,
-                    dbTransaction);
+                    !isPointMutation);
 
                 if (isPointMutation)
                 {
@@ -916,9 +847,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         queryEngine,
                         context,
                         primaryKeysOfCreatedItems[0],
-                        dataSourceName,
-                        dbConnection,
-                        dbTransaction);
+                        dataSourceName);
                 }
                 else
                 {
@@ -926,9 +855,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         queryEngine,
                         context,
                         primaryKeysOfCreatedItems,
-                        dataSourceName,
-                        dbConnection,
-                        dbTransaction);
+                        dataSourceName);
                 }
             }
             else
@@ -939,9 +866,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         mutationOperation,
                         parameters,
                         sqlMetadataProvider,
-                        context,
-                        dbConnection,
-                        dbTransaction);
+                        context);
 
                 if (isReadPermissionConfigured)
                 {
@@ -952,9 +877,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             queryEngine,
                             context,
                             GetBackingColumnsFromCollection(entityName: entityName, parameters: mutationResultRow.Columns, sqlMetadataProvider: sqlMetadataProvider),
-                            dataSourceName,
-                            dbConnection,
-                            dbTransaction);
+                            dataSourceName);
                     }
                     else if (context.Selection.Type.TypeName() == GraphQLUtils.DB_OPERATION_RESULT_TYPE)
                     {
@@ -970,51 +893,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             IQueryEngine queryEngine,
             IMiddlewareContext context,
             IDictionary<string, object?> parameters,
-            string dataSourceName,
-            DbConnection? dbConnection,
-            DbTransaction? dbTransaction)
+            string dataSourceName)
         {
-            if (dbConnection is null)
-            {
-                return queryEngine.ExecuteAsync(context, parameters, dataSourceName);
-            }
-
-            return ((SqlQueryEngine)queryEngine).ExecuteAsync(context, parameters, dataSourceName, dbConnection, dbTransaction);
+            return queryEngine.ExecuteAsync(context, parameters, dataSourceName);
         }
 
         private static Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateSelectionSetAsync(
             IQueryEngine queryEngine,
             IMiddlewareContext context,
             List<IDictionary<string, object?>> parameters,
-            string dataSourceName,
-            DbConnection? dbConnection,
-            DbTransaction? dbTransaction)
+            string dataSourceName)
         {
-            if (dbConnection is null)
-            {
-                return queryEngine.ExecuteMultipleCreateFollowUpQueryAsync(context, parameters, dataSourceName);
-            }
-
-            return ((SqlQueryEngine)queryEngine).ExecuteMultipleCreateFollowUpQueryAsync(
-                context,
-                parameters,
-                dataSourceName,
-                dbConnection,
-                dbTransaction);
-        }
-
-        private static Task<JsonDocument?> ExecuteFindOnSameConnectionAsync(
-            IQueryEngine queryEngine,
-            FindRequestContext context,
-            DbConnection? dbConnection,
-            DbTransaction? dbTransaction)
-        {
-            if (dbConnection is null)
-            {
-                return queryEngine.ExecuteAsync(context);
-            }
-
-            return ((SqlQueryEngine)queryEngine).ExecuteAsync(context, dbConnection, dbTransaction);
+            return queryEngine.ExecuteMultipleCreateFollowUpQueryAsync(context, parameters, dataSourceName);
         }
 
         /// <summary>
@@ -1034,9 +924,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 EntityActionOperation operationType,
                 IDictionary<string, object?> parameters,
                 ISqlMetadataProvider sqlMetadataProvider,
-                IMiddlewareContext? context = null,
-                DbConnection? dbConnection = null,
-                DbTransaction? dbTransaction = null)
+                IMiddlewareContext? context = null)
         {
             IQueryBuilder queryBuilder = _queryManagerFactory.GetQueryBuilder(sqlMetadataProvider.GetDatabaseType());
             IQueryExecutor queryExecutor = _queryManagerFactory.GetQueryExecutor(sqlMetadataProvider.GetDatabaseType());
@@ -1145,9 +1033,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         queryParameters,
                         queryExecutor.ExtractResultSetFromDbDataReaderAsync,
                         dataSourceName,
-                        primaryKeyExposedColumnNames.Count > 0 ? primaryKeyExposedColumnNames : sourceDefinition.PrimaryKey,
-                        dbConnection,
-                        dbTransaction);
+                        primaryKeyExposedColumnNames.Count > 0 ? primaryKeyExposedColumnNames : sourceDefinition.PrimaryKey);
 
                 dbResultSetRow = dbResultSet is not null ?
                     (dbResultSet.Rows.FirstOrDefault() ?? new DbResultSetRow()) : null;
@@ -1191,9 +1077,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         queryParameters,
                         queryExecutor.ExtractResultSetFromDbDataReaderAsync,
                         dataSourceName,
-                        args: null,
-                        dbConnection,
-                        dbTransaction);
+                        args: null);
                 dbResultSetRow = dbResultSet is not null ? (dbResultSet.Rows.FirstOrDefault() ?? new()) : null;
             }
 
@@ -1216,9 +1100,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 IDictionary<string, object?> mutationInputParamsFromGQLContext,
                 ISqlMetadataProvider sqlMetadataProvider,
                 RuntimeConfig runtimeConfig,
-                bool isMultipleInputType = false,
-                DbConnection? dbConnection = null,
-                DbTransaction? dbTransaction = null)
+                bool isMultipleInputType = false)
         {
             // rootFieldName can be either "item" or "items" depending on whether the operation
             // is point multiple create or many-type multiple create.
@@ -1320,7 +1202,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
+                    ProcessMultipleCreateInputField(context, unparsedFieldNodeForCurrentItem.Value, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
 
                     // Ideally the CurrentEntityCreatedValues should not be null. CurrentEntityCreatedValues being null indicates that the create operation
                     // has failed and that will result in an exception being thrown.
@@ -1370,7 +1252,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     parentEntityName: entityName,
                     inputMutParams: parsedInputFields);
 
-                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0, dbConnection, dbTransaction);
+                ProcessMultipleCreateInputField(context, unparsedInputFields, sqlMetadataProvider, multipleCreateStructure, nestingLevel: 0);
 
                 if (multipleCreateStructure.CurrentEntityCreatedValues is not null)
                 {
@@ -1395,9 +1277,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             object? unparsedInputFields,
             ISqlMetadataProvider sqlMetadataProvider,
             MultipleCreateStructure multipleCreateStructure,
-            int nestingLevel,
-            DbConnection? dbConnection = null,
-            DbTransaction? dbTransaction = null)
+            int nestingLevel)
         {
 
             if (multipleCreateStructure.InputMutParams is null || unparsedInputFields is null)
@@ -1440,7 +1320,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             subStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest);
                     }
 
-                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel, dbConnection, dbTransaction);
+                    ProcessMultipleCreateInputField(context, nodeForCurrentInput.Value, sqlMetadataProvider, multipleCreateStructureForCurrentItem, nestingLevel);
                     parsedInputItemIndex++;
                 }
             }
@@ -1471,7 +1351,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     string relatedEntityName = GraphQLUtils.GetRelationshipTargetEntityName(entity, entityName, relationshipName);
                     MultipleCreateStructure referencedRelationshipMultipleCreateStructure = new(entityName: relatedEntityName, parentEntityName: entityName, inputMutParams: relationshipFieldValue);
                     IValueNode node = GraphQLUtils.GetFieldNodeForGivenFieldName(parameterNodes, relationshipName);
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencedRelationshipMultipleCreateStructure, nestingLevel + 1);
 
                     if (sqlMetadataProvider.TryGetFKDefinition(
                                                     sourceEntityName: entityName,
@@ -1498,9 +1378,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                           parameters: multipleCreateStructure.CurrentEntityParams!,
                                                                           sourceDefinition: currentEntitySourceDefinition,
                                                                           isLinkingEntity: false,
-                                                                          nestingLevel: nestingLevel,
-                                                                          dbConnection: dbConnection,
-                                                                          dbTransaction: dbTransaction);
+                                                                          nestingLevel: nestingLevel);
 
                 //Perform an insertion in the linking table if required
                 if (multipleCreateStructure.IsLinkingTableInsertionRequired)
@@ -1543,9 +1421,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             parameters: multipleCreateStructure.LinkingTableParams!,
                             sourceDefinition: linkingTableSourceDefinition,
                             isLinkingEntity: true,
-                            nestingLevel: nestingLevel,
-                            dbConnection: dbConnection,
-                            dbTransaction: dbTransaction);
+                            nestingLevel: nestingLevel);
                 }
 
                 // Process referencing relationships
@@ -1582,7 +1458,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                             entityName: entityName);
                     }
 
-                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1, dbConnection, dbTransaction);
+                    ProcessMultipleCreateInputField(context, node.Value, sqlMetadataProvider, referencingRelationshipMultipleCreateStructure, nestingLevel + 1);
                 }
             }
         }
@@ -1605,9 +1481,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                                                            IDictionary<string, object?> parameters,
                                                                            SourceDefinition sourceDefinition,
                                                                            bool isLinkingEntity,
-                                                                           int nestingLevel,
-                                                                           DbConnection? dbConnection = null,
-                                                                           DbTransaction? dbTransaction = null)
+                                                                           int nestingLevel)
         {
             SqlInsertStructure sqlInsertStructure = new(
                                                      entityName: entityName,
@@ -1651,17 +1525,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ? sourceDefinition.Columns.Keys.ToList()
                 : exposedColumnNames;
 
-            if (dbConnection is not null)
+            IMutationWorkSession? mutationSession = MutationWork.Current;
+            if (mutationSession is { IsInLocalTransaction: true })
             {
-                dbResultSet = queryExecutor.ExecuteQueryOnConnection(
-                    dbConnection,
+                dbResultSet = mutationSession.ExecuteQuery(
                     queryString,
                     queryParameters,
                     queryExecutor.ExtractResultSetFromDbDataReader,
                     GetHttpContext(),
                     resultColumns,
-                    dataSourceName,
-                    dbTransaction);
+                    dataSourceName);
             }
             else
             {
@@ -2165,9 +2038,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             PerformDeleteOperation(
                 string entityName,
                 IDictionary<string, object?> parameters,
-                ISqlMetadataProvider sqlMetadataProvider,
-                DbConnection? dbConnection = null,
-                DbTransaction? dbTransaction = null)
+                ISqlMetadataProvider sqlMetadataProvider)
         {
             IQueryBuilder queryBuilder = _queryManagerFactory.GetQueryBuilder(sqlMetadataProvider.GetDatabaseType());
             IQueryExecutor queryExecutor = _queryManagerFactory.GetQueryExecutor(sqlMetadataProvider.GetDatabaseType());
@@ -2191,9 +2062,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     queryParameters,
                     queryExecutor.GetResultPropertiesAsync,
                     dataSourceName,
-                    args: null,
-                    dbConnection,
-                    dbTransaction);
+                    args: null);
 
             return resultProperties;
         }
@@ -2211,9 +2080,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             PerformUpsertOperation(
                 IDictionary<string, object?> parameters,
                 RestRequestContext context,
-                ISqlMetadataProvider sqlMetadataProvider,
-                DbConnection? dbConnection = null,
-                DbTransaction? dbTransaction = null)
+                ISqlMetadataProvider sqlMetadataProvider)
         {
             string queryString;
             Dictionary<string, DbConnectionParam> queryParameters;
@@ -2260,9 +2127,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                        queryParameters,
                        queryExecutor.GetMultipleResultSetsIfAnyAsync,
                        dataSourceName,
-                       new List<string> { prettyPrintPk, entityName },
-                       dbConnection,
-                       dbTransaction);
+                       new List<string> { prettyPrintPk, entityName });
         }
 
         private Task<TResult?> ExecuteMutationQueryAsync<TResult>(
@@ -2271,19 +2136,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             IDictionary<string, DbConnectionParam> parameters,
             Func<DbDataReader, List<string>?, Task<TResult>> dataReaderHandler,
             string dataSourceName,
-            List<string>? args,
-            DbConnection? dbConnection,
-            DbTransaction? dbTransaction)
+            List<string>? args)
         {
-            if (dbConnection is not null)
+            IMutationWorkSession? mutationSession = MutationWork.Current;
+            if (mutationSession is { IsInLocalTransaction: true })
             {
-                return queryExecutor.ExecuteQueryOnConnectionAsync(
-                    dbConnection,
+                return mutationSession.ExecuteQueryAsync(
                     sqltext,
                     parameters,
                     dataReaderHandler,
                     dataSourceName,
-                    dbTransaction,
                     GetHttpContext(),
                     args);
             }

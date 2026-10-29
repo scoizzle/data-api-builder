@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using Azure.DataApiBuilder.Config.ObjectModel;
-using Azure.DataApiBuilder.Core.Parsers;
+using Azure.DataApiBuilder.Core.Resolvers;
 using Microsoft.OData.Edm;
 using Microsoft.OData.UriParser;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -10,7 +9,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
     /// <summary>
-    /// Unit tests for the Oracle-specific empty-string policy rewrite on <see cref="ODataASTVisitor"/>.
+    /// Unit tests for the Oracle empty-string policy rewrite.
     /// These tests do not require database metadata; the OData nodes are constructed directly.
     /// </summary>
     [TestClass]
@@ -46,8 +45,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                DatabaseType.Oracle,
+            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
                 BinaryOperatorKind.Equal,
                 propertyNode,
                 emptyStringNode,
@@ -65,8 +63,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                DatabaseType.Oracle,
+            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
                 BinaryOperatorKind.NotEqual,
                 propertyNode,
                 emptyStringNode,
@@ -84,8 +81,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                DatabaseType.Oracle,
+            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
                 BinaryOperatorKind.Equal,
                 emptyStringNode,
                 propertyNode,
@@ -103,8 +99,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode nonEmptyStringNode = CreateStringConstantNode("SciFi");
 
-            bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                DatabaseType.Oracle,
+            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
                 BinaryOperatorKind.Equal,
                 propertyNode,
                 nonEmptyStringNode,
@@ -117,21 +112,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [TestMethod]
         public void NonOracleEmptyStringEquality_IsNotRewritten()
         {
-            foreach (DatabaseType databaseType in new[] { DatabaseType.MSSQL, DatabaseType.MySQL, DatabaseType.PostgreSQL, DatabaseType.DWSQL })
-            {
-                SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
-                ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
+            SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
+            ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-                bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                    databaseType,
-                    BinaryOperatorKind.Equal,
-                    propertyNode,
-                    emptyStringNode,
-                    out _,
-                    out _);
+            bool matched = SqlLiteralRewriter.Shared.TryRewriteEmptyStringComparison(
+                BinaryOperatorKind.Equal,
+                propertyNode,
+                emptyStringNode,
+                out _,
+                out _);
 
-                Assert.IsFalse(matched, $"{databaseType} must not rewrite empty-string comparisons.");
-            }
+            Assert.IsFalse(matched, "The default rewriter must not rewrite empty-string comparisons.");
         }
 
         [TestMethod]
@@ -140,8 +131,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = ODataASTVisitor.TryGetOracleEmptyStringPredicate(
-                DatabaseType.Oracle,
+            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
                 BinaryOperatorKind.GreaterThan,
                 propertyNode,
                 emptyStringNode,

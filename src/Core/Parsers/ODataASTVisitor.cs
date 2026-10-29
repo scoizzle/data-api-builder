@@ -38,10 +38,9 @@ namespace Azure.DataApiBuilder.Core.Parsers
         /// <returns>String concatenation of (left op right).</returns>
         public override string Visit(BinaryOperatorNode nodeIn)
         {
-            // Oracle stores the empty string as NULL, so a policy comparing a column to '' is
-            // rewritten to the equivalent IS [NOT] NULL predicate. Without the rewrite the policy
-            // would compare against a NULL literal and could match the wrong rows (all NULLs).
-            if (TryGetOracleEmptyStringNullPredicate(nodeIn, out string? nullPredicate))
+            // Engines that store the empty string as NULL rewrite a policy comparison against ''
+            // to IS [NOT] NULL. The shared visitor does not know which engine that is.
+            if (TryRewriteEmptyStringComparison(nodeIn, out string? nullPredicate))
             {
                 return nullPredicate!;
             }
@@ -61,74 +60,25 @@ namespace Azure.DataApiBuilder.Core.Parsers
             return CreateResult(nodeIn.OperatorKind, left, right);
         }
 
-        /// <summary>
-        /// Oracle-only rewrite of a property-vs-empty-string comparison into an IS NULL / IS NOT NULL
-        /// predicate, because Oracle cannot store an empty string distinctly from NULL.
-        /// Returns false for every other database/operator/operand combination.
-        /// </summary>
-        internal static bool TryGetOracleEmptyStringPredicate(
-            DatabaseType databaseType,
-            BinaryOperatorKind operatorKind,
-            SingleValueNode left,
-            SingleValueNode right,
-            out SingleValuePropertyAccessNode? propertyNode,
-            out bool isNullPredicate)
-        {
-            propertyNode = null;
-            isNullPredicate = false;
-
-            if (databaseType is not DatabaseType.Oracle
-                || operatorKind is not (BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual))
-            {
-                return false;
-            }
-
-            SingleValueNode unwrappedLeft = UnwrapConvertNode(left);
-            SingleValueNode unwrappedRight = UnwrapConvertNode(right);
-
-            SingleValueNode? constantSide = unwrappedRight;
-            SingleValuePropertyAccessNode? property = unwrappedLeft as SingleValuePropertyAccessNode;
-            if (property is null)
-            {
-                property = unwrappedRight as SingleValuePropertyAccessNode;
-                constantSide = unwrappedLeft;
-            }
-
-            if (property is null
-                || constantSide is not ConstantNode constant
-                || constant.Value is not string constantString
-                || constantString.Length != 0)
-            {
-                return false;
-            }
-
-            propertyNode = property;
-            isNullPredicate = operatorKind is BinaryOperatorKind.Equal;
-            return true;
-        }
-
-        private static SingleValueNode UnwrapConvertNode(SingleValueNode node)
-        {
-            return node is ConvertNode convert ? convert.Source : node;
-        }
-
-        private bool TryGetOracleEmptyStringNullPredicate(BinaryOperatorNode nodeIn, out string? predicate)
+        private bool TryRewriteEmptyStringComparison(BinaryOperatorNode nodeIn, out string? predicate)
         {
             predicate = null;
-            if (TryGetOracleEmptyStringPredicate(
-                    _metadataProvider.GetDatabaseType(),
+            SqlLiteralRewriter rewriter = _metadataProvider is ISqlLiteralSource literalSource
+                ? literalSource.LiteralRewriter
+                : SqlLiteralRewriter.Shared;
+            if (!rewriter.TryRewriteEmptyStringComparison(
                     nodeIn.OperatorKind,
                     nodeIn.Left,
                     nodeIn.Right,
                     out SingleValuePropertyAccessNode? propertyNode,
                     out bool isNullPredicate))
             {
-                string column = Visit(propertyNode!);
-                predicate = $"({column} {(isNullPredicate ? "IS NULL" : "IS NOT NULL")})";
-                return true;
+                return false;
             }
 
-            return false;
+            string column = Visit(propertyNode!);
+            predicate = $"({column} {(isNullPredicate ? "IS NULL" : "IS NOT NULL")})";
+            return true;
         }
 
         /// <summary>

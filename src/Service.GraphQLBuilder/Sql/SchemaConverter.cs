@@ -416,7 +416,7 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
         /// Helper method to generate the FieldDefinitionNode for a column in a table/view or a result set field in a stored-procedure.
         /// </summary>
         /// <param name="configEntity">Entity's definition (to which the column belongs).</param>
-        /// <param name="columnName">Backing column name (the physical spelling, e.g. UPPERCASE for Oracle).</param>
+        /// <param name="columnName">Backing column name.</param>
         /// <param name="column">Column definition.</param>
         /// <param name="directives">List of directives to be added to the column's field definition.</param>
         /// <param name="roles">List of roles having read permission on the column (for tables/views) or execute permission for stored-procedure.</param>
@@ -428,29 +428,18 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder.Sql
                 directives.Add(authZDirective!);
             }
 
-            // The default (unaliased) exposed name is the backing/catalog column name exactly as it
-            // was provided to the engine. Entity mappings/field aliases below override it verbatim;
-            // no database-specific casing normalization is applied.
+            // Determine the exposed column name considering mappings and aliases
             string exposedColumnName = columnName;
-
-            // Mappings/fields keys are authored in the runtime config and may differ in case from
-            // the physical column name (e.g. Oracle stores unquoted identifiers UPPERCASE), so
-            // both lookups are performed case-insensitively.
-            if (configEntity.Mappings is not null)
+            if (configEntity.Mappings is not null && configEntity.Mappings.TryGetValue(key: columnName, out string? columnAlias))
             {
-                string? columnAlias = configEntity.Mappings
-                    .FirstOrDefault(m => m.Key.Equals(columnName, StringComparison.OrdinalIgnoreCase)).Value;
-                if (!string.IsNullOrWhiteSpace(columnAlias))
-                {
-                    exposedColumnName = columnAlias;
-                }
+                exposedColumnName = columnAlias;
             }
 
             // Apply alias if present (alias overrides mapping)
             FieldMetadata? fieldMetadata = null;
             if (configEntity.Fields is not null)
             {
-                fieldMetadata = configEntity.Fields.FirstOrDefault(f => f.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+                fieldMetadata = configEntity.Fields.FirstOrDefault(f => f.Name == columnName);
                 if (fieldMetadata != null && !string.IsNullOrEmpty(fieldMetadata.Alias))
                 {
                     exposedColumnName = fieldMetadata.Alias;

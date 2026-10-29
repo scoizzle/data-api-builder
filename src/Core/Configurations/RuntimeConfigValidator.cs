@@ -1849,9 +1849,7 @@ public class RuntimeConfigValidator : IConfigValidator
 
     /// <summary>
     /// Helper method which takes in field prefixed with @item. directive and check if its
-    /// accessible based on include/exclude fields. Field names are compared case-insensitively
-    /// because runtime exposed-to-backing resolution (TryGetBackingColumn) is case-insensitive
-    /// and engines such as Oracle surface catalog casing (UPPERCASE for unquoted identifiers).
+    /// accessible based on include/exclude fields.
     /// </summary>
     /// <param name="columnNameMatch"></param>
     /// <param name="included">Set of fields which are accessible to the user.</param>
@@ -1861,8 +1859,8 @@ public class RuntimeConfigValidator : IConfigValidator
     internal static bool IsFieldAccessible(Match columnNameMatch, HashSet<string>? includedFields, HashSet<string> excludedFields)
     {
         string columnName = columnNameMatch.Value.Substring(AuthorizationResolver.FIELD_PREFIX.Length);
-        if (ContainsFieldIgnoreCase(excludedFields, columnName) || ContainsFieldIgnoreCase(excludedFields, AuthorizationResolver.WILDCARD) ||
-            (includedFields is not null && !ContainsFieldIgnoreCase(includedFields, AuthorizationResolver.WILDCARD) && !ContainsFieldIgnoreCase(includedFields, columnName)))
+        if (excludedFields.Contains(columnName) || excludedFields.Contains(AuthorizationResolver.WILDCARD) ||
+            (includedFields is not null && !includedFields.Contains(AuthorizationResolver.WILDCARD) && !includedFields.Contains(columnName)))
         {
             // If column is present in excluded OR excluded='*'
             // If column is absent from included and included!=*
@@ -1871,14 +1869,6 @@ public class RuntimeConfigValidator : IConfigValidator
         }
 
         return true;
-    }
-
-    /// <summary>
-    /// Case-insensitive membership test for a configured include/exclude field set.
-    /// </summary>
-    private static bool ContainsFieldIgnoreCase(HashSet<string> fields, string fieldName)
-    {
-        return fields.Any(field => string.Equals(field, fieldName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

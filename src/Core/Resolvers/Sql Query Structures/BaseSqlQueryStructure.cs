@@ -108,34 +108,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
             }
 
-            // Oracle converts a string bind compared against a DATE/TIMESTAMP column using the
-            // session NLS date format (default DD-MON-RR). GraphQL filter literals arrive as
-            // strings, so ISO 8601 filter values raise ORA-01861/ORA-01843 and only the
-            // Oracle-specific DD-MON-RR spelling worked. Parse the string into the column's
-            // date/time type; DateTimeOffset.Parse with the invariant culture accepts both
-            // ISO 8601 and the Oracle DD-MON-RR spelling.
-            if (MetadataProvider.GetDatabaseType() is DatabaseType.Oracle
+            if (MetadataProvider is ISqlLiteralSource literalSource
                 && !string.IsNullOrEmpty(paramName)
-                && value is string oracleStringValue
-                && GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? oracleColumnDefinition)
-                && IsDateTimeSystemType(oracleColumnDefinition.SystemType))
+                && GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? coercedColumn))
             {
-                value = GetParamAsSystemType(oracleStringValue, paramName, oracleColumnDefinition.SystemType);
+                value = literalSource.LiteralRewriter.CoerceParameterValue(
+                    value,
+                    paramName,
+                    coercedColumn.SystemType,
+                    (text, name, systemType) => GetParamAsSystemType(text, name, systemType));
             }
 
             return base.MakeDbConnectionParam(value, paramName, lengthOverride);
-        }
-
-        /// <summary>
-        /// Whether the given column system type is a date/time type whose string literals must
-        /// be parsed before they reach the database driver.
-        /// </summary>
-        private static bool IsDateTimeSystemType(Type systemType)
-        {
-            Type underlyingType = Nullable.GetUnderlyingType(systemType) ?? systemType;
-            return underlyingType == typeof(DateTime)
-                || underlyingType == typeof(DateTimeOffset)
-                || underlyingType == typeof(DateOnly);
         }
 
         /// <summary>

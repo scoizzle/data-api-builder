@@ -188,6 +188,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
             _queryManagerFactory = new Mock<IAbstractQueryManagerFactory>();
             _queryManagerFactory.Setup(x => x.GetQueryBuilder(It.IsAny<DatabaseType>())).Returns(_queryBuilder);
             _queryManagerFactory.Setup(x => x.GetQueryExecutor(It.IsAny<DatabaseType>())).Returns(_queryExecutor);
+            SetupMutationTransactionExecutor(_queryManagerFactory);
 
             _gqlFilterParser = new(runtimeConfigProvider, _metadataProviderFactory.Object);
 
@@ -428,6 +429,21 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
                     break;
 
             }
+
+            SetupMutationTransactionExecutor(_queryManagerFactory);
+        }
+
+        /// <summary>
+        /// Mutations ask the factory for a transaction executor. Oracle tests get the local
+        /// transaction executor; every other engine stays on TransactionScope.
+        /// </summary>
+        private static void SetupMutationTransactionExecutor(Mock<IAbstractQueryManagerFactory> factory)
+        {
+            factory.Setup(x => x.GetMutationTransactionExecutor(It.IsAny<DatabaseType>()))
+                .Returns((DatabaseType databaseType) =>
+                    _queryExecutor is OracleQueryExecutor oracleQueryExecutor
+                        ? new OracleMutationTransactionExecutor(oracleQueryExecutor, _dbExceptionParser)
+                        : new TransactionScopeMutationExecutor(databaseType));
         }
 
         protected static async Task ResetDbStateAsync()

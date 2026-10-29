@@ -517,7 +517,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc />
-        public virtual string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
+        public virtual string BuildForeignKeyInfoQuery(int numberOfParameters)
+        {
+            return BuildForeignKeyInfoQuery(numberOfParameters, numberOfParameters);
+        }
+
+        /// <summary>
+        /// Maximum expressions in one foreign-key IN list. Oracle overrides this because
+        /// ORA-01795 rejects lists longer than 1000. Other engines issue one query.
+        /// </summary>
+        internal virtual int ForeignKeyInListBatchSize => int.MaxValue;
+
+        /// <summary>
+        /// Builds the foreign-key query with independent schema and table IN-list sizes.
+        /// Metadata discovery batches through this method. The public interface stays one count.
+        /// </summary>
+        internal virtual string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
         {
             string[] schemaNameParams =
                 CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);

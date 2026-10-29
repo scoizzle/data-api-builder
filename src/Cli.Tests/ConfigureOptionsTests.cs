@@ -926,6 +926,46 @@ namespace Cli.Tests
         }
 
         /// <summary>
+        /// dab configure copies existing data-source options when the database type stays the same,
+        /// and starts from an empty option set when the database type changes.
+        /// </summary>
+        [TestMethod]
+        public void TestConfigureCopiesOptionsWhenTypeUnchangedAndResetsWhenTypeChanges()
+        {
+            string mssqlConfig = "{" + SCHEMA_PROPERTY + @",
+                ""data-source"": {
+                  ""database-type"": ""mssql"",
+                  ""connection-string"": """ + SAMPLE_TEST_CONN_STRING + @""",
+                  ""options"": {
+                    ""set-session-context"": true
+                  }
+                }, " + RUNTIME_SECTION_WITH_EMPTY_ENTITIES + "}";
+            SetupFileSystemWithInitialConfig(mssqlConfig);
+
+            bool copied = TryConfigureSettings(
+                new ConfigureOptions(config: TEST_RUNTIME_CONFIG_FILE),
+                _runtimeConfigLoader!,
+                _fileSystem!);
+
+            Assert.IsTrue(copied);
+            string copiedConfig = _fileSystem!.File.ReadAllText(TEST_RUNTIME_CONFIG_FILE);
+            Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(copiedConfig, out RuntimeConfig? preserved));
+            Assert.AreEqual(DatabaseType.MSSQL, preserved!.DataSource!.DatabaseType);
+            Assert.AreEqual(true, preserved.DataSource.Options!.GetValueOrDefault("set-session-context", false));
+
+            bool reset = TryConfigureSettings(
+                new ConfigureOptions(dataSourceDatabaseType: "postgresql", config: TEST_RUNTIME_CONFIG_FILE),
+                _runtimeConfigLoader!,
+                _fileSystem!);
+
+            Assert.IsTrue(reset);
+            string resetConfig = _fileSystem.File.ReadAllText(TEST_RUNTIME_CONFIG_FILE);
+            Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(resetConfig, out RuntimeConfig? changed));
+            Assert.AreEqual(DatabaseType.PostgreSQL, changed!.DataSource!.DatabaseType);
+            Assert.IsFalse(changed.DataSource.Options?.ContainsKey("set-session-context") ?? false);
+        }
+
+        /// <summary>
         /// Tests the update of the database type from MSSQL to CosmosDB_NoSQL in the runtime config.
         /// This method verifies that the database type can be changed from MSSQL to CosmosDB_NoSQL and that the 
         /// specific CosmosDB_NoSQL options such as database, container, and schema are correctly added to the config.

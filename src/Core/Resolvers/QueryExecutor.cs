@@ -319,7 +319,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             return result;
         }
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Executes a query on an already open connection. Callers that share a mutation
+        /// transaction use <see cref="IMutationWorkSession"/> rather than this method.
+        /// </summary>
         public virtual async Task<TResult?> ExecuteQueryOnConnectionAsync<TResult>(
             DbConnection connection,
             string sqltext,
@@ -374,7 +377,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
         }
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Executes a query synchronously on an already open connection.
+        /// </summary>
         public virtual TResult? ExecuteQueryOnConnection<TResult>(
             DbConnection connection,
             string sqltext,

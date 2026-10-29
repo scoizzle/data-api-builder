@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Core.Services;
 using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Oracle.ManagedDataAccess.Client;
@@ -1467,9 +1468,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // the startup pipeline. If it were ever skipped, IsFunction would remain false and a
             // function would be emitted as a bare `BEGIN schema.func(:p0); END;` statement, which
             // is invalid PL/SQL for a function.
-            string qualifiedName = string.IsNullOrEmpty(sp.PackageName)
+            string? packageName = OracleObjectFacts.Procedure(sp).PackageName;
+            string qualifiedName = string.IsNullOrEmpty(packageName)
                 ? QuoteRelation(sp.SchemaName, sp.Name)
-                : $"{QuoteRelation(sp.SchemaName, sp.PackageName)}.{QuoteCatalogObject(sp.Name)}";
+                : $"{QuoteRelation(sp.SchemaName, packageName)}.{QuoteCatalogObject(sp.Name)}";
 
             // ProcedureParameters maps each subprogram argument NAME (catalog spelling) to the
             // engine-generated bind reference (e.g. "@param0"). The call must reference the VALUES.
@@ -1478,9 +1480,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // the REF CURSOR argument (procedures) or the function RETURN (functions).
             bool returnsCursor = structure.GetUnderlyingSourceDefinition().Columns.Values
                 .Any(column => column.SystemType == typeof(IDataReader));
-            List<string> callArgs = BuildNamedCallArguments(structure, includeRefCursor: !sp.IsFunction && returnsCursor);
+            bool isFunction = OracleObjectFacts.Procedure(sp).IsFunction;
+            List<string> callArgs = BuildNamedCallArguments(structure, includeRefCursor: !isFunction && returnsCursor);
 
-            if (sp.IsFunction)
+            if (isFunction)
             {
                 // A function's result (even if it is a REF CURSOR) is expressed as its RETURN
                 // value, so it cannot be called as a bare statement.
@@ -1729,7 +1732,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // BLOB/LONG RAW do not fit in a RAW bind (PL/SQL RAW max is 32767 bytes).
                 // NCLOB is a string flagged IsClob and must not take this binary path.
-                return definition?.IsBlob == true ? OracleDbType.Blob : OracleDbType.Raw;
+                return definition is not null && OracleObjectFacts.Column(definition).IsBlob ? OracleDbType.Blob : OracleDbType.Raw;
             }
 
             if (systemType == typeof(DateTimeOffset))
@@ -1744,7 +1747,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             // CLOB/NCLOB columns must bind as Clob (not Varchar2, which truncates at 4000 bytes
             // with ORA-06502) in RETURNING ... INTO output parameters.
-            if (definition?.IsClob is true)
+            if (definition is not null && OracleObjectFacts.Column(definition).IsClob)
             {
                 return OracleDbType.Clob;
             }
@@ -1977,7 +1980,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc/>
-        public override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
+        internal override int ForeignKeyInListBatchSize => 1000;
+
+        internal override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
         {
             string[] schemaNameParams = CreateParams(kindOfParam: SCHEMA_NAME_PARAM, numberOfSchemaParameters);
             string[] tableNameParams = CreateParams(kindOfParam: TABLE_NAME_PARAM, numberOfTableParameters);

@@ -188,7 +188,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <inheritdoc />
-        public override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
+        internal override string BuildForeignKeyInfoQuery(int numberOfSchemaParameters, int numberOfTableParameters)
         {
             string[] databaseNameParams = CreateParams(DATABASE_NAME_PARAM, numberOfSchemaParameters);
             string[] tableNameParams = CreateParams(TABLE_NAME_PARAM, numberOfTableParameters);

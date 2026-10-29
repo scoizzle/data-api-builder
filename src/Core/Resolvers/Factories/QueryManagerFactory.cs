@@ -22,6 +22,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
         private IDictionary<DatabaseType, IQueryBuilder> _queryBuilders;
         private IDictionary<DatabaseType, IQueryExecutor> _queryExecutors;
         private IDictionary<DatabaseType, DbExceptionParser> _dbExceptionsParsers;
+        private IDictionary<DatabaseType, IMutationTransactionExecutor> _mutationTransactionExecutors;
         private readonly RuntimeConfigProvider _runtimeConfigProvider;
         private readonly ILogger<IQueryExecutor> _logger;
         private readonly IHttpContextAccessor _contextAccessor;
@@ -51,6 +52,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
             _queryBuilders = new Dictionary<DatabaseType, IQueryBuilder>();
             _queryExecutors = new Dictionary<DatabaseType, IQueryExecutor>();
             _dbExceptionsParsers = new Dictionary<DatabaseType, DbExceptionParser>();
+            _mutationTransactionExecutors = new Dictionary<DatabaseType, IMutationTransactionExecutor>();
 
             ConfigureQueryManagerFactory();
         }
@@ -63,6 +65,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
                 IQueryBuilder? queryBuilder = null;
                 IQueryExecutor? queryExecutor = null;
                 DbExceptionParser? exceptionParser = null;
+                IMutationTransactionExecutor? mutationTransactionExecutor = null;
 
                 if (_queryBuilders.ContainsKey(dataSource.DatabaseType))
                 {
@@ -78,26 +81,31 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
                         queryBuilder = new MsSqlQueryBuilder();
                         exceptionParser = new MsSqlDbExceptionParser(_runtimeConfigProvider);
                         queryExecutor = new MsSqlQueryExecutor(_runtimeConfigProvider, exceptionParser, _logger, _contextAccessor, _handler, _oboTokenProvider);
+                        mutationTransactionExecutor = new TransactionScopeMutationExecutor(DatabaseType.MSSQL);
                         break;
                     case DatabaseType.MySQL:
                         queryBuilder = new MySqlQueryBuilder();
                         exceptionParser = new MySqlDbExceptionParser(_runtimeConfigProvider);
                         queryExecutor = new MySqlQueryExecutor(_runtimeConfigProvider, exceptionParser, _logger, _contextAccessor, _handler);
+                        mutationTransactionExecutor = new TransactionScopeMutationExecutor(DatabaseType.MySQL);
                         break;
                     case DatabaseType.PostgreSQL:
                         queryBuilder = new PostgresQueryBuilder();
                         exceptionParser = new PostgreSqlDbExceptionParser(_runtimeConfigProvider);
                         queryExecutor = new PostgreSqlQueryExecutor(_runtimeConfigProvider, exceptionParser, _logger, _contextAccessor, _handler);
+                        mutationTransactionExecutor = new TransactionScopeMutationExecutor(DatabaseType.PostgreSQL);
                         break;
                     case DatabaseType.DWSQL:
                         queryBuilder = new DwSqlQueryBuilder(enableNto1JoinOpt: _runtimeConfigProvider.GetConfig().EnableDwNto1JoinOpt);
                         exceptionParser = new MsSqlDbExceptionParser(_runtimeConfigProvider);
                         queryExecutor = new MsSqlQueryExecutor(_runtimeConfigProvider, exceptionParser, _logger, _contextAccessor, _handler, _oboTokenProvider);
+                        mutationTransactionExecutor = new TransactionScopeMutationExecutor(DatabaseType.DWSQL);
                         break;
                     case DatabaseType.Oracle:
                         queryBuilder = new OracleQueryBuilder();
                         exceptionParser = new OracleDbExceptionParser(_runtimeConfigProvider);
                         queryExecutor = new OracleQueryExecutor(_runtimeConfigProvider, exceptionParser, _logger, _contextAccessor, _handler);
+                        mutationTransactionExecutor = new OracleMutationTransactionExecutor((OracleQueryExecutor)queryExecutor, exceptionParser);
                         break;
                     default:
                         throw new NotSupportedException(dataSource.DatabaseTypeNotSupportedMessage);
@@ -106,6 +114,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
                 _queryBuilders.TryAdd(dataSource.DatabaseType, queryBuilder!);
                 _queryExecutors.TryAdd(dataSource.DatabaseType, queryExecutor!);
                 _dbExceptionsParsers.TryAdd(dataSource.DatabaseType, exceptionParser!);
+                if (mutationTransactionExecutor is not null)
+                {
+                    _mutationTransactionExecutors.TryAdd(dataSource.DatabaseType, mutationTransactionExecutor);
+                }
             }
         }
 
@@ -115,6 +127,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
             _queryBuilders = new Dictionary<DatabaseType, IQueryBuilder>();
             _queryExecutors = new Dictionary<DatabaseType, IQueryExecutor>();
             _dbExceptionsParsers = new Dictionary<DatabaseType, DbExceptionParser>();
+            _mutationTransactionExecutors = new Dictionary<DatabaseType, IMutationTransactionExecutor>();
             ConfigureQueryManagerFactory();
         }
 
@@ -158,6 +171,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
             }
 
             return exceptionParser;
+        }
+
+        /// <inheritdoc />
+        public IMutationTransactionExecutor GetMutationTransactionExecutor(DatabaseType databaseType)
+        {
+            if (!_mutationTransactionExecutors.TryGetValue(databaseType, out IMutationTransactionExecutor? mutationTransactionExecutor))
+            {
+                throw new DataApiBuilderException(
+                    $"{nameof(databaseType)}:{databaseType} could not be found within the config",
+                    HttpStatusCode.BadRequest,
+                    DataApiBuilderException.SubStatusCodes.DataSourceNotFound);
+            }
+
+            return mutationTransactionExecutor;
         }
 
     }
