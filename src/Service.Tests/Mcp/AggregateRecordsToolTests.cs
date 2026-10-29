@@ -345,7 +345,7 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
                 groupby: new() { "category" });
 
             string result = InvokePrivate<string>(
-                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "price", DatabaseType.MSSQL);
+                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "price");
 
             Assert.AreEqual(expected, result);
             Assert.AreEqual(paginate ? 2 : 0, structure.Parameters.Count);
@@ -365,15 +365,9 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
         {
             SqlQueryStructure structure = CreateUninitializedQueryStructure();
             structure.OrderByColumns.Clear();
-            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
-                function: function,
-                field: field,
-                distinct: distinct,
-                orderby: orderby,
-                groupby: new() { "publisher_id" });
             string alias = InvokePrivate<string>("ComputeAlias", function, field);
 
-            AggregateRecordsTool.AddOracleAggregateOrder(structure, args, alias);
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, orderby, alias);
 
             Assert.AreEqual(expectedAlias, alias);
             Assert.AreEqual(1, structure.OrderByColumns.Count);
@@ -401,14 +395,8 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             string expectedDirection)
         {
             SqlQueryStructure structure = CreateGroupedOracleAggregateStructure(function, backingField, expectedAlias, distinct);
-            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
-                function: function,
-                field: field,
-                distinct: distinct,
-                orderby: orderby,
-                groupby: new() { "publisher_id" });
             string alias = InvokePrivate<string>("ComputeAlias", function, field);
-            AggregateRecordsTool.AddOracleAggregateOrder(structure, args, alias);
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, orderby, alias);
 
             string sql = new OracleQueryBuilder().Build(structure);
 
@@ -444,17 +432,8 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             SqlQueryStructure structure = CreateUninitializedQueryStructure();
             structure.IsListQuery = true;
             SetLimit(structure, 101);
-            Mock<IQueryBuilder> builder = new();
-            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
-                function: "count",
-                field: "*",
-                orderby: "desc",
-                first: paginate ? 9 : null,
-                after: paginate ? Convert.ToBase64String(Encoding.UTF8.GetBytes("4")) : null,
-                groupby: new() { "publisher_id" });
 
-            string result = InvokePrivate<string>(
-                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "ID", DatabaseType.Oracle);
+            string result = OracleQueryBuilder.ApplyAggregateCursorOffset(sql, paginate ? 4 : 0, structure);
 
             string expected = paginate
                 ? outerPrefix + innerSelect + " OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY" + outerSuffix
@@ -479,19 +458,8 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             SqlQueryStructure structure = CreateUninitializedQueryStructure();
             structure.IsListQuery = true;
             SetLimit(structure, 101);
-            Mock<IQueryBuilder> builder = new();
-            builder.Setup(x => x.QuoteIdentifier(It.IsAny<string>()))
-                .Returns((string value) => $"\"{value}\"");
-            AggregateRecordsTool.AggregateArguments args = CreateAggregateArguments(
-                function: "count",
-                field: "*",
-                orderby: "desc",
-                first: paginate ? 9 : null,
-                after: paginate ? Convert.ToBase64String(Encoding.UTF8.GetBytes("4")) : null,
-                groupby: new() { "publisher_id" });
 
-            string result = InvokePrivate<string>(
-                "ApplyOrderByAndPagination", sql, args, structure, builder.Object, "ID", DatabaseType.Oracle);
+            string result = OracleQueryBuilder.ApplyAggregateCursorOffset(sql, paginate ? 4 : 0, structure);
 
             Assert.AreEqual(sql, result);
             Assert.AreEqual(0, structure.Parameters.Count);

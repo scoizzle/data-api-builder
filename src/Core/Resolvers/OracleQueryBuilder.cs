@@ -10,6 +10,7 @@ using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
@@ -88,6 +89,81 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Copies a grouped aggregate page size onto the REST context before
+        /// <see cref="SqlQueryStructure"/> reads it. The aggregate select then emits
+        /// <c>FETCH NEXT</c> from <see cref="SqlQueryStructure.Limit"/>. An unset first
+        /// leaves the default page size in place.
+        /// </summary>
+        public static void UseAggregateFetchLimit(RestRequestContext context, int? first)
+        {
+            if (first.HasValue)
+            {
+                context.First = first;
+            }
+        }
+
+        /// <summary>
+        /// Orders a grouped aggregate by its select alias, with no table qualifier.
+        /// The alias is not a column of the source table. Qualifying it with the table
+        /// alias does not match <see cref="QuoteTableAlias"/>, and that name is out of
+        /// scope on the outer JSON query (ORA-00904).
+        /// </summary>
+        public static void AddAggregateAliasOrder(SqlQueryStructure structure, string orderBy, string alias)
+        {
+            OrderBy direction = orderBy.Equals("asc", StringComparison.OrdinalIgnoreCase)
+                ? OrderBy.ASC
+                : OrderBy.DESC;
+            structure.OrderByColumns.Add(new OrderByColumn(
+                tableSchema: string.Empty,
+                tableName: string.Empty,
+                columnName: alias,
+                tableAlias: null,
+                direction: direction));
+        }
+
+        /// <summary>
+        /// Emits <c>OFFSET 0 ROWS FETCH NEXT {limit}</c> for the aggregate select, inside the
+        /// JSON wrapper. <see cref="ApplyAggregateCursorOffset"/> replaces the zero offset
+        /// when a cursor is present.
+        /// </summary>
+        private static string BuildAggregateRowLimit(SqlQueryStructure structure)
+        {
+            return $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
+        }
+
+        /// <summary>
+        /// Replaces the aggregate select's <c>OFFSET 0</c> with a bind when the cursor is
+        /// non-zero. <c>FETCH NEXT</c> stays at the limit already emitted for this structure.
+        /// A zero cursor, a null limit, or a missing clause leaves the SQL unchanged, so a
+        /// second row limit is not appended after the JSON wrapper.
+        /// </summary>
+        public static string ApplyAggregateCursorOffset(string sql, int offset, SqlQueryStructure structure)
+        {
+            if (offset == 0)
+            {
+                return sql;
+            }
+
+            uint? limit = structure.Limit();
+            if (limit is null)
+            {
+                return sql;
+            }
+
+            string clause = BuildAggregateRowLimit(structure);
+            int index = sql.LastIndexOf(clause, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                return sql;
+            }
+
+            string offsetParam = BaseQueryStructure.GetEncodedParamName(structure.Counter.Next());
+            structure.Parameters.Add(offsetParam, new DbConnectionParam(offset));
+            string replacement = $" OFFSET {offsetParam} ROWS FETCH NEXT {limit} ROWS ONLY";
+            return sql.Remove(index, clause.Length).Insert(index, replacement);
+        }
+
+        /// <summary>
         /// Helper method to add ESCAPE clause to the LIKE clauses in the query.
         /// </summary>
         private static string AddEscapeToLikeClauses(string predicate)
@@ -163,7 +239,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 + BuildGroupBy(structure)
                 + BuildHaving(structure)
                 + BuildOrderBy(structure)
-                + $" OFFSET 0 ROWS FETCH NEXT {structure.Limit()} ROWS ONLY";
+                + BuildAggregateRowLimit(structure);
 
             string subqueryName = QuoteIdentifier($"subq{structure.Counter.Next()}");
             string jsonDocAlias = QuoteIdentifier("json_doc");
