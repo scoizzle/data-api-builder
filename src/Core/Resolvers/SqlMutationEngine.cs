@@ -1409,7 +1409,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     // Populate Current entity's relationship fields
                     List<ForeignKeyDefinition> foreignKeyDefinitions = currentEntityRelationshipMetadata!.TargetEntityToFkDefinitionMap[multipleCreateStructure.ParentEntityName];
                     ForeignKeyDefinition fkDefinition = foreignKeyDefinitions[0];
-                    PopulateReferencingFields(sqlMetadataProvider, multipleCreateStructure, fkDefinition, multipleCreateStructure.CurrentEntityCreatedValues, isLinkingTable: true);
+                    PopulateReferencingFields(sqlMetadataProvider, multipleCreateStructure, fkDefinition, multipleCreateStructure.CurrentEntityCreatedValues, isLinkingTable: true, entityName: entityName);
 
                     string linkingEntityName = GraphQLUtils.GenerateLinkingEntityName(multipleCreateStructure.ParentEntityName, entityName);
                     SourceDefinition linkingTableSourceDefinition = sqlMetadataProvider.GetSourceDefinition(linkingEntityName);
@@ -1629,23 +1629,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 string referencingColumnName = fkDefinition.ReferencingColumns[i];
                 string referencedColumnName = fkDefinition.ReferencedColumns[i];
-                string exposedReferencedColumnName;
+
+                // The computed values come from the insert result set, which is keyed by exposed
+                // field names. ReferencedColumns are backing (physical) names, so resolve them to
+                // the exposed name before indexing. Identity for engines where backing == exposed.
+                string exposedReferencedColumnName = referencedColumnName;
+                if (entityName is not null
+                    && sqlMetadataProvider.TryGetExposedColumnName(entityName, referencedColumnName, out string? exposedColumnName))
+                {
+                    exposedReferencedColumnName = exposedColumnName;
+                }
+
                 if (isLinkingTable)
                 {
-                    multipleCreateStructure.LinkingTableParams![referencingColumnName] = computedRelationshipFields[referencedColumnName];
+                    multipleCreateStructure.LinkingTableParams![referencingColumnName] = computedRelationshipFields[exposedReferencedColumnName];
                 }
                 else
                 {
-                    if (entityName is not null
-                        && sqlMetadataProvider.TryGetExposedColumnName(entityName, referencedColumnName, out string? exposedColumnName))
-                    {
-                        exposedReferencedColumnName = exposedColumnName;
-                    }
-                    else
-                    {
-                        exposedReferencedColumnName = referencedColumnName;
-                    }
-
                     multipleCreateStructure.CurrentEntityParams![referencingColumnName] = computedRelationshipFields[exposedReferencedColumnName];
                 }
             }
