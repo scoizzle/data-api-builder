@@ -602,7 +602,7 @@ begin
         name VARCHAR2(4000) NOT NULL
      ) ]';
    execute immediate q'[CREATE TABLE books(
-        id NUMBER PRIMARY KEY,
+        id NUMBER(9,0) PRIMARY KEY,
         title VARCHAR2(4000) NOT NULL,
         publisher_id NUMBER NOT NULL
      ) ]';
@@ -742,7 +742,7 @@ begin
         PRIMARY KEY(categoryid, pieceid)
      ) ]';
    execute immediate q'[CREATE TABLE stocks_price(
-        categoryid NUMBER NOT NULL,
+        categoryid NUMBER(9,0) NOT NULL,
         pieceid NUMBER NOT NULL,
         instant TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
         price BINARY_DOUBLE,

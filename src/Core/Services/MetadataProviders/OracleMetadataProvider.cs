@@ -698,6 +698,22 @@ namespace Azure.DataApiBuilder.Core.Services
                         OracleObjectFacts.Column(columnDefinition).IsClob = true;
                     }
 
+                    // Precision-aware NUMBER mapping. Unconstrained NUMBER (no catalog precision)
+                    // stays decimal, preserving the historical mapping; NUMBER(p, 0) narrows to
+                    // int (p <= 9) or long (10 <= p <= 18), and NUMBER(p, s) with s > 0 stays
+                    // decimal. This is Oracle-only: it never affects the shared SqlToCLRType path.
+                    if (physicalType is not null
+                        && physicalType.Equals("NUMBER", StringComparison.OrdinalIgnoreCase))
+                    {
+                        object? precision = allColumnsInTable.Columns.Contains("PRECISION")
+                            ? columnInfo["PRECISION"]
+                            : null;
+                        object? scale = allColumnsInTable.Columns.Contains("SCALE")
+                            ? columnInfo["SCALE"]
+                            : null;
+                        columnDefinition.SystemType = MapNumberColumnType(precision, scale);
+                    }
+
                     // Bounded string columns expose their maximum length so the query builder can
                     // choose between VARCHAR2 and CLOB for generated JSON output. CLOB/NCLOB (and
                     // LONG) are unbounded and stay on the LOB path.
@@ -1397,6 +1413,46 @@ namespace Azure.DataApiBuilder.Core.Services
         private static int ParseOverloadNumber(string overload)
         {
             return int.TryParse(overload, out int number) ? number : int.MaxValue;
+        }
+
+        /// <summary>
+        /// Maps an Oracle NUMBER column to the closest .NET type from its catalog precision and
+        /// scale (ODP.NET's GetSchema("Columns") PRECISION/SCALE columns, backing ALL_TAB_COLUMNS
+        /// DATA_PRECISION/DATA_SCALE). Unconstrained NUMBER reports no precision and stays decimal,
+        /// preserving the historical "NUMBER -> decimal" behaviour.
+        /// <list type="bullet">
+        /// <item><c>NUMBER(p, 0)</c> with <c>p &lt;= 9</c> maps to <see cref="int"/>.</item>
+        /// <item><c>NUMBER(p, 0)</c> with <c>10 &lt;= p &lt;= 18</c> maps to <see cref="long"/>.</item>
+        /// <item><c>NUMBER(p, 0)</c> with <c>p &gt; 18</c> maps to <see cref="decimal"/>.</item>
+        /// <item><c>NUMBER(p, s)</c> with <c>s &gt; 0</c> maps to <see cref="decimal"/>.</item>
+        /// </list>
+        /// </summary>
+        /// <param name="precision">The column's DATA_PRECISION (PRECISION), or null/DBNull for an
+        /// unconstrained NUMBER.</param>
+        /// <param name="scale">The column's DATA_SCALE (SCALE), or null/DBNull when unspecified.</param>
+        internal static Type MapNumberColumnType(object? precision, object? scale)
+        {
+            // Unconstrained NUMBER reports NULL precision/scale from the catalog.
+            if (precision is null || precision is DBNull)
+            {
+                return typeof(decimal);
+            }
+
+            int p = Convert.ToInt32(precision);
+            int s = scale is null || scale is DBNull ? 0 : Convert.ToInt32(scale);
+
+            // Fractional NUMBER (scale > 0) cannot be represented losslessly in an integral type.
+            if (s > 0)
+            {
+                return typeof(decimal);
+            }
+
+            return p switch
+            {
+                <= 9 => typeof(int),
+                <= 18 => typeof(long),
+                _ => typeof(decimal)
+            };
         }
 
         private static int? TryReadOracleColumnLength(DataRow columnInfo, DataTable table)

@@ -36,12 +36,6 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         /// Test Nested Filter for Many-One relationship.
         /// </summary>
         [TestMethod]
-        new public async Task TestPassingVariablesToFilter()
-        {
-            Assert.Inconclusive("Oracle maps numeric id columns to GraphQL Decimal, so Int! variables are rejected.");
-        }
-
-        [TestMethod]
         public async Task TestNestedFilterManyOne()
         {
             string existsPredicate = $@"

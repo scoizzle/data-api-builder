@@ -133,7 +133,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Delete
                 operationType: EntityActionOperation.Delete,
                 requestBody: string.Empty,
                 exceptionExpected: true,
-                expectedErrorMessage: "Parameter \"{}\" cannot be resolved as column \"ID\" with type \"Decimal\".",
+                expectedErrorMessage: "Parameter \"{}\" cannot be resolved as column \"ID\" with type \"Int32\".",
                 expectedStatusCode: HttpStatusCode.BadRequest,
                 expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.BadRequest.ToString()
             );

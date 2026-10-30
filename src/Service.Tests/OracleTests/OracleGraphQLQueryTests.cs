@@ -72,7 +72,12 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         [TestMethod]
         public async Task InQueryWithVariables()
         {
-            Assert.Inconclusive("Oracle maps numeric id columns to GraphQL Decimal, so [Int]! variables are rejected.");
+            string oracleQuery = @"
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT('id' VALUE id, 'title' VALUE title) ORDER BY id
+                ) AS data
+                FROM (SELECT id, title FROM books WHERE id IN (1, 2))";
+            await InQueryWithVariables(oracleQuery);
         }
 
         [TestMethod]
@@ -404,7 +409,6 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle numeric aggregation types differ from SQL Server (Decimal vs Int).")]
         public async Task TestSupportForGroupByAggregationsWithAliases()
         {
             string oracleQuery = @"
@@ -412,14 +416,13 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     'max' VALUE max_cat, 'max_price' VALUE max_price,
                     'min_price' VALUE min_price, 'avg_price' VALUE avg_price,
                     'sum_price' VALUE sum_price, 'count' VALUE cnt
-                ) RETURNING CLOB), TO_CLOB('[]')) AS data
+                ) ORDER BY max_cat RETURNING CLOB), TO_CLOB('[]')) AS data
                 FROM (
                     SELECT MAX(categoryid) AS max_cat, MAX(price) AS max_price,
                            MIN(price) AS min_price, AVG(price) AS avg_price,
                            SUM(price) AS sum_price, COUNT(categoryid) AS cnt
                     FROM stocks_price
                     GROUP BY categoryid
-                    ORDER BY categoryid
                 )";
             await TestSupportForGroupByAggregationsWithAliases(oracleQuery);
         }

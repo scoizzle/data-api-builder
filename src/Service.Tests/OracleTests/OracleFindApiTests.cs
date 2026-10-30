@@ -4,6 +4,7 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Threading.Tasks;
+using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Find;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -45,8 +46,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             },
             {
                 "FindManyStoredProcedureTest",
-                $"SELECT JSON_ARRAYAGG(JSON_OBJECT('id' VALUE id, 'title' VALUE title)) AS data " +
-                $"FROM (SELECT id, title FROM books ORDER BY id ASC)"
+                $"SELECT * FROM books ORDER BY id ASC"
             },
             {
                 "FindOneStoredProcedureTestUsingParameter",
@@ -637,8 +637,10 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         public override async Task FindTestsWithFilterQueryStringOneOpFilter() => await Task.CompletedTask;
 
         [TestMethod]
-        [Ignore("Oracle maps integer types to Decimal, causing filter type mismatch.")]
-        public override async Task FindTestWithFilterQueryStringBoolResultFilter() => await Task.CompletedTask;
+        public override async Task FindTestWithFilterQueryStringBoolResultFilter()
+        {
+            await base.FindTestWithFilterQueryStringBoolResultFilter();
+        }
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
@@ -647,10 +649,6 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
         public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle list-query JSON_ARRAYAGG generation fails with ORA-02000 (pre-existing); keys would otherwise match 'ID Number'.")]
-        public override async Task FindTestWithQueryStringSpaceInNamesOrderByAsc() => await Task.CompletedTask;
 
         [TestMethod]
         [Ignore("Oracle preserves original column casing in unmapped fields.")]
@@ -664,42 +662,64 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
-        public override Task FindManyStoredProcedureTest()
+        public override async Task FindManyStoredProcedureTest()
         {
-            return Task.CompletedTask;
+            await base.FindManyStoredProcedureTest();
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
+        [Ignore("Oracle fixture procedure get_book_by_id ignores its id argument (WHERE id = id binds the column), so it returns every book; the expected query also targets publishers. Needs a fixture/expectation fix, not a casing change.")]
         public override Task FindOneStoredProcedureTestUsingParameter()
         {
             return Task.CompletedTask;
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
-        public override Task FindStoredProcedureWithNonEmptyPrimaryKeyRoute()
+        public override async Task FindStoredProcedureWithNonEmptyPrimaryKeyRoute()
         {
-            return Task.CompletedTask;
+            await base.FindStoredProcedureWithNonEmptyPrimaryKeyRoute();
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
+        [Ignore("Oracle reports a missing required argument as ORA-06550 (HTTP 500), not the shared 400 DatabaseInputError.")]
         public override Task FindStoredProcedureWithMissingParameter()
         {
             return Task.CompletedTask;
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
-        public override Task FindStoredProcedureWithNonexistentParameter()
+        public override async Task FindStoredProcedureWithNonexistentParameter()
         {
-            return Task.CompletedTask;
+            // On an entity that takes no parameters
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: "?param=value",
+                entityNameOrPath: _integrationProcedureFindMany_EntityName,
+                sqlQuery: string.Empty,
+                operationType: EntityActionOperation.Execute,
+                restHttpVerb: SupportedHttpVerb.Get,
+                exceptionExpected: true,
+                expectedErrorMessage: $"Invalid request. Contained unexpected fields: param for entity: {_integrationProcedureFindMany_EntityName}",
+                expectedStatusCode: HttpStatusCode.BadRequest
+                );
+
+            // On an entity that takes parameters other than those supplied. GetBook has no
+            // configured parameter names, so Oracle exposes its argument as the catalog spelling ID.
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: "?ID=1&param=value",
+                entityNameOrPath: _integrationProcedureFindOne_EntityName,
+                sqlQuery: string.Empty,
+                operationType: EntityActionOperation.Execute,
+                restHttpVerb: SupportedHttpVerb.Get,
+                exceptionExpected: true,
+                expectedErrorMessage: $"Invalid request. Contained unexpected fields: param for entity: {_integrationProcedureFindOne_EntityName}",
+                expectedStatusCode: HttpStatusCode.BadRequest
+                );
         }
 
         [TestMethod]
-        [Ignore("Oracle stored-procedure REST result/parameter casing is not yet aligned with the other engines.")]
+        [Ignore("Oracle reports a missing required argument as ORA-06550 (HTTP 500), not the shared 400 DatabaseInputError.")]
         public override Task FindApiTestForSPWithRequiredParamsInRequestBody()
         {
             return Task.CompletedTask;
@@ -734,7 +754,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 exceptionExpected: true,
                 expectedErrorMessage: slashStar
                     ? "Support for url template with implicit primary key field names is not yet added."
-                    : $"Parameter \"{sqlInjection}\" cannot be resolved as column \"ID\" with type \"Decimal\".",
+                    : $"Parameter \"{sqlInjection}\" cannot be resolved as column \"ID\" with type \"Int32\".",
                 expectedStatusCode: HttpStatusCode.BadRequest
             );
         }
@@ -755,7 +775,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 entityNameOrPath: _integrationEntityName,
                 sqlQuery: null,
                 exceptionExpected: true,
-                expectedErrorMessage: "Parameter \"{}\" cannot be resolved as column \"ID\" with type \"Decimal\".",
+                expectedErrorMessage: "Parameter \"{}\" cannot be resolved as column \"ID\" with type \"Int32\".",
                 expectedStatusCode: HttpStatusCode.BadRequest
             );
         }
