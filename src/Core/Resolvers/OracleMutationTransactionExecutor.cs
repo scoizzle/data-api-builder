@@ -52,16 +52,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 OracleLocalMutationSession session = new(_queryExecutor, connection, transaction, dataSourceName);
                 using (MutationWork.Push(session))
                 {
-                    try
-                    {
-                        await work(session);
-                        transaction.Commit();
-                    }
-                    catch
-                    {
-                        transaction.Rollback();
-                        throw;
-                    }
+                    // Commit stays outside the work catch. A failed commit is not followed by
+                    // rollback, and a rollback failure must not replace the original error.
+                    await OracleMutationCompletion.CompleteAsync(
+                        () => work(session),
+                        transaction.Rollback,
+                        transaction.Commit,
+                        _queryExecutor.LogPreservedRollbackFailure);
                 }
             }
             catch (DbException dbException)

@@ -1487,6 +1487,63 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Raw bytes per base64 chunk. A multiple of 3 so only the last chunk can end with '='.
+        /// 1800 bytes encode to 2400 characters, under the VARCHAR2 4000-byte cap.
+        /// </summary>
+        internal const int Base64ChunkBytes = 1800;
+
+        /// <summary>
+        /// Base64 expression for one projected byte column. RAW stays a single VARCHAR2 conversion.
+        /// BLOB is chunked through DBMS_LOB into a CLOB. LONG RAW is chunked through UTL_RAW;
+        /// values above the RAW limit (32767 bytes) still cannot be encoded in SQL.
+        /// </summary>
+        internal static string BuildBinaryColumnExpression(string columnSql, bool isBlob, string? physicalType)
+        {
+            if (!isBlob)
+            {
+                return BuildRawBase64Expression(columnSql);
+            }
+
+            if (physicalType is not null
+                && physicalType.Contains("LONG RAW", StringComparison.OrdinalIgnoreCase))
+            {
+                return BuildLongRawBase64Expression(columnSql);
+            }
+
+            return BuildBlobBase64Expression(columnSql);
+        }
+
+        internal static string BuildRawBase64Expression(string columnSql)
+        {
+            return $"CASE WHEN {columnSql} IS NULL THEN NULL " +
+                   $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnSql})) END";
+        }
+
+        internal static string BuildBlobBase64Expression(string columnSql)
+        {
+            string chunk =
+                $"DBMS_LOB.SUBSTR({columnSql}, {Base64ChunkBytes}, (LEVEL - 1) * {Base64ChunkBytes} + 1)";
+            string bound = $"CEIL(DBMS_LOB.GETLENGTH({columnSql}) / {Base64ChunkBytes})";
+            return BuildChunkedBase64Expression(columnSql, chunk, bound);
+        }
+
+        internal static string BuildLongRawBase64Expression(string columnSql)
+        {
+            string chunk =
+                $"UTL_RAW.SUBSTR({columnSql}, (LEVEL - 1) * {Base64ChunkBytes} + 1, {Base64ChunkBytes})";
+            string bound = $"CEIL(UTL_RAW.LENGTH({columnSql}) / {Base64ChunkBytes})";
+            return BuildChunkedBase64Expression(columnSql, chunk, bound);
+        }
+
+        private static string BuildChunkedBase64Expression(string columnSql, string chunkSql, string levelBoundSql)
+        {
+            return $"CASE WHEN {columnSql} IS NULL THEN NULL ELSE (" +
+                   "SELECT REPLACE(REPLACE(XMLAGG(XMLELEMENT(E, UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(" +
+                   $"{chunkSql}))) ORDER BY LEVEL).EXTRACT('//text()').GETCLOBVAL(), CHR(10), ''), CHR(13), '') " +
+                   $"FROM DUAL CONNECT BY LEVEL <= {levelBoundSql}) END";
+        }
+
+        /// <summary>
         /// Builds the value expression for one projected column: nested JSON fragments come from
         /// the child CTE (or the lateral alias), byte[] columns are base64-encoded, and everything
         /// else is a plain column reference.
@@ -1521,13 +1578,21 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             if (structure.GetColumnSystemType(column.ColumnName) == typeof(byte[]))
             {
-                // Oracle RAW/BLOB is not stored as base64 so a conversion is made before
-                // producing the json result since HotChocolate handles ByteArray as base64.
-                // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261 "bad argument", so NULL byte
-                // columns must pass through unmodified (CASE WHEN ... IS NULL THEN NULL).
+                // Oracle RAW/BLOB is not stored as base64. HotChocolate's ByteArray scalar is.
+                // UTL_ENCODE.BASE64_ENCODE(NULL) throws ORA-29261, so NULL stays NULL.
+                // RAW fits in VARCHAR2. BLOB and LONG RAW do not: CAST_TO_VARCHAR2 caps at
+                // 4000 bytes, and base64 of ~3000 raw bytes crosses that and empties the page.
                 string refColumn = Build(column as Column);
-                return $"CASE WHEN {refColumn} IS NULL THEN NULL " +
-                       $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({refColumn})) END";
+                bool isBlob = false;
+                string? physicalType = null;
+                if (structure.GetUnderlyingSourceDefinition().Columns.TryGetValue(column.ColumnName, out ColumnDefinition? definition))
+                {
+                    OracleObjectFacts.LobFacts facts = OracleObjectFacts.Column(definition);
+                    isBlob = facts.IsBlob;
+                    physicalType = facts.PhysicalType;
+                }
+
+                return BuildBinaryColumnExpression(refColumn, isBlob, physicalType);
             }
 
             return Build(column as Column);
@@ -1967,6 +2032,32 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // BLOB/LONG RAW do not fit in a RAW bind (PL/SQL RAW max is 32767 bytes).
                 // Character LOBs are strings and must not take this binary path.
                 return definition is not null && OracleObjectFacts.Column(definition).IsBlob ? OracleDbType.Blob : OracleDbType.Raw;
+            }
+
+            // DATE and TIMESTAMP both surface as System.DateTime. The catalog type decides
+            // the RETURNING bind. A TIMESTAMP bind for a DATE column is the wrong type.
+            if (definition is not null)
+            {
+                string physical = OracleSqlType.Normalize(OracleObjectFacts.Column(definition).PhysicalType);
+                if (physical == "DATE")
+                {
+                    return OracleDbType.Date;
+                }
+
+                if (physical == "TIMESTAMP WITH TIME ZONE")
+                {
+                    return OracleDbType.TimeStampTZ;
+                }
+
+                if (physical == "TIMESTAMP WITH LOCAL TIME ZONE")
+                {
+                    return OracleDbType.TimeStampLTZ;
+                }
+
+                if (physical == "TIMESTAMP")
+                {
+                    return OracleDbType.TimeStamp;
+                }
             }
 
             if (systemType == typeof(DateTimeOffset))

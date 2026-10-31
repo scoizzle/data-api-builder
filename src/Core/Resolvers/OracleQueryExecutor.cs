@@ -98,6 +98,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// A rollback that itself fails must not replace the mutation error the caller sees.
+        /// </summary>
+        internal void LogPreservedRollbackFailure(Exception rollbackException, Exception original)
+        {
+            QueryExecutorLogger.LogWarning(
+                rollbackException,
+                "Oracle mutation rollback failed. The original mutation error is unchanged: {OriginalError}",
+                original.Message);
+        }
+
+        /// <summary>
         /// Starts a local <see cref="OracleTransaction"/> at ReadCommitted.
         /// ODP.NET Core does not expose BeginTransactionAsync; ambient TransactionScope is not used
         /// because a second Open inside the same scope promotes to XA/MSDTC, which is unsupported on .NET Core.
@@ -352,9 +363,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// Parameters without a DbType hint (date literals the OData parser wrapped in a
         /// ConvertNode do not inherit the column type) fall back to the plain TIMESTAMP form.
         /// String parameters use column facts copied onto the parameter
-        /// (<see cref="OracleStringBindFacts"/>). CLOB/NCLOB bind as LOBs. A string whose
-        /// UTF-8 length exceeds the standard VARCHAR2 byte limit binds as CLOB so a
-        /// multi-byte VARCHAR2(4000 CHAR) value is not sent as VARCHAR2.
+        /// (<see cref="OracleStringBindFacts"/>). CLOB/NCLOB bind as LOBs. CHAR and NCHAR
+        /// bind as fixed types sized to the column's character length so Oracle blank-pads
+        /// the comparison. NVARCHAR2 stays NVarchar2. A string whose UTF-8 length exceeds
+        /// the standard VARCHAR2 byte limit binds as CLOB so a multi-byte VARCHAR2(4000 CHAR)
+        /// value is not sent as VARCHAR2.
         /// </summary>
         /// <inheritdoc />
         public override void PopulateDbTypeForParameter(
@@ -432,6 +445,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return;
             }
 
+            // CHAR/NCHAR compare with blank-padding only when the bind is that fixed type
+            // and its size is the column width. VARCHAR2 'AB' does not equal CHAR(4) 'AB  '.
+            if (kind == OracleStringBindFacts.Kind.Char)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Char;
+                ApplyFixedCharacterSize(parameter, oracleParameter);
+                return;
+            }
+
+            if (kind == OracleStringBindFacts.Kind.FixedNChar)
+            {
+                oracleParameter.OracleDbType = OracleDbType.NChar;
+                ApplyFixedCharacterSize(parameter, oracleParameter);
+                return;
+            }
+
             if (value is not string text)
             {
                 if (kind == OracleStringBindFacts.Kind.NChar)
@@ -452,6 +481,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (exceedsVarchar2)
             {
                 oracleParameter.OracleDbType = OracleDbType.Clob;
+            }
+        }
+
+        /// <summary>
+        /// Sets the fixed CHAR/NCHAR bind width from the column length already stored on the
+        /// parameter. A missing or non-positive length leaves Size unset; ODP.NET then does not
+        /// blank-pad, so catalog reads must supply CHAR_LENGTH (characters) rather than the
+        /// byte DATA_LENGTH of a character-semantics column.
+        /// </summary>
+        private static void ApplyFixedCharacterSize(DbConnectionParam parameter, OracleParameter oracleParameter)
+        {
+            if (parameter.Length is int length && length > 0)
+            {
+                oracleParameter.Size = length;
             }
         }
 

@@ -48,8 +48,22 @@ namespace Azure.DataApiBuilder.Core.Services
 
             /// <summary>
             /// NVARCHAR2 or NCHAR. National character data uses <c>NVarchar2</c> rather than <c>Varchar2</c>.
+            /// Fixed-length <c>NCHAR</c> also sets <see cref="IsFixedChar"/> so the bind is blank-padded.
             /// </summary>
             public bool IsNChar { get; set; }
+
+            /// <summary>
+            /// CHAR or NCHAR. Oracle blank-pads comparisons only when the bind is the same fixed type
+            /// and width. VARCHAR2 and NVARCHAR2 leave this false.
+            /// </summary>
+            public bool IsFixedChar { get; set; }
+
+            /// <summary>
+            /// Catalog <c>DATA_TYPE</c> (for example <c>DATE</c> or <c>TIMESTAMP(6)</c>).
+            /// RETURNING binds use it when <see cref="ColumnDefinition.SystemType"/> cannot tell
+            /// DATE from TIMESTAMP. Null when the column was not loaded from the catalog.
+            /// </summary>
+            public string? PhysicalType { get; set; }
 
             public bool IsBlob { get; set; }
         }

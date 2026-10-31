@@ -603,6 +603,43 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// DATE and TIMESTAMP both have CLR type DateTime. The RETURNING bind follows the
+        /// catalog type: DATE is OracleDbType.Date, TIMESTAMP(6) stays TimeStamp.
+        /// A DateTime column with no catalog type keeps the historical TimeStamp bind.
+        /// </summary>
+        [TestMethod]
+        public void OracleUpsertOutputHintsUseCatalogDateInsteadOfTimestamp()
+        {
+            SqlUpsertQueryStructure structure = CreateUpsertStructure();
+            structure.OutputColumns.Add(new LabelledColumn("SYSTEM", "books", "PUBLISHED", "published"));
+            ColumnDefinition published = new()
+            {
+                SystemType = typeof(DateTime)
+            };
+            structure.GetUnderlyingSourceDefinition().Columns.Add("PUBLISHED", published);
+
+            OracleObjectFacts.Column(published).PhysicalType = "DATE";
+            string dateHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(dateHint, "dab_out_0=Date");
+            Assert.IsFalse(dateHint.Contains("dab_out_0=TimeStamp", StringComparison.Ordinal), dateHint);
+
+            OracleObjectFacts.Column(published).PhysicalType = "TIMESTAMP(6)";
+            string timestampHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(timestampHint, "dab_out_0=TimeStamp");
+            Assert.IsFalse(timestampHint.Contains("dab_out_0=Date", StringComparison.Ordinal), timestampHint);
+
+            OracleObjectFacts.Column(published).PhysicalType = "TIMESTAMP(6) WITH TIME ZONE";
+            published.SystemType = typeof(DateTimeOffset);
+            string zonedHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(zonedHint, "dab_out_0=TimeStampTZ");
+
+            OracleObjectFacts.Column(published).PhysicalType = null;
+            published.SystemType = typeof(DateTime);
+            string untypedHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(untypedHint, "dab_out_0=TimeStamp");
+        }
+
+        /// <summary>
         /// RAW output binds need an explicit size. BLOB must not be registered as RAW.
         /// </summary>
         [TestMethod]
