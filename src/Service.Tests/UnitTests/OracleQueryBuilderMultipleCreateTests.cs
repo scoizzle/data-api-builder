@@ -102,6 +102,52 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(query.Contains(" OR ", StringComparison.Ordinal), query);
         }
 
+        /// <summary>
+        /// Hardening for issue #17. Nested EXISTS text is escaped again by the caller, so a
+        /// backtracking-prone LIKE regex would turn <c>@param10</c> into a second ESCAPE clause.
+        /// No end-to-end red test exists: the outer whole-string pass already escapes EXISTS today.
+        /// </summary>
+        [TestMethod]
+        public void ExistsSubqueryAppliesEscapeToLikePredicate()
+        {
+            SqlQueryStructure structure = CreateSelectStructure();
+            structure.DbPolicyPredicatesForOperations[EntityActionOperation.Read] =
+                "(\"TITLE\" LIKE @p ESCAPE '\\')";
+            structure.Predicates.Add(Like("TITLE", "@param10", PredicateOperation.LIKE));
+            structure.Predicates.Add(Like("TITLE", "@param2", PredicateOperation.NOT_LIKE));
+            structure.Predicates.Add(Like("TITLE", "@param0", PredicateOperation.LIKE));
+
+            string query = new OracleQueryBuilder().Build((BaseSqlQueryStructure)structure);
+
+            StringAssert.Contains(query, "LIKE @param10 ESCAPE '\\'", StringComparison.Ordinal);
+            StringAssert.Contains(query, "NOT LIKE @param2 ESCAPE '\\'", StringComparison.Ordinal);
+            StringAssert.Contains(query, "LIKE @param0 ESCAPE '\\'", StringComparison.Ordinal);
+            StringAssert.Contains(query, "LIKE @p ESCAPE '\\'", StringComparison.Ordinal);
+            Assert.IsFalse(query.Contains("LIKE @param1 ESCAPE", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("ESCAPE '\\' ESCAPE", StringComparison.Ordinal), query);
+            Assert.AreEqual(CountLikeParameters(query), CountEscapeClauses(query), query);
+        }
+
+        private static Predicate Like(string columnName, string param, PredicateOperation operation)
+        {
+            return new Predicate(
+                new PredicateOperand(new Column(SCHEMA_NAME, TABLE_NAME, columnName, "SYSTEM_BOOKS")),
+                operation,
+                new PredicateOperand(param));
+        }
+
+        private static int CountLikeParameters(string query)
+        {
+            return System.Text.RegularExpressions.Regex.Matches(
+                query, @"LIKE\s+@[\w\d]+(?![\w\d])", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+        }
+
+        private static int CountEscapeClauses(string query)
+        {
+            return System.Text.RegularExpressions.Regex.Matches(
+                query, @"ESCAPE '\\'", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+        }
+
         [TestMethod]
         public void JoinSqlOmitsAsBeforeOnAndQuotesUppercaseAlias()
         {
@@ -159,6 +205,31 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "JSON_OBJECT(* RETURNING CLOB)", StringComparison.Ordinal);
             Assert.IsFalse(query.Contains("TO_CLOB(JSON_OBJECT(*))", StringComparison.Ordinal), query);
             Assert.IsFalse(query.Contains("JSON_ARRAYAGG", StringComparison.Ordinal), query);
+        }
+
+        [TestMethod]
+        public void MultipleCreateFollowUpQuery_EmitsPageCteAndBoundedChildAggregates()
+        {
+            SqlQueryStructure root = OracleQueryBuilderNestedReadTests.CreateChainedList(levels: 3, rootOrdered: true);
+            root.IsMultipleCreateOperation = true;
+            root.Predicates.Add(new Predicate(
+                new PredicateOperand(new Column("DBO", "PARENTS", "ID", "table0")),
+                PredicateOperation.Equal,
+                new PredicateOperand("@param0"),
+                addParenthesis: true));
+            root.Predicates.Add(new Predicate(
+                new PredicateOperand(new Column("DBO", "PARENTS", "ID", "table0")),
+                PredicateOperation.Equal,
+                new PredicateOperand("@param1"),
+                addParenthesis: true));
+
+            string query = new OracleQueryBuilder().Build(root);
+
+            StringAssert.Contains(query, "\"dab_page_cte\" AS ( SELECT /*+ MATERIALIZE */", query);
+            StringAssert.Contains(query, "((\"TABLE0\".\"ID\" = @param0) OR (\"TABLE0\".\"ID\" = @param1))", query);
+            StringAssert.Contains(query, "INNER JOIN (SELECT DISTINCT \"c0\" FROM \"dab_page_cte\") \"dab_page\"", query);
+            StringAssert.Contains(query, "INNER JOIN (SELECT DISTINCT \"id\" FROM \"table1_rows_cte\" WHERE \"rn\" <= 50) \"dab_restrict_0\"", query);
+            Assert.AreEqual(2, System.Text.RegularExpressions.Regex.Matches(query, "FETCH NEXT 100 ROWS ONLY").Count, query);
         }
 
         [TestMethod]
