@@ -87,7 +87,8 @@ public record DataSource(
         {
             return (TOptionType)(object)new OracleOptions(
                 CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
-                SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))));
+                SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
+                ManagedIdentity: ReadNullableBoolOption("managed-identity"));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
@@ -111,6 +112,22 @@ public record DataSource(
         }
 
         return false;
+    }
+
+    private bool? ReadNullableBoolOption(string option)
+    {
+        if (Options is not null && Options.TryGetValue(option, out object? value))
+        {
+            return value switch
+            {
+                bool boolValue => boolValue,
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True } => true,
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.False } => false,
+                _ => null,
+            };
+        }
+
+        return null;
     }
 
     private int? ReadIntOption(string option)
@@ -170,9 +187,16 @@ public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 /// because a DBA must first create the context namespace and the package that sets it (see
 /// docs/design/oracle-support.md).
 /// </param>
+/// <param name="ManagedIdentity">
+/// Tri-state switch for Microsoft Entra managed identity token authentication. null (default)
+/// infers it: a token is requested only when the connection string has no password and carries no
+/// wallet or external-authentication (<c>User Id=/</c>) markers. true forces token authentication
+/// and false disables it, regardless of the connection string.
+/// </param>
 public record OracleOptions(
     int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
-    bool SetSessionContext = false) : IDataSourceOptions
+    bool SetSessionContext = false,
+    bool? ManagedIdentity = null) : IDataSourceOptions
 {
     /// <summary>Default command timeout in seconds, matching the other ADO.NET providers.</summary>
     public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
