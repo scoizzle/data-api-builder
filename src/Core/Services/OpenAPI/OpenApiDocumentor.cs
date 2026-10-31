@@ -939,10 +939,17 @@ namespace Azure.DataApiBuilder.Core.Services
         /// A field is included if at least one role (or the specified role) has access to it.
         /// </summary>
         /// <param name="entity">The entity to check permissions for.</param>
+        /// <param name="entityName">Entity whose backing-to-exposed map resolves permission names.</param>
         /// <param name="exposedColumnNames">All exposed column names from the database.</param>
+        /// <param name="metadataProvider">Resolves a catalog or backing permission name to the exposed name.</param>
         /// <param name="role">Optional role to filter permissions. If null, returns superset of all roles.</param>
         /// <returns>Filtered set of column names that are available based on permissions.</returns>
-        private static HashSet<string> FilterFieldsByPermissions(Entity entity, HashSet<string> exposedColumnNames, string? role = null)
+        private static HashSet<string> FilterFieldsByPermissions(
+            Entity entity,
+            string entityName,
+            HashSet<string> exposedColumnNames,
+            ISqlMetadataProvider metadataProvider,
+            string? role = null)
         {
             if (entity?.Permissions is null || entity.Permissions.Length == 0)
             {
@@ -974,22 +981,32 @@ namespace Azure.DataApiBuilder.Core.Services
                         continue;
                     }
 
+                    // Permission include/exclude are catalog/backing names after Oracle identifier
+                    // rewrite. Intersect them with exposed names only after that mapping.
+                    // A name the provider does not treat as backing (a non-Oracle alias) stays as authored.
+                    HashSet<string>? include = action.Fields.Include is null
+                        ? null
+                        : MapPermissionNamesToExposed(entityName, action.Fields.Include, metadataProvider);
+                    HashSet<string>? exclude = action.Fields.Exclude is null
+                        ? null
+                        : MapPermissionNamesToExposed(entityName, action.Fields.Exclude, metadataProvider);
+
                     // Determine included fields using ternary - either all fields or explicitly listed
-                    HashSet<string> actionFields = (action.Fields.Include is null || action.Fields.Include.Contains("*"))
+                    HashSet<string> actionFields = (include is null || include.Contains(AuthorizationResolver.WILDCARD))
                         ? new HashSet<string>(exposedColumnNames)
-                        : new HashSet<string>(action.Fields.Include.Where(f => exposedColumnNames.Contains(f)));
+                        : new HashSet<string>(include.Where(f => exposedColumnNames.Contains(f)));
 
                     // Remove excluded fields
-                    if (action.Fields.Exclude is not null && action.Fields.Exclude.Count > 0)
+                    if (exclude is not null && exclude.Count > 0)
                     {
-                        if (action.Fields.Exclude.Contains("*"))
+                        if (exclude.Contains(AuthorizationResolver.WILDCARD))
                         {
                             // Exclude all - no fields available for this action
                             actionFields.Clear();
                         }
                         else
                         {
-                            actionFields.ExceptWith(action.Fields.Exclude);
+                            actionFields.ExceptWith(exclude);
                         }
                     }
 
@@ -999,6 +1016,39 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             return availableFields;
+        }
+
+        /// <summary>
+        /// Maps permission include/exclude names onto exposed column names.
+        /// The wildcard is unchanged. A catalog or backing name is replaced when the provider
+        /// knows its exposed name; any other name is left as authored so a non-Oracle alias
+        /// still matches the exposed set.
+        /// </summary>
+        private static HashSet<string> MapPermissionNamesToExposed(
+            string entityName,
+            HashSet<string> permissionNames,
+            ISqlMetadataProvider metadataProvider)
+        {
+            HashSet<string> exposedNames = new(permissionNames.Comparer);
+            foreach (string name in permissionNames)
+            {
+                if (string.Equals(name, AuthorizationResolver.WILDCARD, StringComparison.Ordinal))
+                {
+                    exposedNames.Add(AuthorizationResolver.WILDCARD);
+                    continue;
+                }
+
+                if (metadataProvider.TryGetExposedColumnName(entityName, name, out string? exposed)
+                    && !string.IsNullOrEmpty(exposed))
+                {
+                    exposedNames.Add(exposed);
+                    continue;
+                }
+
+                exposedNames.Add(name);
+            }
+
+            return exposedNames;
         }
 
         /// <summary>
@@ -1319,7 +1369,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 HashSet<string> exposedColumnNames = GetExposedColumnNames(entityName, sourceDefinition.Columns.Keys.ToList(), metadataProvider);
 
                 // Filter fields based on the superset of permissions across all roles (or specific role)
-                exposedColumnNames = FilterFieldsByPermissions(entity, exposedColumnNames, role);
+                exposedColumnNames = FilterFieldsByPermissions(entity, entityName, exposedColumnNames, metadataProvider, role);
 
                 // Get configured operations to determine which schemas to generate
                 Dictionary<OperationType, bool> configuredOps = GetConfiguredRestOperations(entity, dbObject, role);
@@ -1508,7 +1558,13 @@ namespace Azure.DataApiBuilder.Core.Services
 
                     if (entityConfig?.Fields != null)
                     {
-                        FieldMetadata? fieldMetadata = entityConfig.Fields.FirstOrDefault(f => f.Alias == field || f.Name == field);
+                        // After Oracle identifier rewrite, FieldMetadata.Name is the catalog spelling
+                        // and Alias is the exposed name. Match either, plus the exposed name itself
+                        // for engines that leave FieldMetadata.Name unrewritten.
+                        FieldMetadata? fieldMetadata = entityConfig.Fields.FirstOrDefault(candidate =>
+                            string.Equals(candidate.Alias, field, StringComparison.Ordinal)
+                            || string.Equals(candidate.Name, backingColumnValue, StringComparison.Ordinal)
+                            || string.Equals(candidate.Name, field, StringComparison.Ordinal));
                         fieldDescription = fieldMetadata?.Description;
                     }
 

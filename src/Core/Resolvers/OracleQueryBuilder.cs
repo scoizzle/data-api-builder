@@ -2235,8 +2235,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Builds the metadata query for a STANDALONE Oracle subprogram only.
-        /// Callers must bind <c>@param0</c> (schema) and <c>@param1</c> (subprogram name); the
-        /// values are compared case-insensitively in the query.
+        /// Callers must bind <c>@param0</c> (schema) and <c>@param1</c> (subprogram name).
+        /// Those binds are the stored catalog spelling and are compared exactly, the same way
+        /// argument discovery compares <c>OWNER</c> and <c>OBJECT_NAME</c>. A quoted
+        /// <c>GetBook</c> therefore does not match unquoted <c>GETBOOK</c>.
         /// </summary>
         /// <inheritdoc/>
         public string BuildStoredProcedureResultDetailsQuery(string databaseObjectName)
@@ -2253,8 +2255,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
                 $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
-                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
-                $"AND UPPER(OBJECT_NAME) = UPPER(@param1) " +
+                $"WHERE OWNER = @param0 " +
+                $"AND OBJECT_NAME = @param1 " +
                 $"AND OVERLOAD IS NULL " +
                 $"AND IN_OUT IN ('OUT', 'IN/OUT') " +
                 $"AND ARGUMENT_NAME IS NOT NULL " +
@@ -2288,9 +2290,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // by PACKAGE_NAME = <package>. (In Oracle an empty string IS NULL, so a plain equality
             // against an empty package name would match nothing.)
             // Names are bound (never interpolated) so a hostile object name cannot alter the query.
+            // Owner, package, and object are the stored spelling and are compared exactly, matching
+            // argument discovery. UPPER() would let a quoted "GetBook" match unquoted GETBOOK.
             string packageClause = string.IsNullOrEmpty(packageName)
                 ? "PACKAGE_NAME IS NULL"
-                : "UPPER(PACKAGE_NAME) = UPPER(@param1)";
+                : "PACKAGE_NAME = @param1";
             // A null overload means the subprogram is not overloaded. Filtering to one OVERLOAD
             // value keeps packaged overloads from mixing their parameters into one positional list.
             string overloadClause = string.IsNullOrEmpty(overload)
@@ -2303,9 +2307,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 $"DATA_TYPE AS {QuoteIdentifier(STOREDPROC_COLUMN_SYSTEMTYPENAME)}, " +
                 $"'false' AS {QuoteIdentifier(STOREDPROC_COLUMN_ISNULLABLE)} " +
                 $"FROM ALL_ARGUMENTS " +
-                $"WHERE UPPER(OWNER) = UPPER(@param0) " +
+                $"WHERE OWNER = @param0 " +
                 $"AND {packageClause} " +
-                $"AND UPPER(OBJECT_NAME) = UPPER(@param2) " +
+                $"AND OBJECT_NAME = @param2 " +
                 overloadClause +
                 (isFunction
                     // A function's result set is its RETURN value (POSITION 0, ARGUMENT_NAME null).

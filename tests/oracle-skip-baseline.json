@@ -40,7 +40,7 @@
     "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithIntTypeNullValuesOrderByAsc": {
       "issue": 27,
       "owner": "oracle-tests",
-      "reason": "Oracle binary collation produces a different order than SQL Server."
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
     },
     "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc": {
       "issue": 27,
@@ -95,12 +95,12 @@
     "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGQLFilterTests.TestGetNullIntFields": {
       "issue": 27,
       "owner": "oracle-tests",
-      "reason": "Oracle binary collation produces a different order than SQL Server."
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
     },
     "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLQueryTests.TestGetNullIntFields": {
       "issue": 27,
       "owner": "oracle-tests",
-      "reason": "Oracle binary collation produces a different order than SQL Server."
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
     },
     "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithOneToOneRelationship": {
       "issue": 27,

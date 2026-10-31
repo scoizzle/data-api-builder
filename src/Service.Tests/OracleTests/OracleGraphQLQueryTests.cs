@@ -526,11 +526,21 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             await TestSupportForGroupByNoAggregation(oracleQuery);
         }
 
+        /// <summary>
+        /// GraphQLQueryTestBase has no TestGetNullIntFields. The nullable-integer list
+        /// query is the base assertion, and it stays ignored because a NULL sort key is
+        /// never reached by keyset pagination (docs/design/oracle-support.md).
+        /// </summary>
         [TestMethod]
-        [Ignore("Oracle sorts strings with binary collation, producing different order than SQL Server. #27")]
+        [Ignore("Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md. #27")]
         public async Task TestGetNullIntFields()
         {
-            await Task.CompletedTask;
+            string oracleQuery = @"
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT('id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number)
+                ) AS data
+                FROM (SELECT id, title, issue_number FROM foo.magazines ORDER BY id ASC FETCH FIRST 100 ROWS ONLY)";
+            await TestQueryingTypeWithNullableIntFields(oracleQuery);
         }
 
         #endregion
