@@ -36,6 +36,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLQueryTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleMultipleCreateTransactionIntegrationTests",
+            "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleNumberColumnTypesTests",
+            "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleOverloadExecutionTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleSessionContextIntegrationTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleSynonymTests",
             "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests",
