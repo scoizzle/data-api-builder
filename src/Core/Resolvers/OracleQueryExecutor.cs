@@ -141,10 +141,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
                 bool? managedIdentityOption = oracleOptions.ManagedIdentity;
                 _dataSourceManagedIdentityOptions[dataSourceName] = managedIdentityOption;
-                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(
-                    builder,
-                    managedIdentityOption,
-                    controllerTokenSupplied: _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? configuredToken) && configuredToken is not null);
+                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder, managedIdentityOption);
 
                 // Session context (application context) forwarding is opt-in via "set-session-context".
                 // A DBA must first create the context namespace and the package that sets it; DAB then
@@ -431,7 +428,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // A token supplied by the configuration controller is applied whenever the connection
             // string/option allow token authentication; it can arrive after construction. Otherwise
             // fall back to the flag computed at configuration time (which is cleared when the default
-            // credential turns out to be unavailable).
+            // credential turns out to be unavailable and token use was only inferred).
             _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? accessTokenFromController);
             bool setAccessToken;
             if (accessTokenFromController is not null)
@@ -439,7 +436,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
                 setAccessToken = ConnectionStringBuilders.TryGetValue(dataSourceName, out DbConnectionStringBuilder? existing) &&
                     existing is OracleConnectionStringBuilder existingBuilder &&
-                    ShouldManagedIdentityAccessBeAttempted(existingBuilder, managedIdentityOption, controllerTokenSupplied: true);
+                    ShouldManagedIdentityAccessBeAttempted(existingBuilder, managedIdentityOption);
             }
             else
             {
@@ -494,16 +491,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Determines if managed identity access should be attempted or not.
         /// Precedence: an explicit <c>managed-identity</c> option wins; otherwise wallet or external
-        /// authentication markers disable it; otherwise a controller-supplied token enables it;
-        /// otherwise it is inferred from an empty password.
+        /// authentication markers disable it; otherwise it is inferred from an empty password. A
+        /// controller-supplied token does not override a configured password (MSSQL gates the same
+        /// way); set <c>managed-identity: true</c> explicitly to use a token with a TCPS+wallet
+        /// descriptor or alongside a password.
         /// </summary>
         /// <param name="builder">The data source's connection string builder.</param>
         /// <param name="managedIdentityOption">Explicit option value, or null to infer.</param>
-        /// <param name="controllerTokenSupplied">True when the configuration controller supplied a token.</param>
         internal static bool ShouldManagedIdentityAccessBeAttempted(
             OracleConnectionStringBuilder builder,
-            bool? managedIdentityOption,
-            bool controllerTokenSupplied)
+            bool? managedIdentityOption)
         {
             if (managedIdentityOption.HasValue)
             {
@@ -515,8 +512,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return false;
             }
 
-            return controllerTokenSupplied || string.IsNullOrEmpty(builder.Password);
+            return string.IsNullOrEmpty(builder.Password);
         }
+
+        /// <summary>
+        /// Matches a wallet directory attribute inside the Data Source descriptor, e.g.
+        /// <c>(MY_WALLET_DIRECTORY=/wallet)</c> or <c>WALLET_LOCATION = (SOURCE=...)</c>. Anchored on the
+        /// attribute name so a host such as <c>wallet-db.corp</c> is not treated as a wallet.
+        /// </summary>
+        private static readonly Regex _walletAttributeRegex = new(
+            @"(?<![A-Za-z0-9_])(WALLET_LOCATION|MY_WALLET_DIRECTORY)\s*=",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         /// <summary>
         /// True when the connection string requests wallet-based or external (OS/wallet) authentication,
@@ -525,7 +531,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private static bool HasWalletOrExternalAuthMarkers(OracleConnectionStringBuilder builder)
         {
             return string.Equals(builder.UserID?.Trim(), "/", StringComparison.Ordinal) ||
-                builder.DataSource.Contains("WALLET", StringComparison.OrdinalIgnoreCase);
+                _walletAttributeRegex.IsMatch(builder.DataSource ?? string.Empty);
         }
 
         /// <summary>
@@ -540,14 +546,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Tries to get an access token using DefaultAzureCredentials.
-        /// Catches any CredentialUnavailableException and logs only a warning
-        /// since this is best effort.
+        /// When token use was only inferred, any credential failure is logged as a warning (best
+        /// effort). When <c>managed-identity: true</c> is set explicitly, a failure is surfaced as a
+        /// 503 so the data source never silently falls back to an unauthenticated connection.
         /// </summary>
         /// <returns>The string representation of the access token if found,
         /// null otherwise.</returns>
         private async Task<string?> GetAccessTokenAsync(string dataSourceName, CancellationToken cancellationToken)
         {
             bool firstAttemptAtDefaultAccessToken = _defaultAccessToken is null;
+            _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
+            bool managedIdentityForced = managedIdentityOption == true;
 
             try
             {
@@ -567,14 +576,30 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // so a bunch of different exceptions could occur in that scenario
             catch (Exception ex)
             {
-                string messagePrefix = "{correlationId} No password detected in the connection string. Attempt to retrieve a managed identity access token using DefaultAzureCredential failed due to:\n{errorMessage}";
-                string messageSuffix = (firstAttemptAtDefaultAccessToken ? $"If authentication with DefaultAzureCredential is not intended, this warning can be safely ignored." : string.Empty);
+                string messagePrefix = managedIdentityForced
+                    ? "{correlationId} Attempt to retrieve a managed identity access token using DefaultAzureCredential failed although 'managed-identity' is set to true for the data source:\n{errorMessage}"
+                    : "{correlationId} No password detected in the connection string. Attempt to retrieve a managed identity access token using DefaultAzureCredential failed due to:\n{errorMessage}";
+                string messageSuffix = (firstAttemptAtDefaultAccessToken && !managedIdentityForced ? $"If authentication with DefaultAzureCredential is not intended, this warning can be safely ignored." : string.Empty);
                 string message = messagePrefix + messageSuffix;
                 QueryExecutorLogger.LogWarning(
                     exception: ex,
                     message: message,
                     HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
                     ex.Message);
+
+                // An explicit managed-identity: true must never degrade to an unauthenticated
+                // connection attempt, and a stale default token must not be reused: fail the request
+                // and leave the flag set so the next request retries token acquisition.
+                if (managedIdentityForced)
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Managed identity authentication is enabled for data source '{dataSourceName}' ('managed-identity': true) " +
+                            "but an access token could not be obtained with DefaultAzureCredential. " +
+                            "Verify that a managed identity or Azure credential is available to the service, or remove the option.",
+                        statusCode: HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization,
+                        innerException: ex);
+                }
 
                 // the config doesn't contain an identity token
                 // and a default identity token cannot be obtained

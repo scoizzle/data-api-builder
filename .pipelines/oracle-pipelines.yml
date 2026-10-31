@@ -82,7 +82,12 @@ jobs:
     inputs:
       targetType: 'inline'
       script: |
-        $connectionString="Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=$(testDatabaseName)));User Id=system;Password=$(dbPassword);"
+        $connectionString="Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=$(testDatabaseName))));User Id=system;Password=$(dbPassword);"
+        # An unbalanced TNS descriptor only fails later as an opaque ORA-12154; fail here instead.
+        $descriptor = $connectionString.Substring(0, $connectionString.IndexOf(';'))
+        $open = ($descriptor.ToCharArray() | Where-Object { $_ -eq '(' }).Count
+        $close = ($descriptor.ToCharArray() | Where-Object { $_ -eq ')' }).Count
+        if ($open -ne $close) { throw "Oracle TNS descriptor has unbalanced parentheses ($open open, $close close)." }
         Write-Host "##vso[task.setvariable variable=data-source.connection-string;issecret=true]$connectionString"
 
   # The password reaches the container (ORACLE_PASSWORD) and the test config (connection string
@@ -99,12 +104,16 @@ jobs:
   # Oracle Free is the flake vector: wait explicitly for the PDB to accept SQL, retry the container
   # once, and dump its log on failure.
   - bash: |
+      # Capture command output before grep -q: with pipefail, grep -q closing the pipe early can fail the pipeline.
       probe() {
-        docker exec oracle-db bash -c "echo 'select 1 from dual;' | sqlplus -s system/$(dbPassword)@//localhost:1521/$(testDatabaseName)" 2>/dev/null | grep -q "^ *1$"
+        local out
+        out=$(docker exec oracle-db bash -c "echo 'select 1 from dual;' | sqlplus -s system/$(dbPassword)@//localhost:1521/$(testDatabaseName)" 2>/dev/null || true)
+        grep -q "^ *1$" <<< "$out"
       }
       wait_ready() {
         for i in $(seq 1 90); do
-          if docker logs oracle-db 2>&1 | grep -q "DATABASE IS READY TO USE" && probe; then
+          logs=$(docker logs oracle-db 2>&1 || true)
+          if grep -q "DATABASE IS READY TO USE" <<< "$logs" && probe; then
             echo "Oracle ready after $i checks"
             return 0
           fi

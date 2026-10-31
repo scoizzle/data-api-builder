@@ -14,7 +14,7 @@ Data API builder supports Oracle Database 19c and later through
 - Oracle `RAW` and `BLOB` values serialized as base64 byte values
 - Identity and default-valued inserts through Oracle PL/SQL DML blocks
 - Type-aware `RETURNING INTO` output binds for numeric, date/time, and binary values
-- Managed identity password-token replacement when configured
+- Managed identity (Microsoft Entra) token authentication through `OracleConnection.AccessToken`, controlled by the `managed-identity` data-source option
 - Oracle metadata lookup through `ALL_TAB_COLUMNS`, `ALL_CONSTRAINTS`, and related views
 - Session-context claim forwarding through Oracle application contexts (`set-session-context`)
 
@@ -25,12 +25,29 @@ Data API builder supports Oracle Database 19c and later through
   (`OracleConfiguration.SqlNetEncryptionClient = "REQUIRED"`). MSSQL/MySQL/PostgreSQL force
   connection encryption in the same situation, and ODP.NET rejects the SqlClient
   `Encryption=true` keyword.
-- Managed identity token replacement rewrites only the password. All other connection-string
-  attributes are round-tripped through `OracleConnectionStringBuilder`, so TLS/wallet options
-  carried in the Data Source descriptor (for example `PROTOCOL=TCPS`,
-  `SECURITY=(MY_WALLET_DIRECTORY=...)(SSL_SERVER_DN_MATCH=TRUE)`) are preserved. Those options
+- Managed identity authentication sets `OracleConnection.AccessToken`; the token is never written
+  to the connection string. ODP.NET requires token connections to use `User Id=/` with no password
+  or proxy credentials, so DAB rewrites `User Id` to `/` and removes `Password`, `Proxy User Id`
+  and `Proxy Password`. Every other attribute, including the Data Source descriptor and its
+  TLS/wallet options (for example `PROTOCOL=TCPS`,
+  `SECURITY=(MY_WALLET_DIRECTORY=...)(SSL_SERVER_DN_MATCH=TRUE)`), is preserved. Those options
   are only valid inside the descriptor; standalone `Wallet Location`/`SSL_SERVER_DN_MATCH`
   keywords are rejected by ODP.NET.
+- The `managed-identity` data-source option is tri-state and configuration-file only (there is no
+  CLI flag; set it under `data-source.options`). It accepts `true`/`false` or `"1"`/`"0"`; any other
+  value is rejected when the config is loaded.
+  - Precedence: explicit `managed-identity: true`/`false` > wallet or external-authentication
+    markers (`WALLET_LOCATION=`, `MY_WALLET_DIRECTORY=` in the descriptor, or `User Id=/`) disable
+    the token > an empty password enables it. A configuration-controller token does not override a
+    configured password. Wallet detection matches only those attribute names, so a host such as
+    `wallet-db.corp` is not treated as a wallet.
+  - A `TCPS` descriptor that carries a wallet and should still use a token needs
+    `managed-identity: true`.
+  - With `managed-identity: true`, a failure to obtain a token (for example
+    `DefaultAzureCredential` finds no credential) fails the request with a 503 instead of
+    silently connecting without a token; token acquisition is retried on the next request. When
+    the option is omitted, token use is best effort and a missing credential is logged as a
+    warning and disables token use for that data source.
 - Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
   (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
 

@@ -19,7 +19,9 @@ using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
 using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Service.Exceptions;
-using Microsoft.Extensions.Logging.Abstractions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.Sql;
+using HotChocolate.Language;
+using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 
@@ -223,15 +225,36 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        public void UnknownPermissionColumnIsIgnoredForViews()
+        [DataRow(true, DisplayName = "Exclude")]
+        [DataRow(false, DisplayName = "Include")]
+        public void UnknownPermissionColumnFailsInitializationForViews(bool inExclude)
         {
             Entity entity = CreateEntity(
                 fields: null,
-                permissions: ReadPermission(include: new() { "not_a_column" }, exclude: new()),
+                permissions: ReadPermission(
+                    include: inExclude ? new() { "*" } : new() { "typo_column" },
+                    exclude: inExclude ? new() { "typo_column" } : new()),
+                sourceType: EntitySourceType.View);
+
+            Harness harness = CreateHarness(entity, EntitySourceType.View, "ID");
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(harness.NormalizeIdentifiers);
+
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
+            StringAssert.Contains(ex.Message, "typo_column");
+        }
+
+        [TestMethod]
+        public void KnownPermissionColumnIsAcceptedForViews()
+        {
+            Entity entity = CreateEntity(
+                fields: null,
+                permissions: ReadPermission(include: new() { "*" }, exclude: new() { "id" }),
                 sourceType: EntitySourceType.View);
 
             Harness harness = CreateHarness(entity, EntitySourceType.View, "ID");
             harness.NormalizeIdentifiers();
+
+            CollectionAssert.AreEquivalent(new[] { "ID" }, harness.ReadFields().Exclude.ToArray());
         }
 
         [TestMethod]
@@ -272,6 +295,110 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreNotSame(first[0], second[0]);
             Assert.AreNotSame(first[0].Actions, second[0].Actions);
             Assert.AreNotSame(autoentity.Permissions[0].Actions, first[0].Actions);
+        }
+
+        /// <summary>
+        /// Builds the GraphQL object type the way <c>GraphQLSchemaCreator</c> does (per-column roles
+        /// from the authorization resolver) and checks an excluded Oracle column never reaches the
+        /// schema, so it cannot be selected or filtered. Offline only: there is no live GraphQL run.
+        /// </summary>
+        [TestMethod]
+        public void ExcludedColumnIsAbsentFromGraphQLObjectType()
+        {
+            Entity entity = CreateEntity(
+                fields: new() { new() { Name = "salary" } },
+                permissions: ReadPermission(include: new() { "*" }, exclude: new() { "salary" }));
+
+            Harness harness = CreateHarness(entity, "SALARY", "ID");
+            harness.NormalizeIdentifiers();
+            AuthorizationResolver resolver = harness.CreateResolver();
+
+            DatabaseObject databaseObject = harness.GetDatabaseObject(ENTITY);
+            Dictionary<string, IEnumerable<string>> rolesAllowedForFields = new();
+            foreach (string column in databaseObject.SourceDefinition.Columns.Keys)
+            {
+                rolesAllowedForFields.Add(column, resolver.GetRolesForField(ENTITY, column, EntityActionOperation.Read));
+            }
+
+            ObjectTypeDefinitionNode node = SchemaConverter.GenerateObjectTypeDefinitionForDatabaseObject(
+                entityName: ENTITY,
+                databaseObject: databaseObject,
+                configEntity: harness.Config.Entities[ENTITY],
+                entities: harness.Config.Entities,
+                rolesAllowedForEntity: resolver.GetRolesForEntity(ENTITY),
+                rolesAllowedForFields: rolesAllowedForFields,
+                databaseType: DatabaseType.Oracle);
+
+            Assert.IsFalse(
+                node.Fields.Any(f => string.Equals(f.Name.Value, "SALARY", StringComparison.OrdinalIgnoreCase)),
+                "An excluded column must not appear on the GraphQL object type.");
+            Assert.IsTrue(node.Fields.Any(f => f.Name.Value == "ID"), "A non-excluded column must remain.");
+            Assert.IsFalse(resolver.AreColumnsAllowedForOperation(ENTITY, ROLE, EntityActionOperation.Read, new[] { "SALARY" }));
+        }
+
+        /// <summary>
+        /// A permission template copied to every autoentity table must not abort startup when only
+        /// some tables have the excluded column: the unknown name is dropped with a warning for
+        /// the generated entity that lacks it, and still applies to the one that has it.
+        /// </summary>
+        [TestMethod]
+        public async Task AutoentityExcludeOfColumnMissingFromOneTableIsDroppedWithWarning()
+        {
+            Autoentity autoentity = new(
+                Patterns: null,
+                Template: null,
+                Permissions: ReadPermission(include: new() { "*" }, exclude: new() { "ssn" }));
+            Harness harness = CreateHarness(new Dictionary<string, (Entity, string[])>(), autoentity: autoentity);
+
+            await harness.GenerateAutoentitiesAsync(autoentity, new JsonArray(
+                new JsonObject { ["entity_name"] = "Emp", ["object"] = "EMP", ["schema"] = "SYSTEM" },
+                new JsonObject { ["entity_name"] = "Contractor", ["object"] = "CONTRACTOR", ["schema"] = "SYSTEM" }));
+            harness.SetDatabaseObjects(new()
+            {
+                ["Emp"] = new[] { "ID", "SSN" },
+                ["Contractor"] = new[] { "ID" }
+            });
+
+            harness.NormalizeIdentifiers();
+
+            CollectionAssert.AreEquivalent(new[] { "SSN" }, harness.ReadFields("Emp").Exclude.ToArray());
+            Assert.AreEqual(0, harness.ReadFields("Contractor").Exclude.Count);
+            harness.VerifyWarningLogged("ssn", Times.Once());
+        }
+
+        [TestMethod]
+        public async Task AutoentityIncludeOfUnknownColumnIsDroppedNotWidened()
+        {
+            Autoentity autoentity = new(
+                Patterns: null,
+                Template: null,
+                Permissions: ReadPermission(include: new() { "id", "ssn" }, exclude: new()));
+            Harness harness = CreateHarness(new Dictionary<string, (Entity, string[])>(), autoentity: autoentity);
+
+            await harness.GenerateAutoentitiesAsync(autoentity, new JsonArray(
+                new JsonObject { ["entity_name"] = "Contractor", ["object"] = "CONTRACTOR", ["schema"] = "SYSTEM" }));
+            harness.SetDatabaseObjects(new() { ["Contractor"] = new[] { "ID", "NAME" } });
+
+            harness.NormalizeIdentifiers();
+
+            CollectionAssert.AreEquivalent(new[] { "ID" }, harness.ReadFields("Contractor").Include!.ToArray());
+        }
+
+        /// <summary>
+        /// The relaxed handling is only for generated entities: a hand-authored entity with the same
+        /// typo still fails startup.
+        /// </summary>
+        [TestMethod]
+        public void HandAuthoredEntityStillFailsOnUnknownColumn()
+        {
+            Entity entity = CreateEntity(
+                fields: null,
+                permissions: ReadPermission(include: new() { "*" }, exclude: new() { "ssn" }));
+            Assert.IsFalse(entity.IsAutoentity);
+
+            Harness harness = CreateHarness(entity, "ID");
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(harness.NormalizeIdentifiers);
+            StringAssert.Contains(ex.Message, "ssn");
         }
 
         private static EntityPermission[] ReadPermission(HashSet<string>? include, HashSet<string> exclude, string? databasePolicy = null)
@@ -328,7 +455,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             SetField(baseType, provider, "_databaseType", DatabaseType.Oracle);
             SetField(baseType, provider, "_linkingEntities", new Dictionary<string, Entity>());
-            SetField(baseType, provider, "_logger", NullLogger<ISqlMetadataProvider>.Instance);
+            Mock<ILogger<ISqlMetadataProvider>> logger = new();
+            SetField(baseType, provider, "_logger", logger.Object);
             SetAutoProperty(baseType, provider, "EntityBackingColumnsToExposedNames", new Dictionary<string, Dictionary<string, string>>());
             SetAutoProperty(baseType, provider, "EntityExposedNamesToBackingColumnNames", new Dictionary<string, Dictionary<string, string>>());
 
@@ -353,7 +481,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             }
 
             SetAutoProperty(baseType, provider, "EntityToDatabaseObject", databaseObjects);
-            return new Harness(provider, configProvider);
+            return new Harness(provider, configProvider, logger);
         }
 
         private static DatabaseObject CreateDatabaseObject(EntitySourceType sourceType, string[] columns)
@@ -366,7 +494,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             };
             foreach (string column in columns)
             {
-                definition.Columns.Add(column, new ColumnDefinition());
+                definition.Columns.Add(column, new ColumnDefinition { SystemType = typeof(string) });
             }
 
             return sourceType switch
@@ -396,10 +524,34 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             private readonly OracleMetadataProvider _provider;
             private readonly RuntimeConfigProvider _configProvider;
 
-            public Harness(OracleMetadataProvider provider, RuntimeConfigProvider configProvider)
+            private readonly Mock<ILogger<ISqlMetadataProvider>> _logger;
+
+            public Harness(OracleMetadataProvider provider, RuntimeConfigProvider configProvider, Mock<ILogger<ISqlMetadataProvider>> logger)
             {
                 _provider = provider;
                 _configProvider = configProvider;
+                _logger = logger;
+            }
+
+            /// <summary>Registers catalog columns for entities generated after the harness was created.</summary>
+            public void SetDatabaseObjects(Dictionary<string, string[]> columnsByEntity)
+            {
+                foreach ((string name, string[] columns) in columnsByEntity)
+                {
+                    _provider.EntityToDatabaseObject[name] = CreateDatabaseObject(EntitySourceType.Table, columns);
+                }
+            }
+
+            public void VerifyWarningLogged(string containing, Times times)
+            {
+                _logger.Verify(
+                    l => l.Log(
+                        LogLevel.Warning,
+                        It.IsAny<EventId>(),
+                        It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains(containing, StringComparison.Ordinal)),
+                        null,
+                        It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+                    times);
             }
 
             public RuntimeConfig Config => _configProvider.GetConfig();
@@ -450,11 +602,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 })!;
             }
 
+            public DatabaseObject GetDatabaseObject(string entityName) => _provider.EntityToDatabaseObject[entityName];
+
             public EntityAction ReadAction() =>
                 Config.Entities[ENTITY].Permissions.Single(p => p.Role == ROLE).Actions
                     .Single(a => a.Action == EntityActionOperation.Read);
 
             public EntityActionFields ReadFields() => ReadAction().Fields!;
+
+            public EntityActionFields ReadFields(string entityName) =>
+                Config.Entities[entityName].Permissions.Single(p => p.Role == ROLE).Actions
+                    .Single(a => a.Action == EntityActionOperation.Read).Fields!;
 
             public AuthorizationResolver CreateResolver()
             {
