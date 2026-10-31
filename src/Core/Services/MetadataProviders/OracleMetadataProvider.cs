@@ -475,7 +475,7 @@ namespace Azure.DataApiBuilder.Core.Services
                         GraphQL: autoentity.Template.GraphQL,
                         Rest: autoentity.Template.Rest,
                         Mcp: autoentity.Template.Mcp,
-                        Permissions: autoentity.Permissions,
+                        Permissions: ClonePermissions(autoentity.Permissions),
                         Cache: autoentity.Template.Cache,
                         Health: autoentity.Template.Health,
                         Fields: null,

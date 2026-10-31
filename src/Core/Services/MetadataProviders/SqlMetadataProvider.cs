@@ -1575,7 +1575,14 @@ namespace Azure.DataApiBuilder.Core.Services
             foreach ((string entityName, Entity entity) in Entities)
             {
                 EntityExposedNamesToBackingColumnNames.TryGetValue(entityName, out Dictionary<string, string>? exposedToBacking);
-                NormalizeConfiguredIdentifiers(entityName, entity, exposedToBacking);
+                try
+                {
+                    NormalizeConfiguredIdentifiers(entityName, entity, exposedToBacking);
+                }
+                catch (Exception e)
+                {
+                    HandleOrRecordException(e);
+                }
             }
         }
 
