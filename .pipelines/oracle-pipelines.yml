@@ -1,0 +1,237 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - main
+    - gh-readonly-queue/main
+    - release/*
+
+pr:
+  branches:
+    include:
+    - main
+    - release/*
+  paths:
+    exclude:
+    - samples/**
+    - docs/**
+    - '*.md'
+    - templates/**
+
+parameters:
+  # Set to false to prove the readiness gate fails (with the container log) when no database is running.
+  - name: oracleEnabled
+    type: boolean
+    default: true
+  # Same image the checked-in dab-config.Oracle.json was written against (PDB "test", user "system"),
+  # pinned to a multi-arch index digest. Oracle Free is amd64-only.
+  - name: oracleImage
+    type: string
+    default: 'gvenzl/oracle-free:23.9-slim@sha256:945400df5e3fc9589db628223385f906e1024932dc3b72e118fc4fcd0f0e9bbb'
+
+jobs:
+- job: linux
+  timeoutInMinutes: 90
+  pool:
+    vmImage: 'ubuntu-latest'
+  variables:
+      solution: '**/*.sln'
+      buildPlatform: 'Any CPU'
+      buildConfiguration: 'Release'
+      dbPassword: ''
+      data-source.connection-string: ''
+      # PDB created by the container (ORACLE_DATABASE); must match SERVICE_NAME in dab-config.Oracle.json.
+      testDatabaseName: 'test'
+      resultsDirectory: '$(Agent.TempDirectory)/oracle-results'
+
+  steps:
+  - task: NuGetAuthenticate@1
+    displayName: 'NuGet Authenticate'
+
+  # The .NET CLI commands in proceeding tasks use the .NET SDK version specified ("selected") here.
+  - task: UseDotNet@2
+    displayName: Setup .NET SDK v10.0.x
+    inputs:
+      packageType: sdk
+      version: 10.0.x
+
+  - task: NuGetToolInstaller@1
+
+  - task: DotNetCoreCLI@2
+    displayName: Restore NuGet packages
+    inputs:
+      command: restore
+      projects: '$(solution)'
+      feedsToUse: config
+      nugetConfigPath: Nuget.config
+      restoreArguments: '/p:RuntimeIdentifiers=""'
+
+  - task: Bash@3
+    displayName: 'Generate password'
+    inputs:
+      targetType: 'inline'
+      script: |
+        password=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c24)
+        echo "##vso[task.setvariable variable=dbPassword;issecret=true]$password"
+
+  - task: PowerShell@2
+    displayName: 'Set Connection String'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $connectionString="Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=$(testDatabaseName)));User Id=system;Password=$(dbPassword);"
+        Write-Host "##vso[task.setvariable variable=data-source.connection-string;issecret=true]$connectionString"
+
+  # The password reaches the container (ORACLE_PASSWORD) and the test config (connection string
+  # above, written by the FileTransform step) from the same generated $(dbPassword).
+  - ${{ if eq(parameters.oracleEnabled, true) }}:
+    - bash: |
+        docker run --name oracle-db -p 1521:1521 \
+        -e ORACLE_PASSWORD=$(dbPassword) \
+        -e ORACLE_DATABASE=$(testDatabaseName) \
+        -e ORACLE_CHARACTERSET=AL32UTF8 \
+        -d ${{ parameters.oracleImage }}
+      displayName: Start Oracle Free container
+
+  # Oracle Free is the flake vector: wait explicitly for the PDB to accept SQL, retry the container
+  # once, and dump its log on failure.
+  - bash: |
+      probe() {
+        docker exec oracle-db bash -c "echo 'select 1 from dual;' | sqlplus -s system/$(dbPassword)@//localhost:1521/$(testDatabaseName)" 2>/dev/null | grep -q "^ *1$"
+      }
+      wait_ready() {
+        for i in $(seq 1 90); do
+          if docker logs oracle-db 2>&1 | grep -q "DATABASE IS READY TO USE" && probe; then
+            echo "Oracle ready after $i checks"
+            return 0
+          fi
+          sleep 5
+        done
+        return 1
+      }
+      if ! wait_ready; then
+        echo "Oracle not ready; restarting container once"
+        docker logs --tail 200 oracle-db || true
+        docker rm -f oracle-db || true
+        docker run --name oracle-db -p 1521:1521 \
+          -e ORACLE_PASSWORD=$(dbPassword) \
+          -e ORACLE_DATABASE=$(testDatabaseName) \
+          -e ORACLE_CHARACTERSET=AL32UTF8 \
+          -d ${{ parameters.oracleImage }} || true
+        if ! wait_ready; then
+          echo "##vso[task.logissue type=error]Oracle did not become ready"
+          docker logs --tail 200 oracle-db || true
+          exit 1
+        fi
+      fi
+    displayName: Wait for Oracle readiness
+
+  # docs/design/oracle-support.md: the default open_cursors=300 is too low for the suite's statement cache.
+  - bash: |
+      docker exec oracle-db bash -c "printf 'ALTER SYSTEM SET open_cursors=1500 SCOPE=BOTH;\nexit;\n' | sqlplus -s system/$(dbPassword)@//localhost:1521/$(testDatabaseName)"
+      actual=$(docker exec oracle-db bash -c "printf 'set heading off feedback off pagesize 0\nselect value from v\$parameter where name = '\''open_cursors'\'';\nexit;\n' | sqlplus -s system/$(dbPassword)@//localhost:1521/$(testDatabaseName)" | tr -d '[:space:]')
+      echo "open_cursors in PDB $(testDatabaseName): $actual"
+      if [ "$actual" != "1500" ]; then
+        echo "##vso[task.logissue type=error]open_cursors is '$actual', expected 1500"
+        exit 1
+      fi
+    displayName: Raise and assert open_cursors
+
+  - task: DotNetCoreCLI@2
+    displayName: Build
+    inputs:
+      command: build
+      projects: |
+        **/*.csproj
+        !**/*Tests*.csproj
+      arguments: '--configuration $(buildConfiguration)'
+
+  - task: DotNetCoreCLI@2
+    displayName: Build Test Projects
+    inputs:
+      command: build
+      projects: '**/*Tests/*.csproj'
+      arguments: '--configuration $(buildConfiguration)'
+
+  # Writes $(data-source.connection-string) into the built dab-config.Oracle.json, which is also the
+  # file OracleSessionContextIntegrationTests and OracleMultipleCreateTransactionIntegrationTests read.
+  - task: FileTransform@1.206.0
+    displayName: 'Generate dab-config.Oracle.json'
+    inputs:
+      folderPath: '$(System.DefaultWorkingDirectory)'
+      fileType: 'json'
+      targetFiles: 'src/out/tests/*/dab-config.Oracle.json'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Run Oracle Integration Tests'
+    inputs:
+      command: test
+      publishTestResults: false
+      arguments: '--filter "TestCategory=Oracle" --no-build --configuration $(buildConfiguration) --collect "XPlat Code coverage" --logger "trx;LogFileName=oracle.trx" --results-directory $(resultsDirectory)'
+      projects: '**/*Tests/*.csproj'
+
+  - task: PublishTestResults@2
+    displayName: 'Publish Oracle test results'
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFormat: VSTest
+      testResultsFiles: '$(resultsDirectory)/oracle.trx'
+
+  # Fails when the suite skips more, or executes fewer, tests than tests/oracle-test-budget.json allows.
+  - task: PowerShell@2
+    displayName: 'Check Oracle skip/execution budget'
+    condition: succeededOrFailed()
+    inputs:
+      filePath: 'scripts/check-test-budget.ps1'
+      arguments: '-Trx "$(resultsDirectory)/oracle.trx" -Budget "tests/oracle-test-budget.json" -SkippedListOut "$(Build.ArtifactStagingDirectory)/oracle-skipped.txt"'
+      pwsh: true
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish Oracle skipped-test list'
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/oracle-skipped.txt'
+      artifact: 'oracle-skipped-tests'
+
+  - bash: |
+      docker logs --tail 200 oracle-db || true
+    condition: failed()
+    displayName: 'Dump Oracle container log'
+
+  - task: CmdLine@2
+    displayName: 'Set flag to publish Verify *.received files when tests fail'
+    condition: failed()
+    inputs:
+      script: 'echo ##vso[task.setvariable variable=publishverify]Yes'
+
+  - task: CopyFiles@2
+    condition: eq(variables['publishverify'], 'Yes')
+    displayName: 'Copy received files to Artifact Staging'
+    inputs:
+      contents: '**\*.received.*' 
+      targetFolder: '$(Build.ArtifactStagingDirectory)\Verify'
+      cleanTargetFolder: true
+      overWrite: true
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish received files as Artifacts'
+    name: 'verifypublish'
+    condition: eq(variables['publishverify'], 'Yes')
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\Verify'
+      ArtifactName: 'Verify'
+      publishLocation: 'Container'
+
+  - task: PublishCodeCoverageResults@1
+    displayName: 'Publish code coverage'
+    inputs:
+      codeCoverageTool: Cobertura
+      summaryFileLocation: '$(Agent.TempDirectory)/**/*cobertura.xml'
+
+  # Publish this job's raw cobertura as a named pipeline artifact for aggregation.
+  - template: templates/publish-coverage-artifact.yml
+    parameters:
+      artifactName: 'coverage-oracle'

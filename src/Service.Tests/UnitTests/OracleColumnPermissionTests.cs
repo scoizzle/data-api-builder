@@ -31,7 +31,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// include/exclude sets must end up in backing (catalog) spelling because the shared
     /// <see cref="AuthorizationResolver"/> subtracts excluded from included in backing space.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleColumnPermissionTests
     {
         private const string ENTITY = "Book";

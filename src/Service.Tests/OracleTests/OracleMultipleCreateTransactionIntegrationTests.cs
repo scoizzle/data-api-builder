@@ -61,13 +61,28 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             }
         }
 
+        /// <summary>
+        /// Locally the tests skip when no Oracle server is reachable. On a CI agent the Oracle pipeline
+        /// provisions the database, so an unreachable server is a failure rather than a silent skip.
+        /// </summary>
+        private static void FailOrSkipWhenOracleUnavailable()
+        {
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TF_BUILD")) ||
+                !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI")))
+            {
+                Assert.Fail("Live Oracle is not available. The Oracle CI pipeline must provide a reachable database.");
+            }
+
+            Assert.Inconclusive("Live Oracle is not available.");
+        }
+
         [TestMethod]
         public void LocalTransaction_CommitMakesBothInsertsVisible_RollbackMakesNeitherVisible()
         {
             string? connectionString = TryGetConnectionString();
             if (string.IsNullOrEmpty(connectionString) || !TryOpen(connectionString, out OracleConnection conn))
             {
-                Assert.Inconclusive("Live Oracle is not available.");
+                FailOrSkipWhenOracleUnavailable();
                 return;
             }
 
@@ -110,7 +125,7 @@ END;";
             string? connectionString = TryGetConnectionString();
             if (string.IsNullOrEmpty(connectionString) || !TryOpen(connectionString, out OracleConnection conn))
             {
-                Assert.Inconclusive("Live Oracle is not available.");
+                FailOrSkipWhenOracleUnavailable();
                 return;
             }
 

@@ -38,7 +38,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// The IN bind references the engine parameter value, and the cursor is bound to its argument name.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteWithInputParamAndCursorUsesBlockAndRefCursor()
         {
             StoredProcedureDefinition spDef = new();
@@ -77,7 +76,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// as <c>BEGIN "SYSTEM"."GET_BOOKS"("cursor" => :dab_result); END;</c>.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteCursorOnlyProcedureUsesOnlyRefCursorBind()
         {
             StoredProcedureDefinition spDef = new();
@@ -95,7 +93,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteScalarOutputDoesNotAppendRefCursorBind()
         {
             StoredProcedureDefinition spDef = new();
@@ -128,7 +125,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// parentheses, no REF CURSOR bind).
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteNoParamsNoResultSetOmitsParentheses()
         {
             StoredProcedureDefinition spDef = new();
@@ -148,7 +144,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// A procedure with IN parameters but no result set must NOT append the REF CURSOR bind.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteInputParamsOnlyOmitsRefCursor()
         {
             StoredProcedureDefinition spDef = new();
@@ -179,7 +174,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// The exposed key stays <c>id</c>. The quoted association uses the catalog name.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteQuotesCatalogArgumentNameWhenConfigSpellingDiffers()
         {
             ParameterDefinition id = new()
@@ -209,7 +203,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// <c>BEGIN "SYSTEM"."PKG_TEST"."GET_BOOK_BY_ID"("id" => :param0, "cursor" => :dab_result); END;</c>.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecutePackagedProcedureQualifiesPackageAndAppendsRefCursor()
         {
             StoredProcedureDefinition spDef = new();
@@ -238,7 +231,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// optional argument must not shift that value onto the cursor.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteBindsRefCursorByNameWhenItIsNotLast()
         {
             StoredProcedureDefinition spDef = new();
@@ -262,7 +254,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOverloadSelectionKeepsOnlyTheMatchingSignature()
         {
             List<OracleMetadataProvider.OracleArgumentRow> rows = new()
@@ -281,7 +272,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOverloadSelectionUsesLowestNumberWhenConfigDoesNotMatch()
         {
             List<OracleMetadataProvider.OracleArgumentRow> rows = new()
@@ -303,7 +293,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// shared cursor bind: <c>BEGIN :dab_result := "SYSTEM"."PKG_TEST"."GET_BOOKS"(:param0); END;</c>.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecutePackagedFunctionReturningCursorAssignsRefCursor()
         {
             StoredProcedureDefinition spDef = new();
@@ -333,7 +322,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// "value" FROM DUAL;</c> so its value surfaces as a single row in the reader.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecuteScalarFunctionSelectsFromDual()
         {
             StoredProcedureDefinition spDef = new();
@@ -359,7 +347,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// <c>SELECT "SYSTEM"."PKG_TEST"."GET_COUNT"(:param0) AS "value" FROM DUAL;</c>.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleExecutePackagedScalarFunctionSelectsFromDual()
         {
             StoredProcedureDefinition spDef = new();

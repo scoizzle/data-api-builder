@@ -20,7 +20,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// <summary>
     /// Unit tests for Oracle session-context (claims forwarding) command generation and gating.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleSessionContextTests
     {
         [TestMethod]

@@ -26,7 +26,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// generation and linking-object generation are implemented in OracleMetadataProvider so the
     /// shared base keeps its hook-only contract.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleMetadataProviderTests
     {
         [TestMethod]

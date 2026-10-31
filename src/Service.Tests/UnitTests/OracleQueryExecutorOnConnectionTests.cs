@@ -23,7 +23,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// Unit tests for ExecuteQueryOnConnection: skip Open when already open,
     /// never CloseConnection, assign Transaction, skip Polly when a local tx is attached.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryExecutorOnConnectionTests
     {
         [TestMethod]
