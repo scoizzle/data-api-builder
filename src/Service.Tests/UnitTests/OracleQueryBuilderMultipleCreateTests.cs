@@ -41,7 +41,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         };
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void MultipleCreateSelectJoinsPkPredicatesWithOrInsideParentheses()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -56,7 +55,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void NonMultipleCreateSelectJoinsPkPredicatesWithAnd()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -71,7 +69,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void MultipleCreateSelectKeepsReadPolicyOutsideOrGroup()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -90,7 +87,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void ExistsSubqueryJoinsPredicatesWithAndEvenWhenMultipleCreate()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -106,7 +102,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void JoinSqlOmitsAsBeforeOnAndQuotesUppercaseAlias()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -140,7 +135,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void ListQueryJsonArrayAggOrdersByRownum()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -154,7 +148,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void ScalarQueryJsonObjectReturnsClobInsideCall()
         {
             SqlQueryStructure structure = CreateSelectStructure();
@@ -168,7 +161,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void AutoentitiesQueryMatchesCatalogNamesCaseInsensitively()
         {
             string query = new OracleQueryBuilder().BuildGetAutoentitiesQuery();

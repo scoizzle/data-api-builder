@@ -9,7 +9,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// <summary>
     /// Unit tests for Oracle metadata-discovery query generation.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryBuilderMetadataQueryTests
     {
         [TestMethod]

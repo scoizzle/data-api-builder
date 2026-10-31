@@ -13,7 +13,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// NUMBER(p, s) reports p and s. The provider narrows integral NUMBER(p, 0) columns to int or
     /// long where the values fit, and keeps everything else as decimal.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleNumberTypeMappingTests
     {
         [DataTestMethod]

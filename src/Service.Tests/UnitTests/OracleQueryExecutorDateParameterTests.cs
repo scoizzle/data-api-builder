@@ -21,7 +21,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// Unit tests for the Oracle-specific date/time parameter conversion performed by
     /// <see cref="OracleQueryExecutor.PopulateDbTypeForParameter"/>.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryExecutorDateParameterTests
     {
         /// <summary>

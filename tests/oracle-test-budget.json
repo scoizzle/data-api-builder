@@ -1,0 +1,5 @@
+{
+  "description": "Skip/execution budget for the live Oracle suite (TestCategory=Oracle), enforced by scripts/check-test-budget.ps1. Ratchet maxSkipped down and minExecuted up as skipped tests are fixed; never raise maxSkipped. Initial values are provisional until the first green run of .pipelines/oracle-pipelines.yml pins the real split.",
+  "maxSkipped": 141,
+  "minExecuted": 400
+}

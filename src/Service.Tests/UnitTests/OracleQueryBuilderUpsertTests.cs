@@ -53,7 +53,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// REF CURSOR result set carrying the ___upsert_op___ indicator.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertUpdateBranchContainsWhereClauseScopedByPrimaryKeyAndPolicy()
         {
             // Arrange
@@ -110,7 +109,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// and that a create database policy guards the VALUES via a DUAL filter.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertContainsInsertBranchWithCreatePolicyGuard()
         {
             // Arrange
@@ -161,7 +159,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// when the policy blocks — surfacing 403 rather than ORA-01400 (400).
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleInsertWithCreatePolicyGatesOnPolicyAndOpensEmptyCursorWhenBlocked()
         {
             // Arrange
@@ -268,7 +265,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleInsertCreatePolicyProbeUsesDedupedColumns()
         {
             const string createDbPolicy = "(publisher_id != 0)";
@@ -365,7 +361,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// ('missing' indicator, 404) via a primary-key existence probe.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertFallbackToUpdateHasNoInsertBranch()
         {
             // Arrange
@@ -402,7 +397,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// behavior of the other database engines.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpdateOpensEmptyCursorWhenNoRowMatched()
         {
             // Arrange
@@ -514,7 +508,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// that the REF CURSOR result bind is registered with the correct Oracle type.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOutputBindRegistrarUsesTypedOutputParameters()
         {
             OracleCommand command = new();
@@ -536,7 +529,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// RAW output binds need an explicit size. BLOB must not be registered as RAW.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOutputBindRegistrarSetsRawSizeAndBlobType()
         {
             OracleCommand command = new();

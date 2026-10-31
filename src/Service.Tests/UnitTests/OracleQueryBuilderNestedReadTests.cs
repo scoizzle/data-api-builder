@@ -23,7 +23,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// The integration suite verifies result equivalence; these tests pin the generated SQL
     /// shape so a silent fallback back to correlated LATERALs is caught.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryBuilderNestedReadTests
     {
         [TestMethod]

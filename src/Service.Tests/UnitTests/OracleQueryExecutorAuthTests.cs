@@ -25,7 +25,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// connection string, and passwordless-looking wallet / external-auth descriptors must never
     /// be converted to token authentication.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryExecutorAuthTests
     {
         private const string PASSWORDLESS = "User Id=app;Pooling=false;Data Source=localhost:1521/svc";
