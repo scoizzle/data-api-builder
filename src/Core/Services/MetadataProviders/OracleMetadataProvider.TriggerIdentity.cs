@@ -134,22 +134,49 @@ namespace Azure.DataApiBuilder.Core.Services
             }
         }
 
-        private static bool TryGetTriggerColumn(
+        /// <summary>
+        /// Matches a trigger column to the catalog spelling. The column dictionary ignores case,
+        /// so this walks the keys. A quoted reference (<c>:new."Id"</c>) matches <c>Id</c> only.
+        /// An unquoted reference is folded to uppercase, which is the catalog spelling of an
+        /// unquoted column, and does not attach to a quoted column of another case.
+        /// </summary>
+        internal static bool TryGetTriggerColumn(
             SourceDefinition sourceDefinition,
             string columnName,
             out ColumnDefinition? columnDefinition)
         {
-            if (sourceDefinition.Columns.TryGetValue(columnName.ToUpperInvariant(), out columnDefinition))
+            if (TryMatchColumnOrdinal(sourceDefinition, columnName, out columnDefinition))
             {
                 return true;
             }
 
-            if (sourceDefinition.Columns.TryGetValue(columnName.ToLowerInvariant(), out columnDefinition))
+            string folded = columnName.ToUpperInvariant();
+            if (!string.Equals(folded, columnName, StringComparison.Ordinal)
+                && TryMatchColumnOrdinal(sourceDefinition, folded, out columnDefinition))
             {
                 return true;
             }
 
-            return sourceDefinition.Columns.TryGetValue(columnName, out columnDefinition);
+            columnDefinition = null;
+            return false;
+        }
+
+        private static bool TryMatchColumnOrdinal(
+            SourceDefinition sourceDefinition,
+            string columnName,
+            out ColumnDefinition? columnDefinition)
+        {
+            foreach (KeyValuePair<string, ColumnDefinition> entry in sourceDefinition.Columns)
+            {
+                if (string.Equals(entry.Key, columnName, StringComparison.Ordinal))
+                {
+                    columnDefinition = entry.Value;
+                    return true;
+                }
+            }
+
+            columnDefinition = null;
+            return false;
         }
 
         /// <summary>

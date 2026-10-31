@@ -53,6 +53,12 @@ begin
       when others then
          dbms_output.put_line(SQLERRM);
    end;
+   begin
+      execute immediate q'[DROP SYNONYM "CustomersSyn"]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
 
 
     -- Drop procedures
@@ -177,6 +183,12 @@ begin
    end;
    begin
       execute immediate q'[DROP TABLE books CASCADE CONSTRAINTS]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[DROP TABLE "Customers" CASCADE CONSTRAINTS]';
    exception
       when others then
          dbms_output.put_line(SQLERRM);
@@ -2985,4 +2997,12 @@ END dab_overload_pkg;]';
         COMMIT;
     END touch_item;
 END dab_overload_pkg;]';
+
+    -- Quoted mixed-case table and synonym. These statements are not swallowed.
+   execute immediate q'[CREATE TABLE "Customers"(
+        "Id" NUMBER PRIMARY KEY,
+        "Name" VARCHAR2(50)
+     )]';
+   execute immediate q'[INSERT INTO "Customers"("Id", "Name") VALUES (1, 'Ada')]';
+   execute immediate q'[CREATE SYNONYM "CustomersSyn" FOR "Customers"]';
 end;

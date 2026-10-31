@@ -25,5 +25,29 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "RefCons.OWNER IN (:schemaName0)");
             StringAssert.Contains(query, "RefCons.TABLE_NAME IN (:tableName0, :tableName1, :tableName2)");
         }
+
+        [TestMethod]
+        public void QuoteRelationEmitsStoredSpelling()
+        {
+            OracleQueryBuilder builder = new();
+
+            Assert.AreEqual("\"Hr\".\"Customers\"", builder.QuoteRelation("Hr", "Customers"));
+            Assert.AreEqual("\"TABLE0\"", builder.QuoteTableAlias("table0"));
+        }
+
+        [TestMethod]
+        public void UnquotedUppercaseRelationUnchanged()
+        {
+            Assert.AreEqual("\"SYSTEM\".\"BOOKS\"", new OracleQueryBuilder().QuoteRelation("SYSTEM", "BOOKS"));
+        }
+
+        [TestMethod]
+        public void CatalogBindKeepsStoredSpelling()
+        {
+            OracleQueryBuilder builder = new();
+
+            Assert.AreEqual("Customers", builder.QuoteTableNameAsDBConnectionParam("Customers"));
+            Assert.AreEqual("BOOKS", builder.QuoteTableNameAsDBConnectionParam("BOOKS"));
+        }
     }
 }

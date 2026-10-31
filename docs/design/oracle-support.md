@@ -165,7 +165,7 @@ Resolution (Oracle’s own order):
 
 Autoentity discovery stays on `ALL_TABLES`. Synonym sources are opt-in via entity config.
 
-No change to `QuoteRelation` / shared SQL: after resolve, emit the base catalog names.
+After resolve, `QuoteRelation` emits the base catalog names. A quoted base object keeps the spelling `ALL_SYNONYMS` returned.
 
 ## Identifier casing
 
@@ -173,7 +173,10 @@ Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every 
 
 - Backing names on `SourceDefinition` (columns, primary key, FK column lists) are the catalog spelling: `ID`, `BOOK_ID`, or the exact spelling of a quoted identifier.
 - Exposed names are the name **as provided to the engine**: the entity config mapping / field alias verbatim when one is configured, otherwise the catalog spelling of the column. Unmapped unquoted columns therefore surface as `ID` / `BOOK_ID`, and quoted columns keep their exact catalog spelling (e.g. `"ID Number"`). There is no lowercase fallback.
-- Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject` (uppercase, quoted). DAB-generated aliases go through `QuoteTableAlias`. Quoted mixed-case *tables* are not covered yet.
+- Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject`, which emit the stored catalog spelling. DAB-generated aliases go through `QuoteTableAlias` and stay uppercase.
+- Quoted identifiers are supported. In config, wrap a part in double quotes (`"Hr"."Customers"`, or `"Sch.ema"."Tab.le"` when the name contains a dot). `""` inside quotes is one quote character. An unquoted part is folded to uppercase once, at parse, and that spelling is what catalog lookups and SQL use. `[brackets]` remain only a way to escape `.` or `]` in an unquoted name; the text inside still folds, and a token starts with either `"` or `[` (they do not nest). `User Id=hr` resolves to schema `HR`. `User Id="Hr"` keeps `Hr`. `SELECT USER` is already the catalog spelling and is used as returned.
+- A quoted object that is missing fails startup with `Could not resolve Oracle object "Hr"."Customers"`, naming that spelling. Two columns that differ only by case (`"DATA"` and `"data"`) fail startup, because the column map is case-insensitive. Two relations that differ only by case are also rejected: `DatabaseObject` equality ignores case, so a quoted table and its uppercase twin would otherwise be treated as one object. GraphQL still cannot expose a name that fails its identifier rules (for example a space); those columns stay REST-only.
+- Autoentity sources are built from the catalog spelling. A mixed-case or otherwise quoted name is emitted with quotes (`HR."Customers"`) so the next parse does not fold it. An ordinary uppercase name stays bare (`SYSTEM.BOOKS`). Linking sources keep the authored string and go through the same parser.
 - The Oracle test config supplies explicit lowercase mappings for the columns the shared API suite expects (e.g. `publisher_id`, `categoryid`) so the shared contract is preserved; entities injected by the test harness (`magazine`, `bar_magazine`) get the same mappings in `TestHelper.AddMissingEntitiesToConfig`.
 - Permission `include`/`exclude` entries may be authored with the exposed name (field alias, field name, or mapping value) or the column name in any case. At metadata load they are rewritten to the backing (catalog) spelling, because authorization subtracts excluded from included in backing space; `*` is kept as is. `@item.` tokens in database policies stay in exposed spelling (the OData model is built from exposed names). A permission entry that matches no column of a table entity fails startup (`ErrorInInitialization`) instead of silently leaving the column readable; stored procedure and view entities are not checked.
 

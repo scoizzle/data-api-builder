@@ -72,11 +72,33 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             bool inBracket = false;
+            bool inQuote = false;
             int hash = -1;
             for (int i = 0; i < source.Length; i++)
             {
                 char c = source[i];
-                if (c == '[')
+                if (inQuote)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < source.Length && source[i + 1] == '"')
+                        {
+                            i++;
+                        }
+                        else
+                        {
+                            inQuote = false;
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inQuote = true;
+                }
+                else if (c == '[')
                 {
                     inBracket = true;
                 }
@@ -384,8 +406,9 @@ namespace Azure.DataApiBuilder.Core.Services
 
         /// <summary>
         /// Splits <c>schema.package.subprogram</c> into the package name and the
-        /// <c>schema.subprogram</c> remainder the shared two-token parser accepts.
-        /// Standalone sources are returned unchanged.
+        /// <c>schema.subprogram</c> remainder the table parser accepts.
+        /// Dots inside <c>"..."</c> or <c>[...]</c> are part of the token. The package
+        /// name is already the catalog spelling. Standalone sources are returned unchanged.
         /// </summary>
         private static (string? packageName, string subprogramSource) SplitOraclePackageQualifier(string source)
         {
@@ -394,76 +417,14 @@ namespace Azure.DataApiBuilder.Core.Services
                 return (null, source);
             }
 
-            int firstDot = -1;
-            int secondDot = -1;
-            bool inBracket = false;
-            for (int i = 0; i < source.Length; i++)
-            {
-                char c = source[i];
-                if (c == '[')
-                {
-                    inBracket = true;
-                }
-                else if (c == ']')
-                {
-                    inBracket = false;
-                }
-                else if (c == '.' && !inBracket)
-                {
-                    if (firstDot == -1)
-                    {
-                        firstDot = i;
-                    }
-                    else if (secondDot == -1)
-                    {
-                        secondDot = i;
-                        break;
-                    }
-                }
-            }
-
-            if (secondDot == -1)
+            OracleParsedSource parsed = OracleSourceNames.Parse(source);
+            if (parsed.Package is null)
             {
                 return (null, source);
             }
 
-            bool hasFourthToken = false;
-            bool nestedBracket = false;
-            for (int i = secondDot + 1; i < source.Length; i++)
-            {
-                char c = source[i];
-                if (c == '[')
-                {
-                    nestedBracket = true;
-                }
-                else if (c == ']')
-                {
-                    nestedBracket = false;
-                }
-                else if (c == '.' && !nestedBracket)
-                {
-                    hasFourthToken = true;
-                    break;
-                }
-            }
-
-            if (hasFourthToken)
-            {
-                throw new DataApiBuilderException(
-                    message: $"Invalid Oracle stored procedure source: \"{source}\". Expected " +
-                             "\"schema.subprogram\" (standalone) or \"schema.package.subprogram\" (packaged).",
-                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
-                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
-            }
-
-            string packagePart = source[(firstDot + 1)..secondDot].Replace("[[", "[").Replace("]]", "]");
-            if (packagePart.StartsWith('[') && packagePart.EndsWith(']') && packagePart.Length >= 2)
-            {
-                packagePart = packagePart[1..^1];
-            }
-
-            string subprogramPart = source[..firstDot] + "." + source[(secondDot + 1)..];
-            return (packagePart, subprogramPart);
+            string schemaToken = parsed.Schema is null ? string.Empty : OracleSourceNames.Emit(parsed.Schema) + ".";
+            return (parsed.Package, schemaToken + OracleSourceNames.Emit(parsed.Name));
         }
     }
 }

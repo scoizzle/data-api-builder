@@ -166,6 +166,53 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(exception.Message, "circular");
         }
 
+        [TestMethod]
+        public async Task QuotedMixedCaseObjectResolvesExactly()
+        {
+            Dictionary<(string, string), string> types = new()
+            {
+                [("Hr", "Customers")] = "TABLE"
+            };
+
+            (string schema, string name) = await Resolve("Hr", "Customers", allowPublicFallback: false, types, new());
+
+            Assert.AreEqual("Hr", schema);
+            Assert.AreEqual("Customers", name);
+        }
+
+        [TestMethod]
+        public async Task QuotedNameDoesNotFallBackToUppercase()
+        {
+            Dictionary<(string, string), string> types = new()
+            {
+                [("HR", "CUSTOMERS")] = "TABLE"
+            };
+
+            DataApiBuilderException exception = await Assert.ThrowsExceptionAsync<DataApiBuilderException>(
+                () => Resolve("Hr", "Customers", allowPublicFallback: false, types, new()));
+
+            StringAssert.Contains(exception.Message, "\"Hr\".\"Customers\"");
+        }
+
+        [TestMethod]
+        public async Task SynonymToQuotedObjectPreservesSpelling()
+        {
+            Dictionary<(string, string), string> types = new()
+            {
+                [("SYSTEM", "CUSTOMERS_SYN")] = "SYNONYM",
+                [("Hr", "Customers")] = "TABLE"
+            };
+            Dictionary<(string, string), OracleCatalogNameResolver.SynonymRow> synonyms = new()
+            {
+                [("SYSTEM", "CUSTOMERS_SYN")] = new("SYSTEM", "CUSTOMERS_SYN", "Hr", "Customers", DbLink: null)
+            };
+
+            (string schema, string name) = await Resolve("SYSTEM", "CUSTOMERS_SYN", allowPublicFallback: true, types, synonyms);
+
+            Assert.AreEqual("Hr", schema);
+            Assert.AreEqual("Customers", name);
+        }
+
         private static Task<(string Schema, string Name)> Resolve(
             string schema,
             string name,

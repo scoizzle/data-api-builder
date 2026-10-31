@@ -4367,6 +4367,66 @@
           ]
         }
       ]
+    },
+    "QuotedCustomer": {
+      "source": {
+        "object": "\"Customers\"",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "QuotedCustomer",
+          "plural": "quotedCustomers"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "Id": "id",
+        "Name": "name"
+      }
+    },
+    "QuotedCustomerViaSynonym": {
+      "source": {
+        "object": "\"CustomersSyn\"",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "QuotedCustomerViaSynonym",
+          "plural": "quotedCustomersViaSynonym"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "Id": "id",
+        "Name": "name"
+      }
     }
   }
 }
