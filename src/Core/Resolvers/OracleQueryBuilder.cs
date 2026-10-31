@@ -60,6 +60,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             "(?<!\\.)\"(?:[^\"]|\"\")*\"(?!\\s*\\.)",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+        // The parameter name is atomic. A greedy [\w\d]+ with only a "not already ESCAPE"
+        // lookahead gives the last character back and matches LIKE @param1 inside LIKE @param10
+        // ESCAPE '\', which emits a second ESCAPE and ORA-00933. NOT LIKE matches too, because
+        // the clause still contains LIKE.
+        private static readonly Regex LikeParameterClause = new(
+            @"(LIKE\s+@(?>[\w\d]+))(?![\w\d])(?!\s+ESCAPE\b)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
         private static DbCommandBuilder _builder = new OracleCommandBuilder();
 
         /// <inheritdoc />
@@ -191,8 +199,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private static string AddEscapeToLikeClauses(string predicate)
         {
             const string escapeClause = $" ESCAPE '{ORACLE_ESCAPE_CHAR}'";
-            // Regex to find LIKE clauses and append ESCAPE
-            return Regex.Replace(predicate, @"(LIKE\s+@[\w\d]+)", $"$1{escapeClause}", RegexOptions.IgnoreCase);
+            return LikeParameterClause.Replace(predicate, $"$1{escapeClause}");
         }
 
         /// <summary>
@@ -209,6 +216,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string predicates = new(JoinPredicateStrings(
                        QualifiedReadPolicy(structure),
                        Build(structure.Predicates)));
+            // Callers embed this text and run AddEscapeToLikeClauses again. The regex is
+            // idempotent so the second pass does not append a second ESCAPE clause.
+            predicates = AddEscapeToLikeClauses(predicates);
 
             string query = $"SELECT 1 " +
                    $"FROM {QuoteRelation(structure.DatabaseObject.SchemaName, structure.DatabaseObject.Name)} " +
@@ -268,6 +278,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             string orderAlias = QuoteIdentifier("__dab_ord");
 
             StringBuilder result = new();
+            // JSON_OBJECT(*) cannot mark one column FORMAT JSON. A nested relationship column is
+            // JSON text (a CLOB/VARCHAR2 document). Without FORMAT JSON, Oracle quotes it as a
+            // string. Flat queries have no such column and keep the wildcard form.
+            string jsonObjectCall = StructureHasNestedJson(structure)
+                ? BuildExplicitJsonObject(structure)
+                : "JSON_OBJECT(* RETURNING CLOB)";
             if (structure.IsListQuery)
             {
                 // JSON_ARRAYAGG is unordered unless ORDER BY is given. ROWNUM is captured after
@@ -276,7 +292,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // ORDER BY before RETURNING: "FORMAT JSON RETURNING CLOB ORDER BY" raises ORA-02000.
                 result.Append($"SELECT COALESCE(JSON_ARRAYAGG({jsonDocAlias} FORMAT JSON ORDER BY {orderAlias} RETURNING CLOB), TO_CLOB(JSON_ARRAY())) ");
                 result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
-                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
+                result.Append($"SELECT {jsonObjectCall} AS {jsonDocAlias}, ROWNUM AS {orderAlias} FROM ( ");
                 result.Append(query);
                 result.Append($" ) ) {subqueryName}");
             }
@@ -284,7 +300,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 // RETURNING CLOB must sit inside JSON_OBJECT(...) (outside the parens is ORA-00923)
                 // to lift the VARCHAR2 4000-byte cap. TO_CLOB(JSON_OBJECT(*)) does not.
-                result.Append($"SELECT JSON_OBJECT(* RETURNING CLOB) ");
+                result.Append($"SELECT {jsonObjectCall} ");
                 result.Append($"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} FROM ( ");
                 result.Append(query);
                 result.Append($" ) {subqueryName}");
@@ -340,6 +356,40 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             /// <summary>Predicate override the final (root) query must use, when any.</summary>
             public List<Predicate>? RootPredicatesOverride { get; set; }
+
+            /// <summary>Next <c>dab_restrict_N</c> alias for a depth-2+ key join.</summary>
+            public int NextRestrictId { get; set; }
+
+            /// <summary>Disambiguator used when two rows CTEs would otherwise share a name.</summary>
+            public int NextRowsCteId { get; set; }
+
+            /// <summary>Hoisted ranked-row CTE names already registered in this query.</summary>
+            public HashSet<string> RowsCteNames { get; } = new(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// Parent-key source that bounds one relationship aggregate. The root source is
+        /// <c>dab_page_cte</c> (no rank column; the page FETCH already applied the limit).
+        /// A deeper source is a parent's materialized rows CTE, and <see cref="HasRank"/>
+        /// adds <c>WHERE "rn" &lt;= RankLimit</c> so the DISTINCT list is the parent's top-N keys.
+        /// Each child projects only its own correlation columns from <see cref="FromClause"/>.
+        /// </summary>
+        private sealed class KeyRestriction
+        {
+            /// <summary>Quoted CTE name the DISTINCT key set is read from.</summary>
+            public required string FromClause { get; init; }
+
+            /// <summary>Parent correlation expression (<c>Build(column)</c>) to the source column alias.</summary>
+            public required Dictionary<string, string> AliasByParentExpression { get; init; }
+
+            /// <summary>True when <see cref="FromClause"/> has an <c>"rn"</c> column.</summary>
+            public bool HasRank { get; init; }
+
+            /// <summary>Per-parent top-N. Used only when <see cref="HasRank"/> is true.</summary>
+            public int RankLimit { get; init; }
+
+            /// <summary><c>dab_page</c> for the root page, so depth-1 SQL stays byte-identical. Null allocates <c>dab_restrict_N</c>.</summary>
+            public string? FixedJoinAlias { get; init; }
         }
 
         /// <summary>
@@ -393,8 +443,29 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // this builder emits them. Flattening stays off while either string is present, so a
             // sibling table is not added to a row source whose predicate was written for one table.
             bool allowFlatten = context is not null && !HasUnqualifiedPredicates(structure);
-            AddRelationshipJoins(structure, context, applyPageRestriction: isRoot, allowFlatten, ref fromSql);
+            AddRelationshipJoins(structure, context, KeyRestrictionForRoot(context, isRoot), allowFlatten, ref fromSql);
             return fromSql;
+        }
+
+        /// <summary>
+        /// Root relationships read the page CTE. There is no rank column: the page CTE's FETCH
+        /// already kept one page. A missing page CTE leaves every relationship unrestricted.
+        /// </summary>
+        private KeyRestriction? KeyRestrictionForRoot(OracleBuildContext? context, bool isRoot)
+        {
+            if (!isRoot || context?.PageCteName is null)
+            {
+                return null;
+            }
+
+            return new KeyRestriction
+            {
+                FromClause = QuoteIdentifier(context.PageCteName),
+                AliasByParentExpression = context.PageColumnAliasByExpression,
+                HasRank = false,
+                RankLimit = 0,
+                FixedJoinAlias = PageJoinAlias
+            };
         }
 
         /// <summary>
@@ -417,7 +488,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private void AddRelationshipJoins(
             SqlQueryStructure parent,
             OracleBuildContext? context,
-            bool applyPageRestriction,
+            KeyRestriction? keyRestriction,
             bool allowFlatten,
             ref string fromSql)
         {
@@ -439,7 +510,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                     if (IsCteEligible(child))
                     {
-                        string? pageJoin = applyPageRestriction ? BuildPageJoin(correlationKeys, context) : null;
+                        string? pageJoin = keyRestriction is null
+                            ? null
+                            : BuildPageJoin(correlationKeys, keyRestriction, context);
                         if (TryBuildChildCte(joinQuery.Key, child, correlationKeys, correlationPredicates,
                                 context, pageJoin, out string cteName,
                                 out List<(string KeyAlias, string ParentExpression)> joinKeys))
@@ -483,8 +556,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                $"{QuoteTableAlias(child.SourceAlias)}{Build(child.Joins)}";
             fromSql += $" LEFT OUTER JOIN {childFrom} ON ({BuildStructurePredicates(child)})";
 
-            // The child's own relationships must be joined before its JSON object is built.
-            AddRelationshipJoins(child, context, applyPageRestriction: false, allowFlatten, ref fromSql);
+            // Scope cut: a flattened to-one does not export its row source, so its descendants
+            // stay on the unbounded aggregate. Descendant-aware flattening is a follow-up.
+            AddRelationshipJoins(child, context, keyRestriction: null, allowFlatten, ref fromSql);
 
             // An outer join with no matching child leaves every child column NULL, and building
             // JSON_OBJECT unconditionally would emit an all-null object instead of JSON null.
@@ -588,8 +662,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         private void EnsurePageCte(SqlQueryStructure root, OracleBuildContext context)
         {
+            // Multiple-create follow-ups used to return here, so even a depth-1 child aggregate
+            // scanned the whole child table. Limit() is the final-query cap (default page size
+            // for a list, 1 for a single object) and is not null, so the same FETCH bounds the
+            // page CTE and the final query.
             if (context.PageCteName is not null
-                || root.IsMultipleCreateOperation
                 || root.GroupByMetadata.Fields.Count > 0
                 || root.OrderByColumns.Count == 0
                 || root.Limit() is null)
@@ -837,18 +914,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         private string? BuildPageJoin(
             List<(Column Parent, Column Child)> correlationKeys,
+            KeyRestriction restriction,
             OracleBuildContext context)
         {
-            if (context.PageCteName is null)
-            {
-                return null;
-            }
-
             List<string> pageColumns = new();
-            List<string> conditions = new();
+            List<(string PageColumn, string ChildExpression)> pairs = new();
             foreach ((Column parent, Column child) in correlationKeys)
             {
-                if (!context.PageColumnAliasByExpression.TryGetValue(Build(parent), out string? pageColumnAlias))
+                if (!restriction.AliasByParentExpression.TryGetValue(Build(parent), out string? pageColumnAlias))
                 {
                     return null;
                 }
@@ -858,12 +931,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     pageColumns.Add(pageColumnAlias);
                 }
 
-                conditions.Add($"{QuoteIdentifier(PageJoinAlias)}.{QuoteIdentifier(pageColumnAlias)} = {Build(child)}");
+                pairs.Add((pageColumnAlias, Build(child)));
             }
 
-            return $" INNER JOIN (SELECT DISTINCT {string.Join(", ", pageColumns.Select(QuoteIdentifier))} " +
-                   $"FROM {QuoteIdentifier(context.PageCteName)}) {QuoteIdentifier(PageJoinAlias)} " +
-                   $"ON ({string.Join(" AND ", conditions)})";
+            string joinAlias = restriction.FixedJoinAlias
+                ?? $"dab_restrict_{context.NextRestrictId++}";
+            string quotedJoin = QuoteIdentifier(joinAlias);
+            string whereSql = restriction.HasRank
+                ? $" WHERE \"rn\" <= {restriction.RankLimit.ToString(CultureInfo.InvariantCulture)}"
+                : string.Empty;
+            string sourceSql = $"SELECT DISTINCT {string.Join(", ", pageColumns.Select(QuoteIdentifier))} " +
+                               $"FROM {restriction.FromClause}{whereSql}";
+            string conditions = string.Join(" AND ", pairs.Select(
+                pair => $"{quotedJoin}.{QuoteIdentifier(pair.PageColumn)} = {pair.ChildExpression}"));
+            return $" INNER JOIN ({sourceSql}) {quotedJoin} ON ({conditions})";
         }
 
         /// <summary>
@@ -1006,11 +1087,36 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // table. The child's own predicates were already applied inside the ranking block.
             // Keys and the rank are qualified with the child alias because descendant CTE joins
             // share the FROM and expose key columns of their own.
-            string rankedFrom = $"( {coreSelect} FROM {baseFrom} WHERE {predicates} ) {childAlias}";
-            AddRelationshipJoins(child, context, applyPageRestriction: false, allowFlatten: true, ref rankedFrom);
+            // Hoist only when this child is itself page-restricted and has descendants. The rows
+            // CTE references dab_page_cte (or another rows CTE), which is the ORA-32036 inlining
+            // case, so MATERIALIZE is required. Unrestricted queries and depth-1 children keep
+            // the inline subquery, byte for byte. Associative children never reach here.
+            string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
+            string rankedFrom;
+            if (pageJoin is not null && child.JoinQueries.Count > 0)
+            {
+                string rowsCteName = AllocateRowsCteName(context, child.SourceAlias);
+                string selectList = coreSelect.Substring("SELECT ".Length);
+                context.Ctes.Add($"{QuoteIdentifier(rowsCteName)} AS ( SELECT /*+ MATERIALIZE */ " +
+                                 $"{selectList} FROM {baseFrom} WHERE {predicates} )");
+                rankedFrom = $"{QuoteIdentifier(rowsCteName)} {childAlias}";
+                KeyRestriction descendantRestriction = new()
+                {
+                    FromClause = QuoteIdentifier(rowsCteName),
+                    AliasByParentExpression = BuildRowsCteKeyAliases(child),
+                    HasRank = !skipRanking,
+                    RankLimit = int.Parse(rowLimit, CultureInfo.InvariantCulture),
+                    FixedJoinAlias = null
+                };
+                AddRelationshipJoins(child, context, descendantRestriction, allowFlatten: true, ref rankedFrom);
+            }
+            else
+            {
+                rankedFrom = $"( {coreSelect} FROM {baseFrom} WHERE {predicates} ) {childAlias}";
+                AddRelationshipJoins(child, context, keyRestriction: null, allowFlatten: true, ref rankedFrom);
+            }
 
             string jsonObject = BuildJsonObjectExpression(child, context);
-            string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
             string qualifiedKeys = string.Join(", ", keyAliases.Select(
                 keyAlias => $"{childAlias}.{QuoteIdentifier(keyAlias)}"));
             // Oracle binds AS to the last select item only. "k0", "k1" AS "k0", "k1"
@@ -1031,8 +1137,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             // JSON is built only for rows that survived the per-parent top-N filter.
+            // FORMAT JSON matches the root JSON_ARRAYAGG: json_doc is an object, not text.
             return $"SELECT {keyList}, " +
-                   $"COALESCE(JSON_ARRAYAGG(json_doc ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
+                   $"COALESCE(JSON_ARRAYAGG(json_doc FORMAT JSON ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
                    $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
                    $"FROM ( SELECT {jsonObject} AS json_doc, {qualifiedKeySelect}, " +
                    $"{childAlias}.\"rn\" AS \"rn\" FROM {rankedFrom} " +
@@ -1081,8 +1188,61 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Column aliases a hoisted rows CTE exposes for descendant correlation. SELECT DISTINCT
+        /// in the key restriction uses these scalar aliases and never <c>*</c> (ORA-00932 on CLOB).
+        /// </summary>
+        private Dictionary<string, string> BuildRowsCteKeyAliases(SqlQueryStructure child)
+        {
+            Dictionary<string, string> aliases = new(StringComparer.Ordinal);
+            foreach (LabelledColumn column in child.Columns)
+            {
+                if (column.ColumnName != SqlQueryStructure.DATA_IDENT)
+                {
+                    aliases[Build(column as Column)] = column.ColumnName;
+                }
+            }
+
+            foreach (SqlQueryStructure descendant in child.JoinQueries.Values)
+            {
+                if (!TryGetCorrelationKeys(descendant, child.SourceAlias,
+                        out List<(Column Parent, Column Child)> correlationKeys,
+                        out _))
+                {
+                    continue;
+                }
+
+                foreach ((Column parent, Column _) in correlationKeys)
+                {
+                    aliases[Build(parent)] = parent.ColumnName;
+                }
+            }
+
+            return aliases;
+        }
+
+        private static string AllocateRowsCteName(OracleBuildContext context, string sourceAlias)
+        {
+            string name = $"{sourceAlias}_rows_cte";
+            if (context.RowsCteNames.Add(name))
+            {
+                return name;
+            }
+
+            string unique;
+            do
+            {
+                unique = $"{sourceAlias}_rows_cte_{context.NextRowsCteId++}";
+            }
+            while (!context.RowsCteNames.Add(unique));
+
+            return unique;
+        }
+
+        /// <summary>
         /// Single-block form used for associative children: all relationship joins participate in
-        /// the ranking block, and JSON is aggregated over the top-N rows.
+        /// the ranking block, and JSON is aggregated over the top-N rows. Descendants of an
+        /// associative child stay unbounded. The link-table row source is not hoisted, because
+        /// its joins can expose duplicate column names that a rows CTE cannot carry.
         /// </summary>
         private string BuildJoinedChildCteSql(
             SqlQueryStructure child,
@@ -1126,7 +1286,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (child.IsListQuery)
             {
                 return $"SELECT {keyList}, " +
-                       $"COALESCE(JSON_ARRAYAGG({jsonObject} ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
+                       $"COALESCE(JSON_ARRAYAGG({jsonObject} FORMAT JSON ORDER BY \"rn\" RETURNING CLOB), TO_CLOB(JSON_ARRAY())) " +
                        $"AS {QuoteIdentifier(SqlQueryStructure.DATA_IDENT)} " +
                        $"FROM ( {ranked} ) WHERE \"rn\" <= {rowLimit} GROUP BY {keyList}";
             }
@@ -1145,10 +1305,53 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> fields = new();
             foreach (LabelledColumn column in structure.Columns)
             {
-                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {QuoteIdentifier(column.Label)}");
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {FormatJsonColumn(column, QuoteIdentifier(column.Label))}");
             }
 
             return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL{BuildJsonReturningClause(structure, context)})";
+        }
+
+        /// <summary>
+        /// Root JSON document when the select list contains a nested relationship column.
+        /// References the select aliases (not base-table columns) and marks only those nested
+        /// values <c>FORMAT JSON</c>. Returning CLOB matches the previous <c>JSON_OBJECT(*)</c>
+        /// wrapper. Aggregation aliases follow the columns, in select-list order.
+        /// </summary>
+        private string BuildExplicitJsonObject(SqlQueryStructure structure)
+        {
+            List<string> fields = new();
+            foreach (LabelledColumn column in structure.Columns)
+            {
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {FormatJsonColumn(column, QuoteIdentifier(column.Label))}");
+            }
+
+            if (structure.GroupByMetadata is not null)
+            {
+                foreach (AggregationOperation aggregation in structure.GroupByMetadata.Aggregations)
+                {
+                    string alias = QuoteIdentifier(aggregation.Column.OperationAlias);
+                    fields.Add($"{QuoteJsonKey(aggregation.Column.OperationAlias)} VALUE {alias}");
+                }
+            }
+
+            return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL RETURNING CLOB)";
+        }
+
+        private static bool StructureHasNestedJson(SqlQueryStructure structure)
+        {
+            return structure.Columns.Any(column => column.ColumnName == SqlQueryStructure.DATA_IDENT);
+        }
+
+        /// <summary>
+        /// A nested relationship column holds JSON text produced by this builder. FORMAT JSON
+        /// tells Oracle to embed it. The same marker is safe on COALESCE(..., TO_CLOB(JSON_ARRAY()))
+        /// and on CASE ... ELSE NULL, because every non-null result is JSON we generated.
+        /// </summary>
+        private static string FormatJsonColumn(LabelledColumn column, string expression)
+        {
+            return column.ColumnName == SqlQueryStructure.DATA_IDENT
+                ? $"{expression} FORMAT JSON"
+                : expression;
         }
 
         /// <summary>
@@ -1272,7 +1475,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             List<string> fields = new();
             foreach (LabelledColumn column in structure.Columns)
             {
-                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {BuildColumnValue(structure, column, context)}");
+                fields.Add($"{QuoteJsonKey(column.Label)} VALUE {FormatJsonColumn(column, BuildColumnValue(structure, column, context))}");
             }
 
             return $"JSON_OBJECT({string.Join(", ", fields)} NULL ON NULL{BuildJsonReturningClause(structure, context)})";
