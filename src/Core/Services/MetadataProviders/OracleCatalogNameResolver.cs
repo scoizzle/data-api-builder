@@ -36,8 +36,10 @@ namespace Azure.DataApiBuilder.Core.Services
             Func<string, string, Task<string?>> getObjectType,
             Func<string, string, Task<SynonymRow?>> getSynonym)
         {
-            string currentOwner = schema.ToUpperInvariant();
-            string currentName = name.ToUpperInvariant();
+            // Callers fold unquoted names once, at parse. Quoted names arrive with their
+            // catalog spelling. Uppercasing here would look up "Customers" as CUSTOMERS.
+            string currentOwner = schema;
+            string currentName = name;
             HashSet<(string Owner, string Name)> visited = new();
             bool triedPublicFallback = false;
 
@@ -63,8 +65,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 if (synonym is SynonymRow row)
                 {
                     FollowSynonym(row);
-                    currentOwner = row.TableOwner.ToUpperInvariant();
-                    currentName = row.TableName.ToUpperInvariant();
+                    // ALL_SYNONYMS stores the base object's catalog spelling, including
+                    // the exact case of a quoted identifier.
+                    currentOwner = row.TableOwner;
+                    currentName = row.TableName;
                     allowPublicFallback = false;
                     continue;
                 }
@@ -79,7 +83,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
 
                 throw new DataApiBuilderException(
-                    message: $"Could not resolve Oracle object {schema}.{name} to a local table, view, or subprogram.",
+                    message: $"Could not resolve Oracle object \"{schema}\".\"{name}\" to a local table, view, or subprogram.",
                     statusCode: HttpStatusCode.ServiceUnavailable,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
             }

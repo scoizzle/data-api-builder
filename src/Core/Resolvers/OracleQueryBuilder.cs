@@ -69,12 +69,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Unquoted catalog objects (schema, table, package, procedure) are stored UPPERCASE.
-        /// Always quoted here, so they must be emitted UPPERCASE.
+        /// Quotes a catalog name that is already the stored spelling. Unquoted identifiers were
+        /// folded to uppercase at parse time. A quoted identifier is stored exactly and must
+        /// be emitted that way. This method does not fold.
         /// </summary>
         private string QuoteCatalogObject(string objectName)
         {
-            return QuoteIdentifier(objectName.ToUpperInvariant());
+            return QuoteIdentifier(objectName);
         }
 
         /// <summary>
@@ -97,7 +98,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         public string QuoteTableAlias(string alias)
         {
-            return QuoteCatalogObject(alias);
+            return QuoteIdentifier(alias.ToUpperInvariant());
         }
 
         /// <summary>
@@ -199,8 +200,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// relationship (e.g. <c>characters(filter: { actor: { name: { eq: ... } } })</c>). The base
         /// emits <c>FROM schema.table AS "alias"</c> which Oracle rejects: the AS keyword is not
         /// accepted for table aliases (ORA-00907/ORA-02000) and quoted identifiers are
-        /// case-sensitive, so the alias and table/schema names must be emitted UPPERCASE to match
-        /// the references produced by <see cref="Build(Column)"/>.
+        /// case-sensitive. Aliases are emitted uppercase. Schema and table names are the
+        /// stored catalog spelling, which is uppercase only when the source was unquoted.
         /// </summary>
         /// <inheritdoc />
         public override string Build(BaseSqlQueryStructure structure)
@@ -2038,9 +2039,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ALL_CONSTRAINTS contains constraint information (CONSTRAINT_TYPE = 'R' for foreign keys)
             // ALL_CONS_COLUMNS contains column mappings for constraints
             // R_OWNER and R_CONSTRAINT_NAME reference the parent (unique/primary key) constraint.
-            // The owner and table predicates compare the bound values directly: OracleMetadataProvider
-            // uppercases them, and wrapping the dictionary columns in UPPER() would make the
-            // predicates non-sargable on the data dictionary views.
+            // The owner and table predicates compare the bound values directly. Those values are
+            // the stored catalog spelling (uppercase for an unquoted name, exact for a quoted
+            // one). Wrapping the dictionary columns in UPPER() would make the predicates
+            // non-sargable and would miss a quoted mixed-case object.
             string foreignKeyQuery = $@"
                 SELECT
                     RefCons.CONSTRAINT_NAME {QuoteIdentifier(nameof(ForeignKeyDefinition))},
@@ -2150,11 +2152,10 @@ ORDER BY a.schema_name, a.object_name";
 
         public string QuoteTableNameAsDBConnectionParam(string param)
         {
-            // This value is bound as a DbConnectionParam (e.g. against ALL_TAB_COLS.TABLE_NAME),
-            // NOT embedded directly in SQL text. Oracle stores unquoted identifiers in uppercase
-            // and ALL_TAB_COLS.TABLE_NAME stores the bare (unquoted, uppercased) name, so the
-            // bind value must be bare and uppercased - quoting it here would never match.
-            return param.ToUpperInvariant();
+            // Bound against ALL_TAB_COLS.TABLE_NAME, not embedded in SQL text. The argument is
+            // already the catalog spelling: uppercase when the source was unquoted, exact when
+            // it was quoted. Quoting or folding it here would miss the dictionary row.
+            return param;
         }
     }
 }

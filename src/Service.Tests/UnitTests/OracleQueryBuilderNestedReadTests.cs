@@ -142,7 +142,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SourceDefinition childSource = new();
             childSource.Columns.Add("id", new ColumnDefinition { SystemType = typeof(int) });
             childSource.Columns.Add("parent_id", new ColumnDefinition { SystemType = typeof(int) });
-            DatabaseTable childTable = new("dbo", "children") { TableDefinition = childSource };
+            DatabaseTable childTable = new("DBO", "CHILDREN") { TableDefinition = childSource };
             Mock<ISqlMetadataProvider> childMetadata = new();
             childMetadata.Setup(x => x.GetSourceDefinition("Child")).Returns(childSource);
 
@@ -176,7 +176,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             SourceDefinition parentSource = new();
             parentSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
-            DatabaseTable parentTable = new("dbo", "parents") { TableDefinition = parentSource };
+            DatabaseTable parentTable = new("DBO", "PARENTS") { TableDefinition = parentSource };
             Mock<ISqlMetadataProvider> parentMetadata = new();
             parentMetadata.Setup(x => x.GetSourceDefinition("Parent")).Returns(parentSource);
 
@@ -212,7 +212,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SourceDefinition childSource = new();
             childSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
             childSource.PrimaryKey.Add("ID");
-            DatabaseTable childTable = new("dbo", "children") { TableDefinition = childSource };
+            DatabaseTable childTable = new("DBO", "CHILDREN") { TableDefinition = childSource };
             Mock<ISqlMetadataProvider> childMetadata = new();
             childMetadata.Setup(x => x.GetSourceDefinition("Child")).Returns(childSource);
 
@@ -246,7 +246,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             SourceDefinition parentSource = new();
             parentSource.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
-            DatabaseTable parentTable = new("dbo", "parents") { TableDefinition = parentSource };
+            DatabaseTable parentTable = new("DBO", "PARENTS") { TableDefinition = parentSource };
             Mock<ISqlMetadataProvider> parentMetadata = new();
             parentMetadata.Setup(x => x.GetSourceDefinition("Parent")).Returns(parentSource);
 

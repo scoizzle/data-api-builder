@@ -176,8 +176,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 new object[] { "SYSTEM.dab_overload_pkg.touch_item#2", EntitySourceType.StoredProcedure })!;
 
             Assert.AreEqual("SYSTEM", procedure.SchemaName);
-            Assert.AreEqual("touch_item", procedure.Name);
-            Assert.AreEqual("dab_overload_pkg", OracleObjectFacts.Procedure(procedure).PackageName);
+            Assert.AreEqual("TOUCH_ITEM", procedure.Name);
+            Assert.AreEqual("DAB_OVERLOAD_PKG", OracleObjectFacts.Procedure(procedure).PackageName);
             Assert.AreEqual("2", OracleObjectFacts.Procedure(procedure).Overload);
         }
 

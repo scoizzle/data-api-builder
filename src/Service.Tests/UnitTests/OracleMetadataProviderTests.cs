@@ -56,6 +56,32 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             RuntimeConfig config = configProvider.GetConfig();
             Assert.AreEqual(1, config.AutoentityResolutionCounts["all"]);
             Assert.IsTrue(config.Entities.ContainsKey("DABTest"));
+            Assert.AreEqual("SYSTEM.BOOKS", config.Entities["DABTest"].Source.Object);
+        }
+
+        [TestMethod]
+        public async Task GenerateAutoentitiesIntoEntities_QuotesMixedCaseCatalogNames()
+        {
+            Autoentity autoentity = new(null, null, null);
+            (OracleMetadataProvider provider, RuntimeConfigProvider configProvider) =
+                CreateProvider(autoentity);
+            ConfigureAutoentityQuery(provider, new JsonArray(new JsonObject
+            {
+                ["entity_name"] = "Customers",
+                ["object"] = "Customers",
+                ["schema"] = "HR"
+            }));
+
+            MethodInfo method = typeof(OracleMetadataProvider).GetMethod(
+                "GenerateAutoentitiesIntoEntities",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                new[] { typeof(IReadOnlyDictionary<string, Autoentity>) })!;
+            await (Task)method.Invoke(provider, new object?[]
+            {
+                new Dictionary<string, Autoentity> { ["all"] = autoentity }
+            })!;
+
+            Assert.AreEqual("HR.\"Customers\"", configProvider.GetConfig().Entities["Customers"].Source.Object);
         }
 
         [TestMethod]

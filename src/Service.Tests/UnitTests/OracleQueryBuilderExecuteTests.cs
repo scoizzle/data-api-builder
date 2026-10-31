@@ -217,8 +217,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SqlExecuteStructure structure = CreateExecuteStructure(
                 spDef,
                 requestParams: new Dictionary<string, object?> { { "id", 1 } },
-                packageName: "pkg_test",
-                name: "get_book_by_id");
+                packageName: "PKG_TEST",
+                name: "GET_BOOK_BY_ID");
 
             string query = new OracleQueryBuilder().Build(structure);
 
@@ -245,7 +245,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SqlExecuteStructure structure = CreateExecuteStructure(
                 spDef,
                 requestParams: new Dictionary<string, object?> { { "p_id", 7 } },
-                name: "get_by_cursor_first");
+                name: "GET_BY_CURSOR_FIRST");
 
             string query = new OracleQueryBuilder().Build(structure);
 
@@ -331,9 +331,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SqlExecuteStructure structure = CreateExecuteStructure(
                 spDef,
                 requestParams: new Dictionary<string, object?> { { "id", 1 } },
-                packageName: "pkg_test",
+                packageName: "PKG_TEST",
                 isFunction: true,
-                name: "get_books");
+                name: "GET_BOOKS");
 
             string query = new OracleQueryBuilder().Build(structure);
 
@@ -355,7 +355,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 spDef,
                 requestParams: new Dictionary<string, object?>(),
                 isFunction: true,
-                name: "fn_get_count");
+                name: "FN_GET_COUNT");
 
             string query = new OracleQueryBuilder().Build(structure);
 
@@ -384,9 +384,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SqlExecuteStructure structure = CreateExecuteStructure(
                 spDef,
                 requestParams: new Dictionary<string, object?> { { "id", 1 } },
-                packageName: "pkg_test",
+                packageName: "PKG_TEST",
                 isFunction: true,
-                name: "get_count");
+                name: "GET_COUNT");
 
             string query = new OracleQueryBuilder().Build(structure);
 

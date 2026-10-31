@@ -33,7 +33,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     {
         private const string ENTITY_NAME = "Book";
         private const string SCHEMA_NAME = "SYSTEM";
-        private const string TABLE_NAME = "books";
+        // Catalog spelling. Unquoted names are folded before they reach the builder.
+        private const string TABLE_NAME = "BOOKS";
 
         private delegate void TryGetColumnCallback(string entity, string field, out string? column);
 

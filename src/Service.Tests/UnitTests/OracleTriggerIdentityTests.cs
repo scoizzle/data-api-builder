@@ -46,6 +46,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void QuotedMixedCaseAssignmentKeepsSpelling()
+        {
+            (string name, bool isReadOnly) = One(null, null, ":new.\"Id\" := books_seq.NEXTVAL;");
+
+            Assert.AreEqual("Id", name);
+            Assert.IsTrue(isReadOnly);
+        }
+
+        [TestMethod]
         public void QuotedNewAssignmentInsideGuardIsWritable()
         {
             (string name, bool isReadOnly) = One(null, null, """
