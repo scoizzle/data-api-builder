@@ -194,6 +194,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             cmd.BindByName = true;
 
             string translatedSql = TranslateBindParameters(sqltext);
+            translatedSql = RewriteEmptyStringEqualityBinds(translatedSql, parameters);
             cmd.CommandText = translatedSql;
 
             if (parameters is not null)
@@ -542,6 +543,55 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// corrupting '@' characters that appear inside string literals authored in database
         /// policies (e.g. 'admin@contoso.com') which must pass through unmodified.
         /// </summary>
+        /// <summary>
+        /// Oracle stores the empty string as NULL, so <c>col = :p</c> and <c>col != :p</c>
+        /// never match when the bound value is <c>""</c>. Rewrite those comparisons to
+        /// <c>IS NULL</c> / <c>IS NOT NULL</c> for Oracle, covering GraphQL filters and any
+        /// policy predicate that reaches the executor as an empty-string parameter.
+        /// The parameter is left unreferenced, so the bind loop skips it.
+        /// </summary>
+        internal static string RewriteEmptyStringEqualityBinds(
+            string sqltext,
+            IDictionary<string, DbConnectionParam>? parameters)
+        {
+            if (string.IsNullOrEmpty(sqltext) || parameters is null || parameters.Count == 0)
+            {
+                return sqltext;
+            }
+
+            HashSet<string> emptyStringParameters = new(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, DbConnectionParam> parameter in parameters)
+            {
+                if (parameter.Value?.Value is string value && value.Length == 0)
+                {
+                    emptyStringParameters.Add(parameter.Key.TrimStart('@'));
+                }
+            }
+
+            if (emptyStringParameters.Count == 0)
+            {
+                return sqltext;
+            }
+
+            // Equality: = :param. Avoid >=, <=, != and ==.
+            sqltext = Regex.Replace(
+                sqltext,
+                @"(?<![<>!=])=(?!=)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                match => emptyStringParameters.Contains(match.Groups["name"].Value)
+                    ? "IS NULL"
+                    : match.Value);
+
+            // Inequality: != :param or <> :param.
+            sqltext = Regex.Replace(
+                sqltext,
+                @"(?:!=|<>)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                match => emptyStringParameters.Contains(match.Groups["name"].Value)
+                    ? "IS NOT NULL"
+                    : match.Value);
+
+            return sqltext;
+        }
+
         private static string TranslateBindParameters(string sqltext)
         {
             if (string.IsNullOrEmpty(sqltext) || !sqltext.Contains('@'))
