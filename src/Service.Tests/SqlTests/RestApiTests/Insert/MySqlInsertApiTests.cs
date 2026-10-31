@@ -346,6 +346,17 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Insert
             throw new NotImplementedException();
         }
 
+        /// <summary>
+        /// MySQL does not support database policies on the create action (rejected at config validation),
+        /// so a zero-column insert can never be gated by a create policy.
+        /// </summary>
+        [TestMethod]
+        [Ignore]
+        public override Task InsertZeroColumnWithCreatePolicyReturnsForbidden()
+        {
+            throw new NotImplementedException();
+        }
+
         [TestMethod]
         [Ignore]
         public override Task InsertOneRowWithBuiltInMethodAsDefaultvaluesTest()

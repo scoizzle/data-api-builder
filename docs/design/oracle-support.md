@@ -103,7 +103,7 @@ Nested GraphQL create (parent/child/linking inserts in FK order, then a follow-u
 
 Oracle rejects the `AS` keyword on table aliases (`INNER JOIN t AS alias`); generated join/FROM/EXISTS SQL omits `AS`.
 
-Create-policy failure on a non-linking insert returns **403** (`DatabasePolicyFailure`). Trigger-assigned primary keys that cannot be returned to the mutation engine result in **500** and **rollback** of the nested graph.
+Create-policy failure on a non-linking insert returns **403** (`DatabasePolicyFailure`); for inserts that supply no column values, see *Inserts with no column values* under Authorization policies. Trigger-assigned primary keys that cannot be returned to the mutation engine result in **500** and **rollback** of the nested graph.
 
 This path is **GraphQL-only**. REST batch/array create does not share it (same as MSSQL).
 
@@ -154,7 +154,7 @@ Database policies (`permissions[].actions[].policy.database`) use the shared eng
 Oracle specifics:
 
 - **Predicate placement.** Read/update/delete policies are ANDed into the `WHERE` clause exactly like the other engines. Create (and the insert branch of upsert) cannot use `INSERT … SELECT … WHERE`, so Oracle gates the insert with `SELECT COUNT(*) INTO v FROM (SELECT value AS "COL", … FROM DUAL) WHERE <policy>` and opens an empty REF CURSOR when the policy is unsatisfied, which surfaces as HTTP 403.
-- **Inserts with no column values.** When the request body supplies no insertable columns, the policy cannot be evaluated against a row, so the request is rejected with HTTP 400 `DatabasePolicyFailure` instead of falling back to a `DEFAULT VALUES` insert (this is enforced for all engines; the other engines previously bypassed the create policy in that case).
+- **Inserts with no column values.** When the request body supplies no insertable columns and the create policy references no column (for example `true`), the policy cannot be evaluated against a row, so the request is rejected with HTTP **403** `DatabasePolicyFailure` (the same status as every other database policy denial) instead of falling back to a `DEFAULT VALUES` insert. This is enforced for all engines that accept a create policy; the other engines previously bypassed the create policy in that case. A policy that references a column is rejected earlier with HTTP 403 `AuthorizationCheckFailed` ("One or more fields referenced by the database policy are not present in the request body."), so the two substatuses are distinct. The Oracle builder additionally refuses (500) to emit an insert for this state if the structure check is ever bypassed. See *Upgrade notes*.
 - **Empty string is NULL.** Oracle cannot store `''` distinctly from `NULL`, so a policy comparing a column to `''` is rewritten to the equivalent `IS NULL` / `IS NOT NULL` predicate (`@item.col eq ''` → `"COL" IS NULL`, `@item.col ne ''` → `"COL" IS NOT NULL`). Other engines compare against a real empty string.
 - **String comparison is case-sensitive** under Oracle's default binary collation.
 - **Numeric comparisons** bind policy literals for `NUMBER` columns as `decimal`; boolean-style predicates against `NUMBER(1)` columns are not supported.
@@ -214,3 +214,7 @@ ODP.NET's command timeout defaults to 0 (wait forever), while the other ADO.NET 
 ### Test database
 
 The Oracle integration suite issues several hundred distinct statements, so it exhausts the default `open_cursors=300` partway through a full `TestCategory=ORACLE` run. The test container must either set `open_cursors=1500` or the test connection string must bound the statement cache; with either in place the full category passes. This is cursor-cache sizing, not a DAB query-path leak: 500 repeated list queries, 400 repeated upserts, and repeated `DatabaseSchema-Oracle.sql` re-initialization all leave the cursor count flat or plateaued.
+
+## Upgrade notes
+
+- **Insert with no supplied columns plus a create policy is now denied (403).** A request that supplies no column values (for example `POST` with `{}`) to an entity whose role has a create database policy used to be executed as a `DEFAULT VALUES` insert on MSSQL, PostgreSQL and DWSQL, so the policy was never evaluated and the endpoint returned 201 with a row. It now fails closed with HTTP 403 and substatus `DatabasePolicyFailure` (policies that reference a column return 403 `AuthorizationCheckFailed`). This is a security fix and has no opt-out; do not retry the same empty body. Requests for roles without a create policy are unchanged. MySQL does not accept create policies, so it is unaffected. Release notes for the Oracle PR should carry this item, as the repository has no `CHANGELOG.md`.

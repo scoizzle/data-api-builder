@@ -94,13 +94,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // A create policy cannot be evaluated when no column values are supplied (the generated
             // statement would be a DEFAULT VALUES insert, which has no row to apply the predicate to).
             // Fail closed for every engine rather than silently bypassing the policy; Oracle already
-            // could not represent this statement.
+            // could not represent this statement. Like every other database policy denial this is a 403.
             if (InsertColumns.Count == 0
                 && !string.IsNullOrEmpty(GetDbPolicyForOperation(EntityActionOperation.Create)))
             {
                 throw new DataApiBuilderException(
                     message: "An insert with no column values cannot be used when a database policy is defined for the create action.",
-                    statusCode: HttpStatusCode.BadRequest,
+                    statusCode: HttpStatusCode.Forbidden,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
             }
         }

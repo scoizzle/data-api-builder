@@ -1345,6 +1345,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 ? DedupeInsertColumns(structure.InsertColumns, structure.Values)
                 : ([], []);
 
+            bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
+            if (hasCreatePolicy && insertCols.Count == 0)
+            {
+                // SqlInsertStructure rejects this earlier (403). Refuse to emit an empty policy probe
+                // ("SELECT FROM DUAL") or an ungated default insert if that check is ever bypassed.
+                throw new DataApiBuilderException(
+                    message: "An insert with no column values cannot be built when a database policy is defined for the create action.",
+                    statusCode: System.Net.HttpStatusCode.InternalServerError,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.UnexpectedError);
+            }
+
             if (insertCols.Count > 0)
             {
                 string insertColumns = BuildColumnList(insertCols);
@@ -1377,7 +1388,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             (string returningColumns, string bindNames, string selectFromBinds, string outputTypeHints) =
                 BuildOutputBindings(structure.OutputColumns, sourceDefinition);
 
-            bool hasCreatePolicy = !dbPolicyPredicates.Equals(BASE_PREDICATE);
             if (hasCreatePolicy)
             {
                 // PL/SQL cannot host a scalar subquery in IF (PLS-00103). SELECT COUNT(*) INTO a
