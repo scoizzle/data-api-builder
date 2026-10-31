@@ -31,5 +31,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers.Factories
         /// <param name="databaseType">databaseType.</param>
         /// <returns>DBExceptionParser based on databaseType</returns>
         public DbExceptionParser GetDbExceptionParser(DatabaseType databaseType);
+
+        /// <summary>
+        /// Gets the mutation transaction executor for the database type.
+        /// The executor decides whether a follow-up read shares one local transaction.
+        /// </summary>
+        public IMutationTransactionExecutor GetMutationTransactionExecutor(DatabaseType databaseType);
     }
 }

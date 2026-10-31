@@ -1,9 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Net;
+using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.OData.Edm;
 using Microsoft.OData.UriParser;
 
@@ -34,6 +38,13 @@ namespace Azure.DataApiBuilder.Core.Parsers
         /// <returns>String concatenation of (left op right).</returns>
         public override string Visit(BinaryOperatorNode nodeIn)
         {
+            // Engines that store the empty string as NULL rewrite a policy comparison against ''
+            // to IS [NOT] NULL. The shared visitor does not know which engine that is.
+            if (TryRewriteEmptyStringComparison(nodeIn, out string? nullPredicate))
+            {
+                return nullPredicate!;
+            }
+
             // In order traversal but add parens to maintain order of logical operations
             string left = nodeIn.Left.Accept(this);
             string right = nodeIn.Right.Accept(this);
@@ -47,6 +58,27 @@ namespace Azure.DataApiBuilder.Core.Parsers
             }
 
             return CreateResult(nodeIn.OperatorKind, left, right);
+        }
+
+        private bool TryRewriteEmptyStringComparison(BinaryOperatorNode nodeIn, out string? predicate)
+        {
+            predicate = null;
+            SqlLiteralRewriter rewriter = _metadataProvider is ISqlLiteralSource literalSource
+                ? literalSource.LiteralRewriter
+                : SqlLiteralRewriter.Shared;
+            if (!rewriter.TryRewriteEmptyStringComparison(
+                    nodeIn.OperatorKind,
+                    nodeIn.Left,
+                    nodeIn.Right,
+                    out SingleValuePropertyAccessNode? propertyNode,
+                    out bool isNullPredicate))
+            {
+                return false;
+            }
+
+            string column = Visit(propertyNode!);
+            predicate = $"({column} {(isNullPredicate ? "IS NULL" : "IS NOT NULL")})";
+            return true;
         }
 
         /// <summary>
@@ -275,6 +307,7 @@ namespace Azure.DataApiBuilder.Core.Parsers
             SingleValuePropertyAccessNode propertyNode = nodeIn.Left.GetType() == typeof(SingleValuePropertyAccessNode) ?
                     (SingleValuePropertyAccessNode)nodeIn.Left : (SingleValuePropertyAccessNode)nodeIn.Right;
             string? paramName = BaseQueryStructure.GetEncodedParamName(_struct.Counter.Current() - 1);
+
             _metadataProvider.TryGetBackingColumn(_struct.EntityName, propertyNode.Property.Name, out string? backingColumnName);
             _struct.Parameters[paramName].DbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].DbType;
             _struct.Parameters[paramName].SqlDbType = _struct.GetUnderlyingSourceDefinition().Columns[backingColumnName!].SqlDbType;

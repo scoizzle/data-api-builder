@@ -5,6 +5,7 @@ namespace Azure.DataApiBuilder.Config.ObjectModel
 {
     public enum MultipleCreateSupportingDatabaseType
     {
-        MSSQL
+        MSSQL,
+        Oracle
     }
 }

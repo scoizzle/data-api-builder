@@ -83,6 +83,13 @@ public record DataSource(
                 SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))));
         }
 
+        if (typeof(TOptionType).IsAssignableFrom(typeof(OracleOptions)))
+        {
+            return (TOptionType)(object)new OracleOptions(
+                CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))));
+        }
+
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
     }
 
@@ -106,6 +113,25 @@ public record DataSource(
         return false;
     }
 
+    private int? ReadIntOption(string option)
+    {
+        if (Options is not null && Options.TryGetValue(option, out object? value))
+        {
+            return value switch
+            {
+                int intValue => intValue,
+                long longValue when longValue is >= int.MinValue and <= int.MaxValue => (int)longValue,
+                // Options supplied through raw JSON (rather than the config converter) carry
+                // JsonElement values; accept them so the option is usable in both paths.
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Number } element
+                    when element.TryGetInt32(out int elementValue) => elementValue,
+                _ => null,
+            };
+        }
+
+        return null;
+    }
+
     [JsonIgnore]
     public string DatabaseTypeNotSupportedMessage => $"The provided database-type value: {DatabaseType} is currently not supported. Please check the configuration file.";
 }
@@ -127,30 +153,56 @@ public record CosmosDbNoSQLDataSourceOptions(string? Database, string? Container
 public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 
 /// <summary>
+/// Options for Oracle database.
+/// </summary>
+/// <param name="CommandTimeoutSeconds">
+/// Maximum time, in seconds, a single Oracle command may run before ODP.NET aborts it with
+/// ORA-01013 "user requested cancel of current operation". ODP.NET's own default is 0 (wait
+/// forever), unlike the other ADO.NET providers whose default is 30 seconds, so DAB applies
+/// <see cref="DEFAULT_COMMAND_TIMEOUT_SECONDS"/> unless overridden. 0 disables the cap.
+/// The cap is applied per command (OracleCommand.CommandTimeout) rather than through ODP.NET's
+/// process-wide OracleConfiguration.CommandTimeout, which ODP.NET rejects once a connection has
+/// been opened (ORA-50099).
+/// </param>
+/// <param name="SetSessionContext">
+/// When true, DAB forwards the caller's claims to the database session as Oracle application
+/// context values before each statement, mirroring MSSQL's set-session-context. Defaults to false
+/// because a DBA must first create the context namespace and the package that sets it (see
+/// docs/design/oracle-support.md).
+/// </param>
+public record OracleOptions(
+    int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    bool SetSessionContext = false) : IDataSourceOptions
+{
+    /// <summary>Default command timeout in seconds, matching the other ADO.NET providers.</summary>
+    public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
+}
+
+/// <summary>
 /// Options for user-delegated authentication (OBO) for a data source.
-/// 
+///
 /// When OBO is NOT enabled (default): DAB connects to the database using a single application principal,
 /// either via Managed Identity or credentials supplied in the connection string. All requests execute
 /// under the same database identity regardless of which user made the API call.
-/// 
+///
 /// When OBO IS enabled: DAB exchanges the calling user's JWT for a database access token using the
 /// On-Behalf-Of flow. This allows DAB to connect to the database as the actual user, enabling
 /// Row-Level Security (RLS) filtering based on user identity.
-/// 
+///
 /// OBO requires an Azure AD App Registration (separate from the DAB service's Managed Identity).
 /// The operator deploying DAB must set the following environment variables for the OBO App Registration,
 /// which DAB reads at startup via Environment.GetEnvironmentVariable():
 /// - DAB_OBO_CLIENT_ID: The Application (client) ID of the OBO App Registration
 /// - DAB_OBO_TENANT_ID: The Directory (tenant) ID where the OBO App Registration is registered
 /// - DAB_OBO_CLIENT_SECRET: The client secret of the OBO App Registration (not a user secret)
-/// 
+///
 /// These credentials belong to the OBO App Registration, which acts as a confidential client to exchange
 /// the incoming user JWT for a database access token. The user provides only their JWT; DAB uses the
 /// App Registration credentials to perform the OBO token exchange on their behalf.
-/// 
+///
 /// These can be set in the hosting environment (e.g., Azure Container Apps secrets, Kubernetes secrets,
 /// Docker environment variables, or local shell environment).
-/// 
+///
 /// Note: DAB-specific prefixes (DAB_OBO_*) are used instead of AZURE_* to avoid conflict with
 /// DefaultAzureCredential, which interprets AZURE_CLIENT_ID as a User-Assigned Managed Identity ID.
 /// At startup (when no user context is available), DAB falls back to Managed Identity for metadata operations.

@@ -91,7 +91,7 @@ namespace Azure.DataApiBuilder.Service.Tests
         /// <param name="config">RuntimeConfig object</param>
         /// <param name="entityKey">The key with which the entity is to be added.</param>
         /// <param name="entityName">The source name of the entity.</param>
-        public static RuntimeConfig AddMissingEntitiesToConfig(RuntimeConfig config, string entityKey, string entityName, string[] keyfields = null)
+        public static RuntimeConfig AddMissingEntitiesToConfig(RuntimeConfig config, string entityKey, string entityName, string[] keyfields = null, Dictionary<string, string> mappings = null)
         {
             List<FieldMetadata> fields = [];
             if (keyfields != null)
@@ -125,7 +125,7 @@ namespace Azure.DataApiBuilder.Service.Tests
                         new(EntityActionOperation.Update, null, new())
                     })
                 },
-                Mappings: null,
+                Mappings: mappings,
                 Relationships: null);
 
             Dictionary<string, Entity> entities = new(config.Entities)

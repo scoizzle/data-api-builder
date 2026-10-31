@@ -108,6 +108,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
             }
 
+            if (MetadataProvider is ISqlLiteralSource literalSource
+                && !string.IsNullOrEmpty(paramName)
+                && GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? coercedColumn))
+            {
+                value = literalSource.LiteralRewriter.CoerceParameterValue(
+                    value,
+                    paramName,
+                    coercedColumn.SystemType,
+                    (text, name, systemType) => GetParamAsSystemType(text, name, systemType));
+            }
+
             return base.MakeDbConnectionParam(value, paramName, lengthOverride);
         }
 

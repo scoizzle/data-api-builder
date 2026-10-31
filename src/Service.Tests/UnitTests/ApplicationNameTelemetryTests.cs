@@ -63,6 +63,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow(DatabaseType.DWSQL, 'D')]
         [DataRow(DatabaseType.PostgreSQL, 'P')]
         [DataRow(DatabaseType.MySQL, 'M')]
+        [DataRow(DatabaseType.Oracle, 'O')]
         [DataRow(DatabaseType.CosmosDB_NoSQL, 'C')]
         public void EncodeTelemetryString_EncodesSource(DatabaseType dbType, char expectedSource)
         {

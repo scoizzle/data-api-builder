@@ -20,6 +20,7 @@ using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Mcp.Model;
 using Azure.DataApiBuilder.Mcp.Utils;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -244,15 +245,24 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 // 5. Validate database type support
                 DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
-                if (databaseType != DatabaseType.MSSQL && databaseType != DatabaseType.DWSQL)
+                if (databaseType != DatabaseType.MSSQL && databaseType != DatabaseType.DWSQL && databaseType != DatabaseType.Oracle)
                 {
                     return McpResponseBuilder.BuildErrorResult(toolName, "UnsupportedDatabase",
-                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, and SQL Data Warehouse.", logger);
+                        $"Aggregation is not supported for database type '{databaseType}'. Aggregation is only available for Azure SQL, SQL Server, SQL Data Warehouse, and Oracle.", logger);
                 }
 
                 // 6. Build SQL query structure with aggregation, groupby, having
+                // Groupby and databaseType are fixed for this call. Oracle sets the fetch
+                // limit before the structure is built, then orders and binds after it exists.
+                bool grouped = args.Groupby.Count > 0;
+                bool groupedOracle = grouped && databaseType == DatabaseType.Oracle;
                 IAuthorizationResolver authResolver = serviceProvider.GetRequiredService<IAuthorizationResolver>();
                 GQLFilterParser gQLFilterParser = serviceProvider.GetRequiredService<GQLFilterParser>();
+                if (groupedOracle)
+                {
+                    OracleQueryBuilder.UseAggregateFetchLimit(authCtx!.RequestContext, args.First);
+                }
+
                 SqlQueryStructure structure = new(
                     authCtx!.RequestContext, sqlMetadataProvider, authResolver, runtimeConfigProvider, gQLFilterParser, authCtx.HttpContext);
 
@@ -264,6 +274,11 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
 
                 string alias = ComputeAlias(args.Function, args.Field);
                 BuildAggregationStructure(args, structure, dbObject, backingField!, alias, entityName, sqlMetadataProvider);
+                if (groupedOracle)
+                {
+                    OracleQueryBuilder.AddAggregateAliasOrder(structure, args.Orderby, alias);
+                    OracleQueryBuilder.BindAggregateRowOffset(structure, DecodeCursorOffset(args.After));
+                }
 
                 // 7. Generate and post-process SQL
                 IAbstractQueryManagerFactory queryManagerFactory = serviceProvider.GetRequiredService<IAbstractQueryManagerFactory>();
@@ -271,7 +286,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                 IQueryExecutor queryExecutor = queryManagerFactory.GetQueryExecutor(databaseType);
 
                 string sql = queryBuilder.Build(structure);
-                if (args.Groupby.Count > 0)
+                if (grouped && !groupedOracle)
                 {
                     sql = ApplyOrderByAndPagination(sql, args, structure, queryBuilder, backingField!);
                 }
@@ -286,7 +301,7 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
                     ? JsonSerializer.Deserialize<JsonArray>(queryResult.RootElement.GetRawText())
                     : null;
 
-                return args.First.HasValue && args.Groupby.Count > 0
+                return args.First.HasValue && grouped
                     ? BuildPaginatedResponse(resultArray, args.First.Value, args.After, entityName, logger)
                     : BuildSimpleResponse(resultArray, entityName, alias, logger);
             }
@@ -939,8 +954,9 @@ namespace Azure.DataApiBuilder.Mcp.BuiltInTools
         }
 
         /// <summary>
-        /// Post-processes the generated SQL to add ORDER BY and OFFSET/FETCH pagination
-        /// for grouped aggregation queries.
+        /// Post-processes grouped aggregation SQL for SQL Server and SQL Data Warehouse.
+        /// Inserts ORDER BY and, when paging, OFFSET/FETCH around FOR JSON PATH.
+        /// Oracle paging is applied by <see cref="OracleQueryBuilder"/>.
         /// </summary>
         private static string ApplyOrderByAndPagination(
             string sql,

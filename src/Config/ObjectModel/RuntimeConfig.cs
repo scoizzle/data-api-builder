@@ -670,12 +670,31 @@ public record RuntimeConfig
     /// <summary>
     /// Whether the caching service should be used for a given operation. This is determined by
     /// - whether caching is enabled globally
-    /// - whether the datasource is SQL and session context is disabled.
+    /// - whether any configured data source forwards caller claims into the session, because
+    ///   database-side policies may filter responses by that per-request state and a cached response
+    ///   must not be served to a different caller.
     /// </summary>
     /// <returns>Whether cache operations should proceed.</returns>
     public virtual bool CanUseCache()
     {
-        bool setSessionContextEnabled = DataSource?.GetTypedOptions<MsSqlOptions>()?.SetSessionContext ?? true;
+        if (DataSource is null)
+        {
+            return false;
+        }
+
+        // Any data source with session-context forwarding disables caching for the whole runtime:
+        // with data-source-files the forwarding source may not be the default source, so the check
+        // must not be limited to DataSource.
+        bool setSessionContextEnabled = GetDataSourceNamesToDataSourcesIterator().Any(entry =>
+            entry.Value.DatabaseType switch
+            {
+                DatabaseType.MSSQL or DatabaseType.DWSQL =>
+                    entry.Value.GetTypedOptions<MsSqlOptions>()?.SetSessionContext ?? true,
+                DatabaseType.Oracle =>
+                    entry.Value.GetTypedOptions<OracleOptions>()?.SetSessionContext ?? false,
+                _ => false,
+            });
+
         return IsCachingEnabled && !setSessionContextEnabled;
     }
 
@@ -701,7 +720,7 @@ public record RuntimeConfig
     private void SetupDataSourcesUsed()
     {
         SqlDataSourceUsed = _dataSourceNameToDataSource.Values.Any
-            (x => x.DatabaseType is DatabaseType.MSSQL || x.DatabaseType is DatabaseType.PostgreSQL || x.DatabaseType is DatabaseType.MySQL || x.DatabaseType is DatabaseType.DWSQL);
+            (x => x.DatabaseType is DatabaseType.MSSQL || x.DatabaseType is DatabaseType.PostgreSQL || x.DatabaseType is DatabaseType.MySQL || x.DatabaseType is DatabaseType.DWSQL || x.DatabaseType is DatabaseType.Oracle);
 
         CosmosDataSourceUsed = _dataSourceNameToDataSource.Values.Any
             (x => x.DatabaseType is DatabaseType.CosmosDB_NoSQL);

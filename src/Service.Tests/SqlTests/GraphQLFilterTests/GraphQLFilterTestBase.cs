@@ -625,7 +625,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLFilterTests
         /// Test filtering null integer fields
         /// </summary>
         [TestMethod]
-        public async Task TestGetNullIntFields()
+        public virtual async Task TestGetNullIntFields()
         {
             string graphQLQueryName = "magazines";
             string gqlQuery = @"{

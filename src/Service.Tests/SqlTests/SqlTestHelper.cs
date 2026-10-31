@@ -681,6 +681,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests
             {
                 case TestCategory.MSSQL:
                 case TestCategory.POSTGRESQL:
+                case TestCategory.ORACLE:
                     magazinesSource = "\"foo.magazines\"";
                     break;
                 case TestCategory.MYSQL:
