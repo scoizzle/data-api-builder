@@ -50,22 +50,33 @@ namespace Azure.DataApiBuilder.Core.Services
 
         /// <summary>
         /// Rewrites authored field, mapping, and permission names to the spelling metadata will
-        /// compare later. Include and exclude sets use the exposed name. Mapping keys and field
-        /// names use the physical column name so exact lookups find them.
+        /// compare later. Mapping keys, field names, and permission include/exclude sets use the
+        /// backing (catalog) column name: the authorization resolver subtracts excluded from
+        /// included in backing space, so a permission left in exposed spelling would not match.
+        /// Policy tokens stay in exposed space because the OData model names properties by
+        /// exposed name and the filter parser is case-sensitive.
         /// </summary>
         protected override void NormalizeConfiguredIdentifiers(
             string entityName,
             Entity entity,
             IReadOnlyDictionary<string, string>? exposedToBacking)
         {
-            if (EntityToDatabaseObject.TryGetValue(entityName, out DatabaseObject? databaseObject))
+            if (!EntityToDatabaseObject.TryGetValue(entityName, out DatabaseObject? databaseObject))
             {
-                RewriteFieldAndMappingNames(entity, databaseObject.SourceDefinition);
+                return;
             }
+
+            SourceDefinition? sourceDefinition = databaseObject.SourceDefinition;
+            if (sourceDefinition is null)
+            {
+                return;
+            }
+
+            RewriteFieldAndMappingNames(entity, sourceDefinition);
 
             if (exposedToBacking is not null)
             {
-                RewritePermissionNames(entity, exposedToBacking);
+                RewritePermissionNames(entityName, entity, exposedToBacking, databaseObject, sourceDefinition);
             }
         }
 
@@ -97,12 +108,20 @@ namespace Azure.DataApiBuilder.Core.Services
             }
         }
 
-        private static void RewritePermissionNames(Entity entity, IReadOnlyDictionary<string, string> exposedToBacking)
+        private void RewritePermissionNames(
+            string entityName,
+            Entity entity,
+            IReadOnlyDictionary<string, string> exposedToBacking,
+            DatabaseObject databaseObject,
+            SourceDefinition sourceDefinition)
         {
             if (entity.Permissions is null)
             {
                 return;
             }
+
+            // Stored procedures and views carry no authored column permissions to verify.
+            bool validateColumns = databaseObject.SourceType == EntitySourceType.Table;
 
             foreach (EntityPermission permission in entity.Permissions)
             {
@@ -119,9 +138,14 @@ namespace Azure.DataApiBuilder.Core.Services
                     {
                         fields = fields with
                         {
-                            Exclude = CanonicalizeFieldSet(fields.Exclude, exposedToBacking),
-                            Include = fields.Include is null ? null : CanonicalizeFieldSet(fields.Include, exposedToBacking)
+                            Exclude = ResolveBackingFieldSet(fields.Exclude, exposedToBacking, sourceDefinition),
+                            Include = fields.Include is null ? null : ResolveBackingFieldSet(fields.Include, exposedToBacking, sourceDefinition)
                         };
+
+                        if (validateColumns)
+                        {
+                            ValidatePermissionColumns(entityName, permission.Role, action.Action, databaseObject, sourceDefinition, fields);
+                        }
                     }
 
                     EntityActionPolicy? policy = action.Policy;
@@ -139,17 +163,100 @@ namespace Azure.DataApiBuilder.Core.Services
             }
         }
 
-        private static HashSet<string> CanonicalizeFieldSet(HashSet<string> fields, IReadOnlyDictionary<string, string> exposedToBacking)
+        private HashSet<string> ResolveBackingFieldSet(
+            HashSet<string> fields,
+            IReadOnlyDictionary<string, string> exposedToBacking,
+            SourceDefinition sourceDefinition)
         {
             HashSet<string> rewritten = new(fields.Comparer);
             foreach (string field in fields)
             {
-                rewritten.Add(CanonicalExposedName(field, exposedToBacking));
+                rewritten.Add(ResolveBackingColumnName(field, exposedToBacking, sourceDefinition));
             }
 
             return rewritten;
         }
 
+        /// <summary>
+        /// Resolves an authored permission name to the backing column spelling. An exposed name
+        /// (field alias, field name, or mapping value) wins, matching how a request resolves it;
+        /// otherwise the name is matched against the catalog columns. The wildcard is kept as is.
+        /// </summary>
+        private string ResolveBackingColumnName(
+            string name,
+            IReadOnlyDictionary<string, string> exposedToBacking,
+            SourceDefinition sourceDefinition)
+        {
+            if (name == AuthorizationResolver.WILDCARD)
+            {
+                return name;
+            }
+
+            return exposedToBacking.TryGetValue(name, out string? backing)
+                ? backing
+                : ResolvePhysicalColumnName(sourceDefinition, name);
+        }
+
+        /// <summary>
+        /// Fails initialization when a permission names a column the table does not have. Without
+        /// this, a typo in an exclude list would silently leave the intended column readable.
+        /// </summary>
+        private static void ValidatePermissionColumns(
+            string entityName,
+            string role,
+            EntityActionOperation operation,
+            DatabaseObject databaseObject,
+            SourceDefinition sourceDefinition,
+            EntityActionFields fields)
+        {
+            foreach (string name in fields.Exclude)
+            {
+                ThrowIfUnknownColumn(entityName, role, operation, databaseObject, sourceDefinition, "exclude", name);
+            }
+
+            foreach (string name in fields.Include ?? [])
+            {
+                ThrowIfUnknownColumn(entityName, role, operation, databaseObject, sourceDefinition, "include", name);
+            }
+        }
+
+        private static void ThrowIfUnknownColumn(
+            string entityName,
+            string role,
+            EntityActionOperation operation,
+            DatabaseObject databaseObject,
+            SourceDefinition sourceDefinition,
+            string listName,
+            string name)
+        {
+            if (name == AuthorizationResolver.WILDCARD || sourceDefinition.Columns.ContainsKey(name))
+            {
+                return;
+            }
+
+            throw new DataApiBuilderException(
+                message: $"Entity '{entityName}', role '{role}', action '{operation}': permission {listName} field '{name}' " +
+                         $"is not a column of '{databaseObject.SchemaName}.{databaseObject.Name}'.",
+                statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+        }
+
+        /// <summary>
+        /// Copies the permission template so autoentities do not share (and later rewrite)
+        /// the same <see cref="EntityPermission"/> instances.
+        /// </summary>
+        private static EntityPermission[] ClonePermissions(EntityPermission[] permissions)
+        {
+            return [.. permissions.Select(permission => permission with
+            {
+                Actions = permission.Actions is null ? permission.Actions! : [.. permission.Actions.Select(action => action with { })]
+            })];
+        }
+
+        /// <summary>
+        /// Rewrites policy field tokens to the exposed spelling. The first match of an authored
+        /// token against the exposed-name map supplies the casing the OData model uses.
+        /// </summary>
         private static string CanonicalExposedName(string fieldName, IReadOnlyDictionary<string, string> exposedToBacking)
         {
             foreach (string exposedName in exposedToBacking.Keys)
