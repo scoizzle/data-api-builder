@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.IO.Abstractions.TestingHelpers;
+using System.Reflection;
 using Azure.DataApiBuilder.Config;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
@@ -13,6 +14,7 @@ using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.DataApiBuilder.Service.Tests.SqlTests;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -163,6 +165,67 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             OracleDbExceptionParser parser = new(provider);
 
             Assert.AreEqual(expected, parser.MapStatusCode(errorCode));
+        }
+
+        [DataTestMethod]
+        [DataRow("ORA-06550: line 1, column 7:\nPLS-00306: wrong number or types of arguments in call to 'GET_BOOK_BY_ID'", true, DisplayName = "English PLS-00306 maps to 400")]
+        [DataRow("ORA-06550: línea 1, columna 7:\nPLS-00306: número o tipos de argumentos incorrectos en la llamada a 'GET_BOOK_BY_ID'", true, DisplayName = "Localized PLS-00306 still maps to 400")]
+        [DataRow("ORA-06550: line 1, column 7:\nwrong number or types of arguments in call to 'GET_BOOK_BY_ID'", true, DisplayName = "English phrase without the PLS code maps to 400")]
+        [DataRow("ORA-06550: line 1, column 1:\nPLS-00103: Encountered the symbol END", false, DisplayName = "Generic ORA-06550 stays 500")]
+        [DataRow("ORA-06550: ligne 1 :\nPLS-00103: symbole END rencontré", false, DisplayName = "Localized generic ORA-06550 stays 500")]
+        public void OraclePlSqlWrongNumberOrTypesMapsToDatabaseInputError(string message, bool isClientInput)
+        {
+            OracleDbExceptionParser parser = CreateOracleParser();
+            DbException exception = CreateOracleException(6550, message);
+
+            Assert.AreEqual(System.Net.HttpStatusCode.InternalServerError, parser.MapStatusCode("6550"));
+            Assert.AreEqual(
+                isClientInput ? System.Net.HttpStatusCode.BadRequest : System.Net.HttpStatusCode.InternalServerError,
+                parser.GetHttpStatusCodeForException(exception));
+            Assert.AreEqual(
+                isClientInput
+                    ? DataApiBuilderException.SubStatusCodes.DatabaseInputError
+                    : DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed,
+                parser.GetResultSubStatusCodeForException(exception));
+        }
+
+        private static OracleDbExceptionParser CreateOracleParser()
+        {
+            RuntimeConfig mockConfig = new(
+                Schema: "",
+                DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", new()),
+                Runtime: new(
+                    Rest: new(),
+                    GraphQL: new(),
+                    Mcp: new(),
+                    Host: new(null, null, HostMode.Development)
+                ),
+                Entities: new(new Dictionary<string, Entity>())
+            );
+            MockFileSystem fileSystem = new();
+            fileSystem.AddFile(FileSystemRuntimeConfigLoader.DEFAULT_CONFIG_FILE_NAME, new MockFileData(mockConfig.ToJson()));
+            FileSystemRuntimeConfigLoader loader = new(fileSystem);
+            return new OracleDbExceptionParser(new RuntimeConfigProvider(loader));
+        }
+
+        /// <summary>
+        /// OracleException has no public constructor. Build it the same way SqlException is built
+        /// in <see cref="SqlTestHelper.CreateSqlException"/>: a private error, then the collection.
+        /// </summary>
+        private static OracleException CreateOracleException(int number, string message)
+        {
+            Type errorType = typeof(OracleError);
+            Type collectionType = typeof(OracleErrorCollection);
+            object error = errorType
+                .GetConstructor(
+                    BindingFlags.Instance | BindingFlags.NonPublic,
+                    new[] { typeof(int), typeof(string), typeof(string), typeof(string), typeof(int) })!
+                .Invoke(new object[] { number, "src", "proc", message, -1 });
+            object collection = Activator.CreateInstance(collectionType, nonPublic: true)!;
+            collectionType.GetMethod("Add")!.Invoke(collection, new[] { error });
+            return (OracleException)typeof(OracleException)
+                .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, new[] { collectionType })!
+                .Invoke(new[] { collection });
         }
     }
 }

@@ -143,8 +143,14 @@ END;";
                         logger.Object,
                         accessor.Object);
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TF_BUILD")) ||
+                        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI")))
+                    {
+                        Assert.Fail("Could not construct OracleQueryExecutor in CI: " + exception.Message);
+                    }
+
                     Assert.Inconclusive("Could not construct OracleQueryExecutor without a loaded Oracle config.");
                     return;
                 }

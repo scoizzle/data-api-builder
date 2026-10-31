@@ -1,0 +1,111 @@
+{
+  "description": "Every [Ignore] on an Oracle-category test. maxIgnored only shrinks. Each issue number must appear in the Ignore message as #N. Regenerated from grep of [Ignore] after issue #27; a live TRX was not available in this change.",
+  "maxIgnored": 21,
+  "ignores": {
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestOnTableWithDatabasePolicy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "No DBMS_RLS policy is installed on revenues."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestOnTableWithSecurityPolicy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "No DBMS_RLS policy is installed on revenues."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestVerifyMaintainColumnOrderForOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappedFieldsAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithFirstAndSpacedColumnOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithIntTypeNullValuesOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsOrderByDesc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringOnViews": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithUnMappedFieldsToBeReturned": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Unmapped REST names keep catalog spelling. The expected JSON still uses lowercase treeid. Not verified live."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestsWithFilterQueryStringOneOpFilter": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces different filtered order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindWithSelectAndOrderByQueryStringsOnATable": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindWithSelectAndOrderByQueryStringsOnAView": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGQLFilterTests.TestGetNullIntFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLQueryTests.TestGetNullIntFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithOneToOneRelationship": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "NUMBER(1) is_wholesale_price is mapped as a short, not a GraphQL boolean."
+    }
+  }
+}

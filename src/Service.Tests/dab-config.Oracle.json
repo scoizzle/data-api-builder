@@ -1884,6 +1884,47 @@
         "uuid_types": "uuid_types"
       }
     },
+    "BlobType": {
+      "source": {
+        "object": "blob_type_table",
+        "type": "table",
+        "key-fields": [
+          "id"
+        ]
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "BlobType",
+          "plural": "BlobTypes"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "id": "id",
+        "payload": "payload"
+      }
+    },
     "stocks_price": {
       "source": {
         "object": "stocks_price",
@@ -3146,7 +3187,13 @@
     "GetBook": {
       "source": {
         "object": "get_book_by_id",
-        "type": "stored-procedure"
+        "type": "stored-procedure",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true
+          }
+        ]
       },
       "graphql": {
         "enabled": false,

@@ -125,6 +125,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc/>
         public override HttpStatusCode GetHttpStatusCodeForException(DbException e)
         {
+            // ORA-06550 wraps every PL/SQL failure, including DAB-generated SQL. Only the
+            // wrong-number-or-types case (PLS-00306) is a client input error. The code is
+            // present in localized messages; a generic 6550 stays 500.
+            if (IsPlSqlWrongNumberOrTypes(e))
+            {
+                return HttpStatusCode.BadRequest;
+            }
+
             string errorCode = GetOracleErrorCode(e);
             return MapStatusCode(errorCode);
         }
@@ -174,12 +182,29 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ORA-12899: value too large for column
             // ORA-01400: cannot insert NULL into column
             // ORA-01438: value larger than specified precision
-            if (errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438")
+            if (IsPlSqlWrongNumberOrTypes(e) || errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438")
             {
                 return DataApiBuilderException.SubStatusCodes.DatabaseInputError;
             }
 
             return DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed;
+        }
+
+        /// <summary>
+        /// True when ORA-06550 reports PLS-00306 (wrong number or types of arguments).
+        /// Matching the PLS code keeps localized servers on the 400 path. Other 6550
+        /// text, including generic PL/SQL compile errors, is left as 500.
+        /// </summary>
+        private static bool IsPlSqlWrongNumberOrTypes(DbException e)
+        {
+            if (GetOracleErrorCode(e) != "6550")
+            {
+                return false;
+            }
+
+            string message = e.Message ?? string.Empty;
+            return message.Contains("PLS-00306", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("wrong number or types", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
