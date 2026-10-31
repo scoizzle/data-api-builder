@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -75,8 +76,53 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(0, sourceObjects.Count);
         }
 
+        [TestMethod]
+        public void CreateMetadataCommand_UsesConfiguredCommandTimeout()
+        {
+            (OracleMetadataProvider provider, _) = CreateProvider(autoentity: null, commandTimeout: 7);
+            using OracleConnection connection = new();
+            using OracleCommand command = provider.CreateMetadataCommand(connection, "SELECT 1 FROM DUAL");
+
+            Assert.AreEqual(7, command.CommandTimeout);
+            Assert.IsTrue(command.BindByName);
+            Assert.AreEqual("SELECT 1 FROM DUAL", command.CommandText);
+        }
+
+        [TestMethod]
+        public void CreateMetadataCommand_DefaultsTimeoutWhenOptionIsAbsent()
+        {
+            (OracleMetadataProvider provider, _) = CreateProvider(autoentity: null);
+            using OracleConnection connection = new();
+            using OracleCommand command = provider.CreateMetadataCommand(connection, "SELECT 1 FROM DUAL");
+
+            Assert.AreEqual(OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS, command.CommandTimeout);
+            Assert.IsTrue(command.BindByName);
+        }
+
+        [TestMethod]
+        public void CreateMetadataCommand_HonorsZeroTimeout()
+        {
+            (OracleMetadataProvider provider, _) = CreateProvider(autoentity: null, commandTimeout: 0);
+            using OracleConnection connection = new();
+            using OracleCommand command = provider.CreateMetadataCommand(connection, "SELECT 1 FROM DUAL");
+
+            Assert.AreEqual(0, command.CommandTimeout);
+        }
+
+        [TestMethod]
+        public void CreateMetadataCommand_UnknownDataSourceFallsBackToDefaultTimeout()
+        {
+            (OracleMetadataProvider provider, _) = CreateProvider(autoentity: null, commandTimeout: 7);
+            SetBaseField(provider, "_dataSourceName", "missing");
+            using OracleConnection connection = new();
+            using OracleCommand command = provider.CreateMetadataCommand(connection, "SELECT 1 FROM DUAL");
+
+            Assert.AreEqual(OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS, command.CommandTimeout);
+        }
+
         private static (OracleMetadataProvider Provider, RuntimeConfigProvider ConfigProvider) CreateProvider(
-            Autoentity? autoentity)
+            Autoentity? autoentity,
+            int? commandTimeout = null)
         {
             OracleMetadataProvider provider = (OracleMetadataProvider)RuntimeHelpers.GetUninitializedObject(
                 typeof(OracleMetadataProvider));
@@ -87,9 +133,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SetBaseAutoProperty(provider, "EntityBackingColumnsToExposedNames", new Dictionary<string, Dictionary<string, string>>());
             SetBaseAutoProperty(provider, "EntityExposedNamesToBackingColumnNames", new Dictionary<string, Dictionary<string, string>>());
 
+            Dictionary<string, object?>? options = commandTimeout is null
+                ? null
+                : new Dictionary<string, object?> { ["command-timeout"] = commandTimeout.Value };
             RuntimeConfig runtimeConfig = new(
                 Schema: string.Empty,
-                DataSource: new DataSource(DatabaseType.Oracle, "User Id=system;Password=x;Data Source=localhost:1521/x"),
+                DataSource: new DataSource(
+                    DatabaseType.Oracle,
+                    "User Id=system;Password=x;Data Source=localhost:1521/x",
+                    Options: options),
                 Entities: new RuntimeEntities(new Dictionary<string, Entity>()))
             {
                 Autoentities = autoentity is null

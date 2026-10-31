@@ -13,6 +13,7 @@ using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
 using Azure.DataApiBuilder.Core.Services.MetadataProviders;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 
@@ -265,14 +266,35 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             };
 
             List<OracleMetadataProvider.OracleArgumentRow> selected =
-                OracleMetadataProvider.SelectOracleOverload(rows, configuredParameterNames: new[] { "p_name" });
+                OracleMetadataProvider.SelectOracleOverload(rows, configuredParameterNames: new[] { "p_name", "p_id" });
 
             Assert.AreEqual(2, selected.Count);
             Assert.IsTrue(selected.All(row => row.Overload == "2"));
         }
 
         [TestMethod]
-        public void OracleOverloadSelectionUsesLowestNumberWhenConfigDoesNotMatch()
+        public void OracleOverloadSelectionThrowsWhenConfiguredNamesAreOnlyASubset()
+        {
+            List<OracleMetadataProvider.OracleArgumentRow> rows = new()
+            {
+                new("p_id", "NUMBER", "IN", 1, "1"),
+                new("p_cur", "REF CURSOR", "OUT", 2, "1"),
+                new("p_name", "VARCHAR2", "IN", 1, "2"),
+                new("p_id", "NUMBER", "IN", 2, "2"),
+            };
+
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(() =>
+                OracleMetadataProvider.SelectOracleOverload(
+                    rows,
+                    configuredParameterNames: new[] { "p_name" },
+                    qualifiedName: "SYSTEM.PKG.GET_ITEM"));
+
+            StringAssert.Contains(ex.Message, "SYSTEM.PKG.GET_ITEM");
+            StringAssert.Contains(ex.Message, "#");
+        }
+
+        [TestMethod]
+        public void OracleOverloadSelectionThrowsWhenConfigDoesNotIdentifyOneOverload()
         {
             List<OracleMetadataProvider.OracleArgumentRow> rows = new()
             {
@@ -280,12 +302,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 new("p_a", "NUMBER", "IN", 1, "1"),
             };
 
-            List<OracleMetadataProvider.OracleArgumentRow> selected =
-                OracleMetadataProvider.SelectOracleOverload(rows, configuredParameterNames: null);
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(() =>
+                OracleMetadataProvider.SelectOracleOverload(
+                    rows,
+                    configuredParameterNames: null,
+                    qualifiedName: "SYSTEM.PKG.TOUCH_ITEM"));
 
-            Assert.AreEqual(1, selected.Count);
-            Assert.AreEqual("p_a", selected[0].Name);
-            Assert.AreEqual("1", selected[0].Overload);
+            StringAssert.Contains(ex.Message, "SYSTEM.PKG.TOUCH_ITEM");
+            StringAssert.Contains(ex.Message, "#1");
+            StringAssert.Contains(ex.Message, "#2");
         }
 
         /// <summary>

@@ -34,7 +34,11 @@ namespace Azure.DataApiBuilder.Core.Services
 
         protected override DatabaseObject CreateStoredProcedureDatabaseObject(string source, EntitySourceType sourceType)
         {
-            (string? packageName, string subprogramSource) = SplitOraclePackageQualifier(source);
+            // #n is stripped before the package split. A # inside [brackets] is kept: DAB's
+            // bracket quoting can hold a literal hash, and that hash is not an overload suffix.
+            // A quoted identifier written as [sub#2] is therefore not treated as overload 2.
+            (string sourceWithoutOverload, string? overload) = SplitOracleOverloadSuffix(source);
+            (string? packageName, string subprogramSource) = SplitOraclePackageQualifier(sourceWithoutOverload);
             (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(subprogramSource);
             DatabaseStoredProcedure procedure = new(schemaName, dbObjectName)
             {
@@ -46,7 +50,61 @@ namespace Azure.DataApiBuilder.Core.Services
                 OracleObjectFacts.Procedure(procedure).PackageName = packageName;
             }
 
+            if (!string.IsNullOrEmpty(overload))
+            {
+                OracleObjectFacts.Procedure(procedure).Overload = overload;
+            }
+
             return procedure;
+        }
+
+        /// <summary>
+        /// Splits a trailing <c>#n</c> overload disambiguator from an Oracle subprogram source.
+        /// The suffix selects ALL_ARGUMENTS metadata only. Oracle still resolves the named call,
+        /// so the generated PL/SQL block does not include <c>#n</c>. A hash inside brackets is
+        /// part of the identifier and is not stripped.
+        /// </summary>
+        internal static (string Source, string? Overload) SplitOracleOverloadSuffix(string source)
+        {
+            if (string.IsNullOrEmpty(source))
+            {
+                return (source, null);
+            }
+
+            bool inBracket = false;
+            int hash = -1;
+            for (int i = 0; i < source.Length; i++)
+            {
+                char c = source[i];
+                if (c == '[')
+                {
+                    inBracket = true;
+                }
+                else if (c == ']')
+                {
+                    inBracket = false;
+                }
+                else if (c == '#' && !inBracket)
+                {
+                    hash = i;
+                }
+            }
+
+            if (hash < 0 || hash >= source.Length - 1)
+            {
+                return (source, null);
+            }
+
+            string suffix = source[(hash + 1)..];
+            foreach (char c in suffix)
+            {
+                if (!char.IsDigit(c))
+                {
+                    return (source, null);
+                }
+            }
+
+            return (source[..hash], suffix);
         }
 
         /// <summary>
