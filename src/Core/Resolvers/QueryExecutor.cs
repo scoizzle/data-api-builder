@@ -543,6 +543,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     cmd.Transaction = transaction;
                 }
 
+                await ApplySessionContextAsync(conn, httpContext, dataSourceName, transaction, cancellationToken);
+
                 TResult? result = default(TResult);
                 try
                 {
@@ -577,6 +579,39 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 queryExecutionTimer.Stop();
                 AddDbExecutionTimeToMiddlewareContext(queryExecutionTimer.ElapsedMilliseconds);
             }
+        }
+
+        /// <summary>
+        /// Applies database session context after <paramref name="transaction"/> is assigned to the
+        /// statement command and before that statement runs. The base implementation does nothing.
+        /// </summary>
+        protected virtual void ApplySessionContext(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction)
+        {
+            _ = conn;
+            _ = httpContext;
+            _ = dataSourceName;
+            _ = transaction;
+        }
+
+        /// <summary>
+        /// Asynchronous session-context hook for <see cref="ExecuteQueryAgainstDbAsyncCore{TResult}"/>.
+        /// The request abort token is <paramref name="cancellationToken"/>. Engines that only need the
+        /// synchronous hook inherit this method.
+        /// </summary>
+        protected virtual Task ApplySessionContextAsync(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ApplySessionContext(conn, httpContext, dataSourceName, transaction);
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -644,6 +679,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 {
                     cmd.Transaction = transaction;
                 }
+
+                ApplySessionContext(conn, httpContext, dataSourceName, transaction);
 
                 try
                 {

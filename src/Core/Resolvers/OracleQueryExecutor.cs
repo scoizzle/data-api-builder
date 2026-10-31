@@ -143,7 +143,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // Session context (application context) forwarding is opt-in via "set-session-context".
                 // A DBA must first create the context namespace and the package that sets it; DAB then
                 // executes a parameterized anonymous block as a separate command on the same connection
-                // before each statement (see SetSessionContextIfAny and docs/design/oracle-support.md).
+                // before each statement (see ApplySessionContext and docs/design/oracle-support.md).
                 _dataSourceToSessionContextUsage[dataSourceName] = oracleOptions.SetSessionContext;
             }
         }
@@ -226,10 +226,110 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // string outputs), and the ':dab_result' REF CURSOR must be an OUTPUT RefCursor parameter.
             OracleBindRegistrar.RegisterPlSqlOutputBinds(cmd, translatedSql);
 
-            // Forward the caller's claims to the session before the main statement executes.
-            SetSessionContextIfEnabled(conn, httpContext, dataSourceName);
-
             return cmd;
+        }
+
+        /// <summary>
+        /// Clears and sets Oracle application-context claims after the statement command is enlisted
+        /// and before it executes. A null <paramref name="httpContext"/> still clears, so a pooled
+        /// session cannot keep a previous caller's claims. The context command is one extra round trip.
+        /// </summary>
+        protected override void ApplySessionContext(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction)
+        {
+            if (conn is not OracleConnection oracleConnection
+                || !TryCreateSessionContextCommand(oracleConnection, httpContext, dataSourceName, transaction, out OracleCommand? contextCommand)
+                || contextCommand is null)
+            {
+                return;
+            }
+
+            using (contextCommand)
+            {
+                try
+                {
+                    ExecuteSessionContextCommand(contextCommand);
+                }
+                catch (DbException e)
+                {
+                    throw DbExceptionParser.Parse(e);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        protected override async Task ApplySessionContextAsync(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (conn is not OracleConnection oracleConnection
+                || !TryCreateSessionContextCommand(oracleConnection, httpContext, dataSourceName, transaction, out OracleCommand? contextCommand)
+                || contextCommand is null)
+            {
+                return;
+            }
+
+            using (contextCommand)
+            {
+                try
+                {
+                    await ExecuteSessionContextCommandAsync(contextCommand, cancellationToken);
+                }
+                catch (DbException e)
+                {
+                    throw DbExceptionParser.Parse(e);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Runs the session-context block. Tests override this to record the command without a database.
+        /// </summary>
+        protected virtual void ExecuteSessionContextCommand(OracleCommand command)
+        {
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Runs the session-context block and forwards <paramref name="cancellationToken"/> to ODP.NET.
+        /// </summary>
+        protected virtual Task ExecuteSessionContextCommandAsync(OracleCommand command, CancellationToken cancellationToken)
+        {
+            return command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private bool TryCreateSessionContextCommand(
+            OracleConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction,
+            out OracleCommand? contextCommand)
+        {
+            // Only the option gates this. A null HttpContext still clears; GetProcessedUserClaims
+            // returns an empty dictionary, so the block is CLEAR_CLAIMS and no SET_CLAIM.
+            if (!IsSessionContextEnabled(dataSourceName))
+            {
+                contextCommand = null;
+                return false;
+            }
+
+            contextCommand = BuildSessionContextCommand(
+                conn,
+                AuthorizationResolver.GetProcessedUserClaims(httpContext),
+                dataSourceName);
+            if (transaction is OracleTransaction oracleTransaction)
+            {
+                contextCommand.Transaction = oracleTransaction;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -700,41 +800,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string SESSION_CONTEXT_PACKAGE = "DAB_SESSION_CONTEXT_PKG";
 
         /// <summary>
-        /// Forwards the caller's claims to the database session as Oracle application context
-        /// attributes before the main statement executes, mirroring MSSQL's sp_set_session_context.
-        /// Oracle receives the setup as a separate parameterized anonymous block on the same
-        /// connection because a PL/SQL block cannot be prepended to a different statement in one
-        /// OracleCommand. Multi-valued claims are forwarded as JSON array strings
-        /// (AuthorizationResolver.GetProcessedUserClaims) so database-side policies can expand them
-        /// with JSON_TABLE and IN. Any context left on the pooled session is cleared first so a
-        /// request can never observe a previous request's claim values.
-        /// </summary>
-        private void SetSessionContextIfEnabled(OracleConnection conn, HttpContext? httpContext, string dataSourceName)
-        {
-            if (!IsSessionContextEnabled(dataSourceName) || httpContext is null)
-            {
-                return;
-            }
-
-            try
-            {
-                using OracleCommand cmd = BuildSessionContextCommand(
-                    conn,
-                    AuthorizationResolver.GetProcessedUserClaims(httpContext),
-                    dataSourceName);
-                cmd.ExecuteNonQuery();
-            }
-            catch (DbException e)
-            {
-                throw DbExceptionParser.Parse(e);
-            }
-        }
-
-        /// <summary>
         /// Whether claim forwarding is enabled for the data source. Data sources that are unknown to
         /// this executor (e.g. during startup metadata discovery) are treated as disabled.
+        /// An empty name uses the default data source, matching the other executors.
         /// </summary>
-        private bool IsSessionContextEnabled(string dataSourceName)
+        internal bool IsSessionContextEnabled(string dataSourceName)
         {
             if (string.IsNullOrEmpty(dataSourceName))
             {
