@@ -81,9 +81,21 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   (`AuthorizationResolver.GetProcessedUserClaims`): a single-valued claim is forwarded as a scalar, and
   multiple claims of the same name as a JSON array string (e.g. `["group1","group2"]`). `roles` resolves
   to the active `X-MS-API-ROLE` value; the token's roles are exposed as `original_roles`.
-- **No stale claims.** Every execution clears the namespace (`CLEAR_CLAIMS`) before setting the current
-  request's claims, so a pooled connection cannot leak a previous request's values to a request that
-  lacks that claim. (This intentionally differs from MSSQL, which only overwrites the keys it sets.)
+- **No stale claims.** Every statement that goes through the query executor clears the namespace
+  (`CLEAR_CLAIMS`) before setting the current request's claims, including statements with no
+  `HttpContext` (MCP stdio, background work, and metadata commands). A null context clears and sets
+  nothing, so a pooled connection cannot keep a previous caller's claims. (This intentionally differs
+  from MSSQL, which only overwrites the keys it sets.) The clear is one extra PL/SQL round trip per
+  statement while the option is on, and zero round trips while it is off.
+- **Mutations.** The context command runs after the statement command is enlisted in the local
+  transaction. When that transaction is an `OracleTransaction`, the context command is enlisted in it
+  too. The async request path passes the request-abort token to the context command. The synchronous
+  query path has no token.
+- **Health check.** The data-source health query is `SELECT 1 FROM DUAL` on a raw pooled connection
+  opened by `HttpUtilities.ExecuteDbQueryAsync`, not by the query executor. That statement does not read
+  `SYS_CONTEXT`, so it cannot observe or return a previous caller's claims. It also does not clear the
+  namespace; the next executor checkout does. Enabling `set-session-context` does not require the DBA
+  package to exist at health-check time.
 - **Injection safety.** Claim names and values are always bound parameters; claim text is never
   concatenated into SQL.
 - **Caching.** Enabling the option disables response caching for the data source, the same as MSSQL.

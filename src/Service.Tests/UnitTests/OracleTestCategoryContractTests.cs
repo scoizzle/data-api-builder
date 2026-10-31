@@ -36,6 +36,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLQueryTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleMultipleCreateTransactionIntegrationTests",
+            "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleMultiSourceRestMutationTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleNumberColumnTypesTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleOverloadExecutionTests",
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleQuotedIdentifierTests",
@@ -55,6 +56,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         private static readonly HashSet<string> _liveWithoutFixture = new(StringComparer.Ordinal)
         {
             "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleMultipleCreateTransactionIntegrationTests",
+            "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleMultiSourceRestMutationTests",
         };
 
         /// <summary>
