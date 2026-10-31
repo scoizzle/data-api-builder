@@ -127,17 +127,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 OracleOptions oracleOptions = dataSource.GetTypedOptions<OracleOptions>() ?? new OracleOptions();
                 _dataSourceCommandTimeouts[dataSourceName] = oracleOptions.CommandTimeoutSeconds;
 
-                // Hosted/late-configured deployments must not send database traffic in cleartext.
-                // MySQL/PostgreSQL force SslMode=VerifyFull and MSSQL forces Encrypt=true; ODP.NET
-                // rejects SqlClient's "Encryption=true" keyword, so require native network encryption
-                // process-wide instead (covers both TCPS and Oracle native encryption).
-                if (_runtimeConfigProvider.IsLateConfigured)
-                {
-                    OracleConfiguration.SqlNetEncryptionClient = "REQUIRED";
-                }
-
-                // ODP.NET rejects SqlClient's Encryption=true keyword; do not append it when hosted.
-                OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
+                // Hosted mode validates TCPS + SSL_SERVER_DN_MATCH and does not mutate
+                // OracleConfiguration (that static is rejected with ORA-50099 after any
+                // connection opens, which breaks hot reload). Statement-cache bounds apply
+                // whenever the operator left both cache attributes unset.
+                string preparedConnectionString = OracleConnectionStringPolicy.Prepare(
+                    dataSource.ConnectionString,
+                    _runtimeConfigProvider.IsLateConfigured);
+                OracleConnectionStringBuilder builder = new(preparedConnectionString);
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
                 bool? managedIdentityOption = oracleOptions.ManagedIdentity;
                 _dataSourceManagedIdentityOptions[dataSourceName] = managedIdentityOption;
@@ -249,8 +246,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         ///    the UTC wall clock, matching DAB's contract that date/time values are UTC.
         ///  - TIMESTAMP WITH TIME ZONE columns carry DbType.DateTimeOffset, so their parameters
         ///    keep the offset (Oracle compares instants for those columns).
+        ///  - A plain <see cref="DateTime"/> has no DbType mapping in TypeHelper.
+        ///    Left untyped, the parameter stays VARCHAR2 until the value setter, so TIMESTAMP
+        ///    writes depend on driver inference. The default branch binds TIMESTAMP explicitly.
         /// Parameters without a DbType hint (date literals the OData parser wrapped in a
         /// ConvertNode do not inherit the column type) fall back to the plain TIMESTAMP form.
+        /// String parameters use column facts copied onto the parameter
+        /// (<see cref="OracleStringBindFacts"/>). CLOB/NCLOB bind as LOBs. A string whose
+        /// UTF-8 length exceeds the standard VARCHAR2 byte limit binds as CLOB so a
+        /// multi-byte VARCHAR2(4000 CHAR) value is not sent as VARCHAR2.
         /// </summary>
         /// <inheritdoc />
         public override void PopulateDbTypeForParameter(
@@ -258,13 +262,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             DbParameter parameter)
         {
             if (parameter is not OracleParameter oracleParameter
-                || parameterEntry.Value is null
-                || parameterEntry.Value.Value is null)
+                || parameterEntry.Value is null)
             {
                 return;
             }
 
-            object value = parameterEntry.Value.Value;
+            object? value = parameterEntry.Value.Value;
+            if (value is null)
+            {
+                ApplyOracleStringBind(parameterEntry.Value, null, oracleParameter);
+                return;
+            }
+
             switch (parameterEntry.Value.DbType)
             {
                 case DbType.DateTimeOffset:
@@ -282,13 +291,67 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     // TypeHelper has no DbType mapping, so most date filters have no hint.
                     if (value is Microsoft.OData.Edm.Date
                         or DateTimeOffset
-                        or DateOnly)
+                        or DateOnly
+                        or DateTime)
                     {
                         oracleParameter.OracleDbType = OracleDbType.TimeStamp;
                         oracleParameter.Value = ToUtcWallClock(value);
                     }
+                    else
+                    {
+                        ApplyOracleStringBind(parameterEntry.Value, value, oracleParameter);
+                    }
 
                     break;
+            }
+        }
+
+        /// <summary>
+        /// Standard VARCHAR2 byte limit (MAX_STRING_SIZE=STANDARD). A bind longer than this
+        /// is sent as a LOB so ODP.NET does not leave it as VARCHAR2.
+        /// </summary>
+        private const int Varchar2StandardByteLimit = 4000;
+
+        /// <summary>
+        /// Selects CLOB, NCLOB, or NVARCHAR2 from column facts. Facts win over the value length.
+        /// A national column whose value exceeds the VARCHAR2 byte limit binds as NCLOB; any
+        /// other wide string binds as CLOB. Nulls still receive the column's type.
+        /// </summary>
+        private static void ApplyOracleStringBind(DbConnectionParam parameter, object? value, OracleParameter oracleParameter)
+        {
+            OracleStringBindFacts.Kind kind = OracleStringBindFacts.Get(parameter);
+            if (kind == OracleStringBindFacts.Kind.NClob)
+            {
+                oracleParameter.OracleDbType = OracleDbType.NClob;
+                return;
+            }
+
+            if (kind == OracleStringBindFacts.Kind.Clob)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Clob;
+                return;
+            }
+
+            if (value is not string text)
+            {
+                if (kind == OracleStringBindFacts.Kind.NChar)
+                {
+                    oracleParameter.OracleDbType = OracleDbType.NVarchar2;
+                }
+
+                return;
+            }
+
+            bool exceedsVarchar2 = Encoding.UTF8.GetByteCount(text) > Varchar2StandardByteLimit;
+            if (kind == OracleStringBindFacts.Kind.NChar)
+            {
+                oracleParameter.OracleDbType = exceedsVarchar2 ? OracleDbType.NClob : OracleDbType.NVarchar2;
+                return;
+            }
+
+            if (exceedsVarchar2)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Clob;
             }
         }
 
@@ -908,9 +971,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 // Variable-length outputs need an explicit size or ODP.NET returns empty
                 // or raises. RAW left at Size 0 fails every mutation that returns the column.
-                if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char)
+                // Character sizes come from the builder hint (char length × 4, already clamped
+                // to 32767). An unknown hint keeps the historical 4000-byte default.
+                if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char or OracleDbType.NChar)
                 {
-                    output.Size = 4000;
+                    output.Size = ClampCharacterOutputSize(hint.Size ?? 4000);
                 }
                 else if (outputType == OracleDbType.Raw)
                 {
@@ -920,6 +985,25 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 cmd.Parameters.Add(output);
                 existing.Add(bindName);
             }
+        }
+
+        /// <summary>
+        /// PL/SQL VARCHAR2/NVARCHAR2 variables cannot exceed 32767 bytes. A non-positive hint
+        /// is raised to 1 so ODP.NET does not treat the bind as unsized.
+        /// </summary>
+        private static int ClampCharacterOutputSize(int size)
+        {
+            if (size < 1)
+            {
+                return 1;
+            }
+
+            if (size > 32767)
+            {
+                return 32767;
+            }
+
+            return size;
         }
 
         [GeneratedRegex(@"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)", RegexOptions.IgnoreCase | RegexOptions.Singleline)]

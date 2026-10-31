@@ -37,6 +37,7 @@ namespace Azure.DataApiBuilder.Core.Services
         private readonly Dictionary<SourceDefinition, (string SchemaName, string TableName)> _sourceTableMap = new();
         private readonly RuntimeConfigProvider _runtimeConfigProvider;
         private string? _defaultSchemaName;
+        private static int _openCursorsWarningEmitted;
 
         private static readonly Regex SelectIntoIdentityRegex = new(
             @"SELECT\s+(?:\w+\.)?\w+\.NEXTVAL\s+INTO\s+:new\.(""?\w+""?)\s+FROM\s+dual",
@@ -56,6 +57,12 @@ namespace Azure.DataApiBuilder.Core.Services
             : base(runtimeConfigProvider, runtimeConfigValidator, queryManagerFactory, logger, dataSourceName, isValidateOnly)
         {
             _runtimeConfigProvider = runtimeConfigProvider;
+            // The executor applies the same policy to its pooled connections. Metadata
+            // connections are opened from this string, so they must be bounded and, in
+            // hosted mode, already TCPS. The raw config string is not rewritten in place.
+            ConnectionString = OracleConnectionStringPolicy.Prepare(
+                ConnectionString,
+                runtimeConfigProvider.IsLateConfigured);
         }
 
         /// <summary>
@@ -155,6 +162,50 @@ namespace Azure.DataApiBuilder.Core.Services
             foreach (DatabaseObject databaseObject in EntityToDatabaseObject.Values)
             {
                 await ResolveDatabaseObjectAsync(databaseObject, seen, objectTypeCache, synonymCache);
+            }
+
+            await WarnIfOpenCursorsAreLowAsync();
+        }
+
+        /// <summary>
+        /// Best-effort read of <c>open_cursors</c>. A low value is logged once. Failure to read
+        /// <c>v$parameter</c> (including ORA-00942) does not fail startup.
+        /// </summary>
+        private async Task WarnIfOpenCursorsAreLowAsync()
+        {
+            try
+            {
+                using OracleConnection connection = new(ConnectionString);
+                await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
+                await connection.OpenAsync();
+                using OracleCommand command = connection.CreateCommand();
+                command.CommandText = "SELECT value FROM v$parameter WHERE name = 'open_cursors'";
+                object? raw = await command.ExecuteScalarAsync();
+                if (raw is null or DBNull)
+                {
+                    return;
+                }
+
+                int openCursors = Convert.ToInt32(raw);
+                if (!OracleConnectionStringPolicy.ShouldWarnAboutOpenCursors(openCursors)
+                    || Interlocked.Exchange(ref _openCursorsWarningEmitted, 1) != 0)
+                {
+                    return;
+                }
+
+                _logger.LogWarning(
+                    "Oracle open_cursors is {OpenCursors}, below {Threshold}. Distinct statements can exhaust the session and fail with ORA-01000. Raise open_cursors, or set Statement Cache Size on the connection string. When neither Statement Cache Size nor Self Tuning is set, DAB uses a fixed cache of {CacheSize} and disables self-tuning.",
+                    openCursors,
+                    OracleConnectionStringPolicy.OpenCursorsWarningThreshold,
+                    OracleConnectionStringPolicy.DefaultStatementCacheSize);
+            }
+            catch (OracleException ex) when (ex.Number == 942)
+            {
+                // v$parameter is not granted. The cache bound still applies.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Skipped the Oracle open_cursors startup probe.");
             }
         }
 
@@ -688,14 +739,24 @@ namespace Azure.DataApiBuilder.Core.Services
                     }
 
                     // CLOB/NCLOB columns are surfaced as System.String by the driver, but their
-                    // bind/output types must not be limited to VARCHAR2(4000) - the Oracle query
-                    // builder maps these to OracleDbType.Clob so RETURNING ... INTO binds hold
-                    // values larger than 4000 characters.
+                    // bind/output types must not be limited to VARCHAR2(4000). NCLOB is national
+                    // character data and must not share the CLOB flag.
                     if (physicalType is not null
-                        && (physicalType.Equals("CLOB", StringComparison.OrdinalIgnoreCase)
-                            || physicalType.Equals("NCLOB", StringComparison.OrdinalIgnoreCase)))
+                        && physicalType.Equals("NCLOB", StringComparison.OrdinalIgnoreCase))
+                    {
+                        OracleObjectFacts.Column(columnDefinition).IsNClob = true;
+                    }
+                    else if (physicalType is not null
+                        && physicalType.Equals("CLOB", StringComparison.OrdinalIgnoreCase))
                     {
                         OracleObjectFacts.Column(columnDefinition).IsClob = true;
+                    }
+
+                    if (physicalType is not null
+                        && (physicalType.Equals("NVARCHAR2", StringComparison.OrdinalIgnoreCase)
+                            || physicalType.Equals("NCHAR", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        OracleObjectFacts.Column(columnDefinition).IsNChar = true;
                     }
 
                     // Precision-aware NUMBER mapping. Unconstrained NUMBER (no catalog precision)
@@ -719,6 +780,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     // LONG) are unbounded and stay on the LOB path.
                     if (columnDefinition.SystemType == typeof(string)
                         && !OracleObjectFacts.Column(columnDefinition).IsClob
+                        && !OracleObjectFacts.Column(columnDefinition).IsNClob
                         && physicalType is not null
                         && !physicalType.Equals("LONG", StringComparison.OrdinalIgnoreCase))
                     {

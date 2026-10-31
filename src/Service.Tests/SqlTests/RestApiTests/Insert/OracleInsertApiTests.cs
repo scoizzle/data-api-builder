@@ -4,6 +4,8 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Service.Exceptions;
@@ -501,6 +503,87 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Insert
                 expectedStatusCode: HttpStatusCode.BadRequest,
                 expectedSubStatusCode: "BadRequest"
             );
+        }
+
+        /// <summary>
+        /// Live check that a TIMESTAMP(7) insert keeps the 7-digit fraction.
+        /// Not run in the default job (class is TestCategory.ORACLE; no Oracle instance here).
+        /// </summary>
+        [TestMethod]
+        public async Task InsertSupportedTypePreservesTimestampFraction()
+        {
+            const string requestBody = """
+            {
+                "typeid": 9101,
+                "datetime2_types": "1999-01-08T10:23:54.9999999Z"
+            }
+            """;
+
+            string body = await PostEntityAsync(_integrationTypeEntity, requestBody);
+            StringAssert.Contains(body, "9999999");
+
+            string stored = await GetDatabaseResultAsync(@"
+                SELECT JSON_OBJECT('stored' VALUE TO_CHAR(datetime2_types, 'YYYY-MM-DD HH24:MI:SS.FF7')) AS data
+                FROM type_table
+                WHERE id = 9101");
+            StringAssert.Contains(stored, "1999-01-08 10:23:54.9999999");
+        }
+
+        /// <summary>
+        /// A DATE insert stays at midnight. Sibling of the TIMESTAMP fraction insert.
+        /// Not run in the default job.
+        /// </summary>
+        [TestMethod]
+        public async Task InsertSupportedTypeDateStaysAtMidnight()
+        {
+            const string requestBody = """
+            {
+                "typeid": 9104,
+                "date_types": "1999-01-08"
+            }
+            """;
+
+            await PostEntityAsync(_integrationTypeEntity, requestBody);
+
+            string stored = await GetDatabaseResultAsync(@"
+                SELECT JSON_OBJECT('stored' VALUE TO_CHAR(date_types, 'YYYY-MM-DD HH24:MI:SS')) AS data
+                FROM type_table
+                WHERE id = 9104");
+            StringAssert.Contains(stored, "1999-01-08 00:00:00");
+        }
+
+        /// <summary>
+        /// A 20KB CLOB insert round-trips through REST and is stored at that length.
+        /// ArtOfWar has no NCLOB column and GraphQL is disabled, so this is the CLOB coverage.
+        /// Not run in the default job.
+        /// </summary>
+        [TestMethod]
+        public async Task InsertArtOfWarPreservesWideClob()
+        {
+            string payload = new('A', 20 * 1024);
+            string requestBody =
+                "{\"┬─┬ノ( º _ ºノ)\": 9102, \"始計\": \"" + payload + "\"}";
+
+            string body = await PostEntityAsync(_integrationUniqueCharactersEntity, requestBody);
+            StringAssert.Contains(body, payload);
+
+            string stored = await GetDatabaseResultAsync(@"
+                SELECT JSON_OBJECT('len' VALUE DBMS_LOB.GETLENGTH(DetailAssessmentAndPlanning)) AS data
+                FROM aow
+                WHERE NoteNum = 9102");
+            StringAssert.Contains(stored, "20480");
+        }
+
+        private static async Task<string> PostEntityAsync(string entityName, string requestBody)
+        {
+            using HttpRequestMessage request = new(HttpMethod.Post, "api/" + entityName)
+            {
+                Content = new StringContent(requestBody, Encoding.UTF8, "application/json")
+            };
+            HttpResponseMessage response = await HttpClient.SendAsync(request);
+            string body = await response.Content.ReadAsStringAsync();
+            Assert.AreEqual(HttpStatusCode.Created, response.StatusCode, body);
+            return body;
         }
     }
 }

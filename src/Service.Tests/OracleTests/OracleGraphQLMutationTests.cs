@@ -460,6 +460,34 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 statusCode: $"{DataApiBuilderException.SubStatusCodes.DatabaseInputError}");
         }
 
+        /// <summary>
+        /// Live check that createSupportedType stores a TIMESTAMP(7) fraction.
+        /// Not run in the default job (class is TestCategory.ORACLE; no Oracle instance here).
+        /// ArtOfWar GraphQL is disabled, so there is no GraphQL CLOB upsert here.
+        /// </summary>
+        [TestMethod]
+        public async Task CreateSupportedTypePreservesTimestampFraction()
+        {
+            string graphQLMutationName = "createSupportedType";
+            string graphQLMutation = @"
+                mutation {
+                    createSupportedType(item: { typeid: 9103, datetime2_types: ""1999-01-08T10:23:54.9999999Z"" }) {
+                        typeid
+                        datetime2_types
+                    }
+                }
+            ";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, graphQLMutationName, isAuthenticated: true);
+            StringAssert.Contains(actual.ToString(), "9999999");
+
+            string stored = await GetDatabaseResultAsync(@"
+                SELECT JSON_OBJECT('stored' VALUE TO_CHAR(datetime2_types, 'YYYY-MM-DD HH24:MI:SS.FF7')) AS data
+                FROM type_table
+                WHERE id = 9103");
+            StringAssert.Contains(stored, "1999-01-08 10:23:54.9999999");
+        }
+
         #endregion
     }
 }
