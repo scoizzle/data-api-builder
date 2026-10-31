@@ -266,6 +266,12 @@ begin
          dbms_output.put_line(SQLERRM);
    end;
    begin
+      execute immediate q'[DROP TABLE blob_type_table CASCADE CONSTRAINTS]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
       execute immediate q'[DROP TABLE type_table CASCADE CONSTRAINTS]';
    exception
       when others then
@@ -799,10 +805,14 @@ begin
         date_types DATE,
         datetime_types TIMESTAMP,
         datetime2_types TIMESTAMP(7),
-        datetimeoffset_types TIMESTAMP,
+        datetimeoffset_types TIMESTAMP(6) WITH TIME ZONE,
         smalldatetime_types TIMESTAMP,
-        bytearray_types VARCHAR2(4000),
+        bytearray_types RAW(2000),
         uuid_types VARCHAR2(32)
+     ) ]';
+   execute immediate q'[CREATE TABLE blob_type_table(
+        id NUMBER PRIMARY KEY,
+        payload BLOB
      ) ]';
    execute immediate q'[CREATE TABLE trees (
         treeId NUMBER PRIMARY KEY,
@@ -2002,9 +2012,9 @@ begin
         0.33, 0.33, 0.333333, 1,
         TO_DATE('1999-01-08', 'YYYY-MM-DD'), TO_TIMESTAMP('1999-01-08 10:23:54', 'YYYY-MM-DD HH24:MI:SS'),
         TO_TIMESTAMP('1999-01-08 10:23:54.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('1999-01-08 10:23:54.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP_TZ('1999-01-08 10:23:54.999999 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'),
         TO_TIMESTAMP('1999-01-08 10:23:54', 'YYYY-MM-DD HH24:MI:SS'),
-        'ABCDEF0123' ) ]';
+        HEXTORAW('ABCDEF0123') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,
         single_types, float_types, decimal_types, boolean_types,
         date_types, datetime_types, datetime2_types, datetimeoffset_types, smalldatetime_types,
@@ -2013,7 +2023,7 @@ begin
         -9.2, -9.2, -9.292929, 0,
         TO_DATE('1999-01-08', 'YYYY-MM-DD'), TO_TIMESTAMP('1999-01-08 10:23:00', 'YYYY-MM-DD HH24:MI:SS'),
         TO_TIMESTAMP('1999-01-08 10:23:00.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('1999-01-08 10:23:00.9999999', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP_TZ('1999-01-08 10:23:00.999999 -05:00', 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'),
         TO_TIMESTAMP('1999-01-08 10:23:00', 'YYYY-MM-DD HH24:MI:SS'),
         HEXTORAW('98AB7511AABB1234') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,
@@ -2024,7 +2034,7 @@ begin
         -3.4E30, -1.7E100, 0.000000001, 1,
         TO_DATE('1900-01-01', 'YYYY-MM-DD'), TO_TIMESTAMP('1900-01-01 00:00:00.000', 'YYYY-MM-DD HH24:MI:SS.FF3'),
         TO_TIMESTAMP('1900-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('1900-01-01 00:00:00.0000000', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP_TZ('1900-01-01 00:00:00.000000 +00:00', 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'),
         TO_TIMESTAMP('1900-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS'),
         HEXTORAW('00000000') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,
@@ -2035,7 +2045,7 @@ begin
         3.4E30, 1.7E100, 99999999.999999, 1,
         TO_DATE('9999-12-31', 'YYYY-MM-DD'), TO_TIMESTAMP('9999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS'),
         TO_TIMESTAMP('9999-12-31 23:59:59.9999990', 'YYYY-MM-DD HH24:MI:SS.FF7'),
-        TO_TIMESTAMP('9999-12-31 23:59:59.9999990', 'YYYY-MM-DD HH24:MI:SS.FF7'),
+        TO_TIMESTAMP_TZ('9999-12-31 23:59:59.999999 +00:00', 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'),
         TO_TIMESTAMP('2079-06-06 00:00:00', 'YYYY-MM-DD HH24:MI:SS'),
         HEXTORAW('FFFFFFFF') ) ]';
    execute immediate q'[INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,
@@ -2044,6 +2054,8 @@ begin
         bytearray_types)
     VALUES (5, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL ) ]';
    execute immediate q'[INSERT INTO type_table(id, uuid_types) VALUES (10, 'D1D021A847B44AE4B71898E89C41A161')]';
+   execute immediate q'[INSERT INTO blob_type_table(id, payload) VALUES (1, HEXTORAW('DEADBEEF'))]';
+   execute immediate q'[INSERT INTO blob_type_table(id, payload) VALUES (2, NULL)]';
    execute immediate q'[INSERT INTO sales(id, item_name, subtotal, tax) VALUES (1, 'Watch', 249.00, 20.59)]';
    execute immediate q'[INSERT INTO sales(id, item_name, subtotal, tax) VALUES (2, 'Montior', 120.50, 11.12)]';
    execute immediate q'[INSERT INTO notebooks(id, notebookname, color, ownername) VALUES (1, 'Notebook1', 'red', 'Sean')]';
@@ -2796,12 +2808,12 @@ execute immediate q'[
    execute immediate q'[CREATE OR REPLACE PROCEDURE get_book_by_id(id IN NUMBER, cursor OUT SYS_REFCURSOR) AS
     BEGIN
         OPEN cursor FOR
-        SELECT * FROM books WHERE id = id ;
+        SELECT * FROM books WHERE books.id = get_book_by_id.id ;
     END ; ]';
    execute immediate q'[CREATE OR REPLACE PROCEDURE get_publisher_by_id(id IN NUMBER, cursor OUT SYS_REFCURSOR) AS
     BEGIN
         OPEN cursor FOR
-        SELECT * FROM publishers WHERE id = id ;
+        SELECT * FROM publishers WHERE publishers.id = get_publisher_by_id.id ;
     END ; ]';
    execute immediate q'[CREATE OR REPLACE PROCEDURE get_books(cursor OUT SYS_REFCURSOR) AS
     BEGIN
@@ -2827,9 +2839,9 @@ execute immediate q'[
     END ; ]';
    execute immediate q'[CREATE OR REPLACE PROCEDURE update_book_title(id IN NUMBER, title IN VARCHAR2, cursor OUT SYS_REFCURSOR) AS
     BEGIN
-        UPDATE books SET title = title WHERE id = id ;
+        UPDATE books SET title = update_book_title.title WHERE books.id = update_book_title.id ;
         OPEN cursor FOR
-        SELECT * FROM books WHERE id = id ;
+        SELECT * FROM books WHERE books.id = update_book_title.id ;
         COMMIT ;
     END ; ]';
    execute immediate q'[CREATE OR REPLACE PROCEDURE get_authors_history_by_first_name(firstName IN VARCHAR2, cursor OUT SYS_REFCURSOR) AS
