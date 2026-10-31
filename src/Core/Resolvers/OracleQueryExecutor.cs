@@ -58,6 +58,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private Dictionary<string, bool> _dataSourceAccessTokenUsage;
 
         /// <summary>
+        /// DatasourceName to the explicit "managed-identity" option (null = infer from the connection string).
+        /// </summary>
+        private readonly Dictionary<string, bool?> _dataSourceManagedIdentityOptions = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// DatasourceName to boolean value indicating if session context should be set for db using Oracle application contexts.
         /// </summary>
         private Dictionary<string, bool> _dataSourceToSessionContextUsage;
@@ -134,7 +139,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // ODP.NET rejects SqlClient's Encryption=true keyword; do not append it when hosted.
                 OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
-                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder);
+                bool? managedIdentityOption = oracleOptions.ManagedIdentity;
+                _dataSourceManagedIdentityOptions[dataSourceName] = managedIdentityOption;
+                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(
+                    builder,
+                    managedIdentityOption,
+                    controllerTokenSupplied: _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? configuredToken) && configuredToken is not null);
 
                 // Session context (application context) forwarding is opt-in via "set-session-context".
                 // A DBA must first create the context namespace and the package that sets it; DAB then
@@ -396,67 +406,126 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Modifies the properties of the supplied connection string to support managed identity access.
-        /// In the case of Oracle, if a default managed identity needs to be used, the password in the
-        /// connection needs to be replaced with the default access token.
+        /// Applies a managed identity access token to the supplied connection via
+        /// <see cref="OracleConnection.AccessToken"/>. The token never appears in a connection string,
+        /// and the Data Source descriptor (TLS/wallet options) is preserved; only User Id, Password and
+        /// proxy credentials are normalized as ODP.NET requires for token authentication. This is the three-argument overload because every
+        /// core execution and metadata path calls it; the two-argument base overload chains here.
         /// </summary>
         /// <param name="conn">The supplied connection to modify for managed identity access.</param>
         /// <param name="dataSourceName">Name of datasource for which to set access token. Default dbName taken from config if null</param>
-        public override async Task SetManagedIdentityAccessTokenIfAnyAsync(DbConnection conn, string dataSourceName)
+        /// <param name="cancellationToken">Cancels token acquisition.</param>
+        public override async Task SetManagedIdentityAccessTokenIfAnyAsync(
+            DbConnection conn,
+            string dataSourceName,
+            CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // using default datasource name for first db - maintaining backward compatibility for single db scenario.
             if (string.IsNullOrEmpty(dataSourceName))
             {
                 dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
             }
 
-            _dataSourceAccessTokenUsage.TryGetValue(dataSourceName, out bool setAccessToken);
+            // A token supplied by the configuration controller is applied whenever the connection
+            // string/option allow token authentication; it can arrive after construction. Otherwise
+            // fall back to the flag computed at configuration time (which is cleared when the default
+            // credential turns out to be unavailable).
+            _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? accessTokenFromController);
+            bool setAccessToken;
+            if (accessTokenFromController is not null)
+            {
+                _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
+                setAccessToken = ConnectionStringBuilders.TryGetValue(dataSourceName, out DbConnectionStringBuilder? existing) &&
+                    existing is OracleConnectionStringBuilder existingBuilder &&
+                    ShouldManagedIdentityAccessBeAttempted(existingBuilder, managedIdentityOption, controllerTokenSupplied: true);
+            }
+            else
+            {
+                _dataSourceAccessTokenUsage.TryGetValue(dataSourceName, out setAccessToken);
+            }
 
             // Only attempt to get the access token if the connection string is in the appropriate format
             if (setAccessToken)
             {
-                OracleConnection sqlConn = (OracleConnection)conn;
-
                 // If the configuration controller provided a managed identity access token use that,
                 // else use the default saved access token if still valid.
                 // Get a new token only if the saved token is null or expired.
-                _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? accessTokenFromController);
                 string? accessToken = accessTokenFromController ??
                     (IsDefaultAccessTokenValid() ?
                         ((AccessToken)_defaultAccessToken!).Token :
-                        await GetAccessTokenAsync(dataSourceName));
+                        await GetAccessTokenAsync(dataSourceName, cancellationToken));
 
                 if (accessToken is not null)
                 {
-                    sqlConn.ConnectionString = BuildConnectionStringWithAccessToken(sqlConn.ConnectionString, accessToken);
+                    OracleConnection oracleConnection = (OracleConnection)conn;
+                    oracleConnection.ConnectionString = PrepareConnectionStringForTokenAuthentication(oracleConnection.ConnectionString);
+                    oracleConnection.AccessToken = new OracleAccessToken(accessToken.ToCharArray());
                 }
             }
         }
 
         /// <summary>
-        /// Replaces the password in an Oracle connection string with a managed identity access
-        /// token. All other attributes are round-tripped through <see cref="OracleConnectionStringBuilder"/>,
-        /// including the Data Source descriptor, so TLS/wallet options carried in the descriptor
-        /// (e.g. PROTOCOL=TCPS, SECURITY=(MY_WALLET_DIRECTORY=...)) are preserved.
-        /// Exposed as internal to allow a regression test that the security-relevant attributes
-        /// survive token application.
+        /// ODP.NET rejects <see cref="OracleConnection.AccessToken"/> (ORA-50108) unless the connection
+        /// string has <c>User Id=/</c> and no password or proxy credentials. Normalizes those keywords
+        /// and leaves every other attribute, including the Data Source descriptor with its TLS/wallet
+        /// options, untouched. The access token itself is never written to the connection string.
+        /// Returns the input unchanged when it is already in the required form.
         /// </summary>
-        internal static string BuildConnectionStringWithAccessToken(string connectionString, string accessToken)
+        internal static string PrepareConnectionStringForTokenAuthentication(string connectionString)
         {
-            OracleConnectionStringBuilder newConnectionString = new(connectionString)
+            OracleConnectionStringBuilder builder = new(connectionString);
+            if (string.Equals(builder.UserID, "/", StringComparison.Ordinal) &&
+                string.IsNullOrEmpty(builder.Password) &&
+                string.IsNullOrEmpty(builder.ProxyUserId) &&
+                string.IsNullOrEmpty(builder.ProxyPassword))
             {
-                Password = accessToken
-            };
-            return newConnectionString.ToString();
+                return connectionString;
+            }
+
+            builder.UserID = "/";
+            builder.Remove("Password");
+            builder.Remove("Proxy User Id");
+            builder.Remove("Proxy Password");
+            return builder.ConnectionString;
         }
 
         /// <summary>
         /// Determines if managed identity access should be attempted or not.
-        /// It should only be attempted if the password is not provided
+        /// Precedence: an explicit <c>managed-identity</c> option wins; otherwise wallet or external
+        /// authentication markers disable it; otherwise a controller-supplied token enables it;
+        /// otherwise it is inferred from an empty password.
         /// </summary>
-        private static bool ShouldManagedIdentityAccessBeAttempted(OracleConnectionStringBuilder builder)
+        /// <param name="builder">The data source's connection string builder.</param>
+        /// <param name="managedIdentityOption">Explicit option value, or null to infer.</param>
+        /// <param name="controllerTokenSupplied">True when the configuration controller supplied a token.</param>
+        internal static bool ShouldManagedIdentityAccessBeAttempted(
+            OracleConnectionStringBuilder builder,
+            bool? managedIdentityOption,
+            bool controllerTokenSupplied)
         {
-            return string.IsNullOrEmpty(builder.Password);
+            if (managedIdentityOption.HasValue)
+            {
+                return managedIdentityOption.Value;
+            }
+
+            if (HasWalletOrExternalAuthMarkers(builder))
+            {
+                return false;
+            }
+
+            return controllerTokenSupplied || string.IsNullOrEmpty(builder.Password);
+        }
+
+        /// <summary>
+        /// True when the connection string requests wallet-based or external (OS/wallet) authentication,
+        /// in which case the credential must not be replaced by a managed identity token.
+        /// </summary>
+        private static bool HasWalletOrExternalAuthMarkers(OracleConnectionStringBuilder builder)
+        {
+            return string.Equals(builder.UserID?.Trim(), "/", StringComparison.Ordinal) ||
+                builder.DataSource.Contains("WALLET", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -476,7 +545,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         /// <returns>The string representation of the access token if found,
         /// null otherwise.</returns>
-        private async Task<string?> GetAccessTokenAsync(string dataSourceName)
+        private async Task<string?> GetAccessTokenAsync(string dataSourceName, CancellationToken cancellationToken)
         {
             bool firstAttemptAtDefaultAccessToken = _defaultAccessToken is null;
 
@@ -484,7 +553,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 _defaultAccessToken =
                     await AzureCredential.GetTokenAsync(
-                        new TokenRequestContext(new[] { DATABASE_SCOPE }));
+                        new TokenRequestContext(new[] { DATABASE_SCOPE }),
+                        cancellationToken);
+            }
+            // A cancelled request is not evidence that the credential is unavailable; do not
+            // permanently disable token use for the data source.
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             // because there can be scenarios where password is not specified but
             // default managed identity is not the intended method of authentication

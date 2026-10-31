@@ -167,6 +167,10 @@
                     "type": "integer",
                     "minimum": 0,
                     "description": "Maximum time, in seconds, a single Oracle command may run before it is aborted. 0 disables the cap."
+                  },
+                  "managed-identity": {
+                    "$ref": "#/$defs/boolean-or-string",
+                    "description": "Force (true) or disable (false) Microsoft Entra managed identity token authentication. When omitted, it is used only if the connection string has no password and no wallet or external-authentication (User Id=/) settings."
                   }
                 }
               }

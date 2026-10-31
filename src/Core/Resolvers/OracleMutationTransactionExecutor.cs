@@ -42,9 +42,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
             cancellationToken.ThrowIfCancellationRequested();
             using OracleConnection connection = _queryExecutor.CreateConnection(dataSourceName);
-            // The two-argument override is the one Oracle implements. The three-argument
-            // member on the base executor does not set the access token.
-            await _queryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, dataSourceName);
+            await _queryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, dataSourceName, cancellationToken);
             try
             {
                 await connection.OpenAsync(cancellationToken);
