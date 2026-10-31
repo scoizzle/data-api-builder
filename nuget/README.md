@@ -45,6 +45,22 @@ Use the [Getting Started](https://learn.microsoft.com/azure/data-api-builder/get
 - DAB's Health endpoint: `http://localhost:5000/health`
 - DAB's Swagger UI: `http://localhost:5000/api/openapi`
 
+## Oracle (preview)
+
+Oracle Database 19c and later is a preview engine in this build. It is not a generally available
+database in the support matrix. Operator notes are in `docs/design/oracle-support.md` in the
+repository.
+
+A cold restore of `Oracle.ManagedDataAccess.Core` 23.7.0 was **not** run for this package.
+The repository `Nuget.config` clears package sources and lists only the private
+`data_api_builder_build_packages` Azure Artifacts feed. That package is published on nuget.org.
+A restore that hits the global packages cache is not a cold restore. To try one, use a feed
+that can serve `Oracle.ManagedDataAccess.Core` 23.7.0 and run:
+
+```sh
+dotnet restore src/Azure.DataApiBuilder.sln --no-cache
+```
+
 ## Additional resources
 
 - [Online Documentation](https://learn.microsoft.com/en-us/azure/data-api-builder/overview)

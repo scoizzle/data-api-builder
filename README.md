@@ -22,9 +22,14 @@ Data API builder (DAB) is an open-source, no-code tool that creates secure, full
 
 ### Which databases does Data API builder support?
 
-|               | Azure SQL | SQL Server | SQLDW | Cosmos DB | PostgreSQL | MySQL |
-| :-----------: | :-------: | :--------: | :---: | :-------: | :--------: | :---: |
-| **Supported** |    Yes    |     Yes    |  Yes  |    Yes    |     Yes    |  Yes  |
+|               | Azure SQL | SQL Server | SQLDW | Cosmos DB | PostgreSQL | MySQL | Oracle |
+| :-----------: | :-------: | :--------: | :---: | :-------: | :--------: | :---: | :----: |
+| **Supported** |    Yes    |     Yes    |  Yes  |    Yes    |     Yes    |  Yes  | Preview |
+
+Oracle Database 19c and later is a preview engine. The operator notes, the privilege and
+wallet runbook, and the limitations that are still accepted are in
+[docs/design/oracle-support.md](docs/design/oracle-support.md). Preview does not mean a
+cold NuGet restore of `Oracle.ManagedDataAccess.Core` was proven from this tree.
 
 ### Which environments does Data API builder support?
 

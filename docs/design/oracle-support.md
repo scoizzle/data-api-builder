@@ -126,7 +126,7 @@ Oracle stored procedures and functions can be invoked as REST operations, and as
 Known limitations:
 
 - **GraphQL stored-procedure result typing.** Oracle metadata discovery describes a subprogram's REF CURSOR by its OUT parameter name (e.g. `CURSOR`), not by the columns the cursor returns. REST invocations are unaffected (the response is keyed by the actual returned columns), but the GraphQL schema for a cursor-returning subprogram exposes the cursor parameter name rather than the rowset's columns, so GraphQL queries over stored-procedure result sets are not reliably typed. Prefer REST for stored-procedure invocations on Oracle until cursor-column discovery is implemented.
-- **Scalar OUT/IN OUT parameters.** Subprograms whose result is a scalar OUT/IN OUT parameter (no REF CURSOR) are invoked with only their IN arguments; the OUT argument is not bound, so such subprograms fail at request time. Only subprograms with IN parameters plus an optional REF CURSOR OUT parameter are supported.
+- **Scalar OUT/IN OUT parameters.** Startup rejects a subprogram that has a scalar OUT parameter, an IN OUT parameter, or more than one REF CURSOR OUT parameter. The error is HTTP 503 `ErrorInInitialization` and names the parameter. A single REF CURSOR OUT, IN parameters, and a function RETURN (scalar or REF CURSOR) are supported. DAB does not bind scalar OUT or IN OUT values, so those signatures are refused before the first request instead of failing later with `PLS-00306`.
 - **Overloaded subprograms.** When `ALL_ARGUMENTS` lists more than one overload, the configured parameter names must equal one overload's input formals (IN and IN/OUT). Omitting a defaulted formal is not a match, and DAB does not fall back to the lowest `OVERLOAD`. Append `#n` to the source object (`schema.package.subprogram#2`) to pin that overload's metadata. The suffix is metadata only: the PL/SQL call stays a named invocation, and Oracle resolves which body runs. A single overload is used as-is. Startup fails when zero or several overloads match.
 
 Oracle stored-procedure metadata discovery (including OUT parameters and REF CURSOR metadata) is used to validate signatures for schema generation. Invoking a procedure whose metadata cannot be resolved, or that returns an unsupported result shape, surfaces an error at request time.
@@ -153,7 +153,9 @@ This path is **GraphQL-only**. REST batch/array create does not share it (same a
 
 ### Binary values
 
-Oracle `RAW` values are serialized as base64. `BLOB` columns are typed as byte[] and null-guarded during base64 encoding; values larger than roughly 2000 bytes are not covered because `UTL_ENCODE.BASE64_ENCODE` accepts `RAW` and the implicit `BLOB`-to-`RAW` conversion is size-limited.
+Oracle `RAW` values are serialized as base64 through one `UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(...))` conversion. That conversion stops at 4000 bytes, which is enough for `RAW` (at most 2000 bytes) and not enough for `BLOB` or `LONG RAW`: base64 of about 3000 raw bytes crosses the cap and the page comes back empty.
+
+`BLOB` values are base64-encoded in 1800-byte chunks (`DBMS_LOB.SUBSTR`) and aggregated as a CLOB, so the 4000-byte cap does not apply. 1800 is a multiple of 3, so only the last chunk can end with `=`. `LONG RAW` uses the same CLOB aggregation with `UTL_RAW.SUBSTR`. A `LONG RAW` value larger than 32767 bytes still cannot be passed to `UTL_RAW` and is not covered. NULL binary values stay NULL (`UTL_ENCODE.BASE64_ENCODE(NULL)` raises `ORA-29261`).
 
 ### Date and time filter values
 
@@ -283,17 +285,54 @@ ODP.NET's command timeout defaults to 0 (wait forever), while the other ADO.NET 
 
 `command-timeout` is in seconds; `0` disables the cap. The cap is applied per command rather than through ODP.NET's process-wide `OracleConfiguration.CommandTimeout`, which ODP.NET rejects once any connection has been opened (`ORA-50099`) and would therefore break hot reload and long-lived processes.
 
+Startup catalog discovery (synonym resolution, `ALL_TAB_COLUMNS`, trigger bodies, and `ALL_ARGUMENTS`) shares one connection for that pass and passes the startup cancellation token into `Open` and each read. Each statement is still a `CreateMetadataCommand`, so the same command timeout applies. Cancelling startup is not swallowed by the `open_cursors` probe. A metadata call made outside that pass opens its own connection. The session-user lookup used when the connection string has no User ID stays a separate synchronous open.
+
 ## TIMESTAMP, CLOB, and RETURNING sizes
 
 A .NET `DateTime` that arrives without a `DbType` hint is bound as `OracleDbType.TimeStamp`. `OracleQueryExecutor.PopulateDbTypeForParameter` sets the Oracle type and the UTC wall-clock value together. Assigning the value first lets ODP.NET 23.7 infer `TimeStamp`, and a later type change is too late to be the decision. `DateTimeKind.Local` is still converted with `ToUniversalTime`. `DateTimeOffset` stays `TimeStampTZ`. A `DATE` value stays at midnight (`00:00:00`) because Oracle `DATE` has no fractional seconds and the wall-clock conversion does not invent a time of day. `TypeHelper` is unchanged, so MSSQL and PostgreSQL keep their own date mapping.
 
-Column facts choose string binds. `CLOB` binds as `OracleDbType.Clob`, `NCLOB` as `NClob`, and `NVARCHAR2` / `NCHAR` as `NVarchar2`. A national value whose UTF-8 length is above 4000 bytes binds as `NClob`. A string with no column fact stays the driver's `Varchar2` at or below 4000 UTF-8 bytes and binds as `Clob` above that, which covers a multi-byte `VARCHAR2(4000 CHAR)` value that would otherwise be sent as `VARCHAR2` (`ORA-01461` on a server that enforces the byte limit). Nulls still receive the column type. The facts live beside `DbConnectionParam`; that shared type has no Oracle-only fields.
+`RETURNING INTO` uses the catalog type, not only the CLR type. `DATE` and `TIMESTAMP` are both `System.DateTime`. A `DATE` column binds as `OracleDbType.Date`. `TIMESTAMP(6)` binds as `TimeStamp`. `TIMESTAMP WITH TIME ZONE` binds as `TimeStampTZ`, and `TIMESTAMP WITH LOCAL TIME ZONE` as `TimeStampLTZ`. A `DateTime` column with no catalog type keeps the `TimeStamp` bind.
+
+`CHAR` and `NCHAR` filter and mutation parameters bind as `OracleDbType.Char` / `NChar` with `Size` set to the column's character length (`CHAR_LENGTH`, falling back to `DATA_LENGTH` when the catalog row has no character length). Oracle blank-pads that comparison, so `CHAR(4)` value `'AB  '` matches the filter `'AB'`. `VARCHAR2` stays a variable bind. `NVARCHAR2` stays `NVarchar2` and is not blank-padded. Binding those fixed types as `VARCHAR2` / `NVARCHAR2` is a silent miss.
+
+Column facts choose string binds. `CLOB` binds as `OracleDbType.Clob`, `NCLOB` as `NClob`, and `NVARCHAR2` as `NVarchar2`. A national variable-length value whose UTF-8 length is above 4000 bytes binds as `NClob`. A string with no column fact stays the driver's `Varchar2` at or below 4000 UTF-8 bytes and binds as `Clob` above that, which covers a multi-byte `VARCHAR2(4000 CHAR)` value that would otherwise be sent as `VARCHAR2` (`ORA-01461` on a server that enforces the byte limit). Nulls still receive the column type. The facts live beside `DbConnectionParam`; that shared type has no Oracle-only fields.
+
+Catalog type names are normalized before the CLR map. `TIMESTAMP(6)`, `TIMESTAMP(6) WITH TIME ZONE`, and `TIMESTAMP(9) WITH LOCAL TIME ZONE` match the unqualified timestamp types. `INTERVAL DAY(n) TO SECOND(n)` and `INTERVAL YEAR(n) TO MONTH` map to `TimeSpan`. `XMLTYPE` maps to `string`. An unknown type still maps to `object`.
 
 `RETURNING INTO` character output size is `min(max(characterLength, 1) * 4, 32767)` when the column length is known, so a character length counted in characters still has room for the byte length ODP.NET reports. An unknown length uses 4000. The registrar clamps every character output size to `[1, 32767]`. `RAW` stays on its existing size (2000 when the hint has none).
 
 ### Test database
 
 The Oracle integration suite issues several hundred distinct statements, so it exhausts the default `open_cursors=300` partway through a full `TestCategory=ORACLE` run. The test container must either set `open_cursors=1500` or the test connection string must bound the statement cache; with either in place the full category passes. This is cursor-cache sizing, not a DAB query-path leak: 500 repeated list queries, 400 repeated upserts, and repeated `DatabaseSchema-Oracle.sql` re-initialization all leave the cursor count flat or plateaued.
+
+## Accepted limitations
+
+These items from the Oracle review are documented here and are not treated as open engine defects.
+
+- **Keyset pagination and NULL or blank sort keys.** Keyset predicates are `col > :cursor` with no `NULLS FIRST` / `NULLS LAST`. A NULL sort key is never reached. On Oracle `''` is NULL, so a blank string is in that same gap. Use a non-null sort key.
+- **NUMBER above 2^53 on GraphQL.** Unconstrained `NUMBER` and fractional `NUMBER` stay `decimal` in the engine and are exposed to GraphQL as Float (IEEE double). Integers above 2^53 round on GraphQL reads and filters. REST still carries the decimal. A non-IEEE GraphQL scalar would be a public schema change and is not in this preview.
+- **Retry inside an ambient transaction.** The local ReadCommitted mutation path does not use Polly. A REST write that does not re-read still runs under `TransactionScope`. Polly retry of a transient error on that path can open a second ODP.NET session and promote to XA, which .NET does not support. Do not wrap those writes in an ambient transaction that expects a retry.
+- **GraphQL `in` lists longer than 100.** The shared GraphQL filter parser rejects `in` with more than 100 values (HTTP 400). That limit is not Oracle-specific.
+- **Health check error text.** The shared health response includes `ex.Message` for a failed probe. On Oracle that string can contain a TNS host, service, or wallet path. The detail stays in the process logs as well. This preview does not change the shared health payload.
+- **Session context costs one extra round trip** per statement while `set-session-context` is on. The clear-then-set block is what keeps pooled sessions from leaking claims. It is not cached.
+
+## NuGet restore
+
+`Oracle.ManagedDataAccess.Core` 23.7.0 is declared in `src/Directory.Packages.props` and referenced by `src/Core/Azure.DataApiBuilder.Core.csproj`. The repository `Nuget.config` clears package sources and adds only the private `data_api_builder_build_packages` Azure Artifacts feed. A cold restore (`dotnet restore --no-cache`) was **not** run for this change. A restore that reused the machine's global packages folder is not evidence that a clean machine can restore.
+
+To try a cold restore, use a feed that can serve `Oracle.ManagedDataAccess.Core` 23.7.0 (nuget.org, or an Azure Artifacts feed with a nuget.org upstream) and run:
+
+```sh
+dotnet restore src/Azure.DataApiBuilder.sln --no-cache
+```
+
+## Stress script
+
+`scripts/oracle-stress-test.py` is the GraphQL and REST battery that was removed from the merge branch and restored with this preview. It starts a local engine, runs the checks, deletes the rows it inserted, and exits non-zero on failure. It expects the star-trek demo schema (7 series, 36 actors, 36 characters, 12 species) and a config that points at it. The script is not part of CI. Benchmark numbers in this document that cite a large child table were measured outside this repository and are not reproduced by the script.
+
+## Mutation errors
+
+A local Oracle mutation rolls back when the work throws. If that rollback also throws, the rollback error is logged and the original mutation error is what the caller sees. A commit failure propagates and is not followed by a rollback.
 
 ## Upgrade notes
 
