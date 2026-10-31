@@ -554,59 +554,59 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithQueryStringAllFieldsOrderByAsc() => await Task.CompletedTask;
+        public override async Task FindTestWithQueryStringAllFieldsOrderByAsc() => await base.FindTestWithQueryStringAllFieldsOrderByAsc();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithQueryStringAllFieldsOrderByDesc() => await Task.CompletedTask;
+        public override async Task FindTestWithQueryStringAllFieldsOrderByDesc() => await base.FindTestWithQueryStringAllFieldsOrderByDesc();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc() => await Task.CompletedTask;
+        public override async Task FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc() => await base.FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestVerifyMaintainColumnOrderForOrderBy() => await Task.CompletedTask;
+        public override async Task FindTestVerifyMaintainColumnOrderForOrderBy() => await base.FindTestVerifyMaintainColumnOrderForOrderBy();
+
+        [TestMethod]
+        [Ignore("Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md. #27")]
+        public override async Task FindTestWithIntTypeNullValuesOrderByAsc() => await base.FindTestWithIntTypeNullValuesOrderByAsc();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithIntTypeNullValuesOrderByAsc() => await Task.CompletedTask;
+        public override async Task FindTestWithQueryStringOnViews() => await base.FindTestWithQueryStringOnViews();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithQueryStringOnViews() => await Task.CompletedTask;
+        public override async Task FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields() => await base.FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields() => await Task.CompletedTask;
+        public override async Task FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields() => await base.FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields() => await Task.CompletedTask;
+        public override async Task FindTestWithDifferentMappedFieldsAndOrderBy() => await base.FindTestWithDifferentMappedFieldsAndOrderBy();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithDifferentMappedFieldsAndOrderBy() => await Task.CompletedTask;
+        public override async Task FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy() => await base.FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy() => await Task.CompletedTask;
+        public override async Task FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy() => await base.FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindTestWithFirstAndSpacedColumnOrderBy() => await Task.CompletedTask;
+        public override async Task FindTestWithFirstAndSpacedColumnOrderBy() => await base.FindTestWithFirstAndSpacedColumnOrderBy();
 
         [TestMethod]
         [Ignore("Oracle does not install a VPD policy on revenues. #27")]
-        public override async Task FindTestOnTableWithDatabasePolicy() => await Task.CompletedTask;
+        public override async Task FindTestOnTableWithDatabasePolicy() => await base.FindTestOnTableWithDatabasePolicy();
 
         [TestMethod]
         [Ignore("Oracle returns different filtered results due to collation differences. #27")]
-        public override async Task FindTestsWithFilterQueryStringOneOpFilter() => await Task.CompletedTask;
+        public override async Task FindTestsWithFilterQueryStringOneOpFilter() => await base.FindTestsWithFilterQueryStringOneOpFilter();
 
         [TestMethod]
         public override async Task FindTestWithFilterQueryStringBoolResultFilter()
@@ -616,22 +616,19 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindWithSelectAndOrderByQueryStringsOnATable() => await Task.CompletedTask;
+        public override async Task FindWithSelectAndOrderByQueryStringsOnATable() => await base.FindWithSelectAndOrderByQueryStringsOnATable();
 
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
-        public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await Task.CompletedTask;
+        public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await base.FindWithSelectAndOrderByQueryStringsOnAView();
 
         [TestMethod]
         [Ignore("Oracle preserves catalog spelling for unmapped fields, so the lowercase treeid expectation does not match. #27")]
-        public override async Task FindTestWithUnMappedFieldsToBeReturned() => await Task.CompletedTask;
+        public override async Task FindTestWithUnMappedFieldsToBeReturned() => await base.FindTestWithUnMappedFieldsToBeReturned();
 
         [TestMethod]
         [Ignore("Oracle test schema does not install a VPD policy on revenues. #27")]
-        public override Task FindTestOnTableWithSecurityPolicy()
-        {
-            return Task.CompletedTask;
-        }
+        public override Task FindTestOnTableWithSecurityPolicy() => base.FindTestOnTableWithSecurityPolicy();
 
         [TestMethod]
         public override async Task FindManyStoredProcedureTest()

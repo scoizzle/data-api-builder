@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -48,6 +49,40 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.AreEqual("Customers", builder.QuoteTableNameAsDBConnectionParam("Customers"));
             Assert.AreEqual("BOOKS", builder.QuoteTableNameAsDBConnectionParam("BOOKS"));
+        }
+
+        /// <summary>
+        /// Result-metadata predicates compare the stored spelling. A quoted "GetBook" bind
+        /// must not be folded onto unquoted GETBOOK the way UPPER(OBJECT_NAME) = UPPER(:name) would.
+        /// </summary>
+        [TestMethod]
+        public void ResultDetailsQuery_QuotedGetBook_DoesNotFoldToUppercase()
+        {
+            OracleQueryBuilder builder = new();
+            string standalone = builder.BuildStoredProcedureResultDetailsQuery("\"GetBook\"");
+            string packaged = builder.BuildStoredProcedureResultDetailsQuery(
+                schemaName: "\"Hr\"",
+                packageName: "\"BooksApi\"",
+                subprogramName: "GetBook",
+                isFunction: false);
+
+            AssertExactIdentifierMatch(standalone);
+            AssertExactIdentifierMatch(packaged);
+            StringAssert.Contains(standalone, "WHERE OWNER = @param0 ");
+            StringAssert.Contains(standalone, "AND OBJECT_NAME = @param1 ");
+            StringAssert.Contains(packaged, "WHERE OWNER = @param0 ");
+            StringAssert.Contains(packaged, "AND PACKAGE_NAME = @param1 ");
+            StringAssert.Contains(packaged, "AND OBJECT_NAME = @param2 ");
+            Assert.IsFalse(standalone.Contains("GETBOOK", StringComparison.Ordinal), standalone);
+            Assert.IsFalse(packaged.Contains("GETBOOK", StringComparison.Ordinal), packaged);
+        }
+
+        private static void AssertExactIdentifierMatch(string query)
+        {
+            Assert.IsFalse(query.Contains("UPPER(OWNER)", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("UPPER(OBJECT_NAME)", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("UPPER(PACKAGE_NAME)", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("UPPER(", StringComparison.Ordinal), query);
         }
     }
 }

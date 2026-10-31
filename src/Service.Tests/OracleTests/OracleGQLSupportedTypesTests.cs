@@ -240,6 +240,15 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         protected override bool IsSupportedType(string type)
         {
+            return IsQueryTypeSupported(type);
+        }
+
+        /// <summary>
+        /// Query rows for DATE/TIMESTAMP stay inconclusive. Typed writes use
+        /// <see cref="IsTypedWriteSupported"/> and run those rows.
+        /// </summary>
+        private static bool IsQueryTypeSupported(string type)
+        {
             return type switch
             {
                 BYTE_TYPE => false,
@@ -260,9 +269,26 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         /// Keeps the shared typed-write rows. BINARY_FLOAT/BINARY_DOUBLE overflow on 2E35/2E150.
         /// TIMESTAMP WITH TIME ZONE is covered for the seeded non-UTC offset and for null;
         /// SQL Server's year 1/9999 literals stay out. RAW(2000) accepts the base64 rows.
+        /// DATE, DATETIME, DATETIME2, and SMALLDATETIME are DATE or TIMESTAMP columns and are
+        /// written as DateTime, so those rows run. A live mismatch stays a failure.
+        /// Query rows still use <see cref="IsSupportedType"/> and stay inconclusive.
         /// </summary>
         protected override bool IsSupportedValue(string type, string value)
         {
+            return IsTypedWriteSupported(type, value);
+        }
+
+        /// <summary>
+        /// Offline gate for the typed-write matrices. DATE/DATETIME/DATETIME2/SMALLDATETIME
+        /// return true for every seeded value, including null.
+        /// </summary>
+        internal static bool IsTypedWriteSupported(string type, string value)
+        {
+            if (type is DATE_TYPE or DATETIME_TYPE or DATETIME2_TYPE or SMALLDATETIME_TYPE)
+            {
+                return true;
+            }
+
             if (IsExtremeMagnitude(type, value))
             {
                 return false;
@@ -275,7 +301,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                     || trimmed.Contains("10:23:54+8:00", StringComparison.Ordinal);
             }
 
-            return IsSupportedType(type);
+            return IsQueryTypeSupported(type);
         }
 
         /// <summary>
