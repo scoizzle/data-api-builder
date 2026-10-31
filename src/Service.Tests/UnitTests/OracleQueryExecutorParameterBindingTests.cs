@@ -18,8 +18,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
     /// <summary>
     /// Input bind types for Oracle strings. ODP.NET infers an untyped string as VARCHAR2, which
-    /// cannot carry more than 4000 bytes (ORA-01461). Column facts select CLOB/NCLOB/NVARCHAR2;
-    /// a value longer than 4000 UTF-8 bytes is a CLOB even when the column is unknown.
+    /// cannot carry more than 4000 bytes (ORA-01461). Column facts select CLOB/NCLOB/NVARCHAR2.
+    /// CHAR and NCHAR bind as fixed types at the column length so comparisons blank-pad.
+    /// A value longer than 4000 UTF-8 bytes is a CLOB even when the column is unknown.
     /// </summary>
     [TestClass]
     public class OracleQueryExecutorParameterBindingTests
@@ -65,6 +66,43 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void PopulateDbTypeForParameter_CharColumn_BindsCharAtColumnLength()
+        {
+            OracleParameter parameter = Apply("AB", OracleStringBindFacts.Kind.Char, length: 4);
+            OracleParameter nullValue = new();
+            DbConnectionParam nullEntry = new(value: null, length: 4);
+            OracleStringBindFacts.Set(nullEntry, OracleStringBindFacts.Kind.Char);
+            CreateExecutor().PopulateDbTypeForParameter(
+                new KeyValuePair<string, DbConnectionParam>("@param0", nullEntry),
+                nullValue);
+
+            Assert.AreEqual(OracleDbType.Char, parameter.OracleDbType);
+            Assert.AreEqual(4, parameter.Size);
+            Assert.AreEqual("AB", parameter.Value);
+            Assert.AreEqual(OracleDbType.Char, nullValue.OracleDbType);
+            Assert.AreEqual(4, nullValue.Size);
+        }
+
+        [TestMethod]
+        public void PopulateDbTypeForParameter_FixedNCharColumn_BindsNCharAtColumnLength()
+        {
+            OracleParameter parameter = Apply("AB", OracleStringBindFacts.Kind.FixedNChar, length: 4);
+
+            Assert.AreEqual(OracleDbType.NChar, parameter.OracleDbType);
+            Assert.AreEqual(4, parameter.Size);
+            Assert.AreNotEqual(OracleDbType.NVarchar2, parameter.OracleDbType);
+        }
+
+        [TestMethod]
+        public void PopulateDbTypeForParameter_CharColumnWithoutLength_BindsCharAndLeavesSizeUnset()
+        {
+            OracleParameter parameter = Apply("AB", OracleStringBindFacts.Kind.Char);
+
+            Assert.AreEqual(OracleDbType.Char, parameter.OracleDbType);
+            Assert.AreEqual(0, parameter.Size);
+        }
+
+        [TestMethod]
         public void PopulateDbTypeForParameter_NCharColumn_BindsNVarchar2UntilWide()
         {
             OracleParameter shortValue = Apply("n", OracleStringBindFacts.Kind.NChar);
@@ -103,10 +141,13 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(Encoding.UTF8.GetByteCount((string)over.Value) > 4000);
         }
 
-        private static OracleParameter Apply(object value, OracleStringBindFacts.Kind kind = OracleStringBindFacts.Kind.None)
+        private static OracleParameter Apply(
+            object value,
+            OracleStringBindFacts.Kind kind = OracleStringBindFacts.Kind.None,
+            int? length = null)
         {
             OracleParameter parameter = new();
-            DbConnectionParam entry = new(value);
+            DbConnectionParam entry = new(value, length: length);
             OracleStringBindFacts.Set(entry, kind);
             CreateExecutor().PopulateDbTypeForParameter(
                 new KeyValuePair<string, DbConnectionParam>("@param0", entry),

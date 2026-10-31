@@ -58,6 +58,12 @@ namespace Azure.DataApiBuilder.Core.Services
         private string? _defaultSchemaName;
         private static int _openCursorsWarningEmitted;
 
+        /// <summary>
+        /// Connection opened for one InitializeAsync catalog pass. Null outside that pass,
+        /// and for callers that read metadata without the startup scope.
+        /// </summary>
+        private OracleConnection? _discoveryConnection;
+
         public OracleMetadataProvider(
             RuntimeConfigProvider runtimeConfigProvider,
             RuntimeConfigValidator runtimeConfigValidator,
@@ -219,16 +225,117 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// One connection for synonym resolution, column catalogs, and stored-procedure
+        /// arguments. Commands still go through <see cref="CreateMetadataCommand"/>, so the
+        /// data-source command timeout applies. The token is passed to Open and to each read.
+        /// </summary>
+        protected override async ValueTask<IAsyncDisposable> BeginMetadataDiscoveryScopeAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_discoveryConnection is { State: ConnectionState.Open })
+            {
+                return new DiscoveryScope(this, _discoveryConnection, ownsConnection: false);
+            }
+
+            OracleConnection connection = await OpenMetadataConnectionAsync(cancellationToken);
+            _discoveryConnection = connection;
+            return new DiscoveryScope(this, connection, ownsConnection: true);
+        }
+
+        private async Task<MetadataConnectionLease> LeaseMetadataConnectionAsync(CancellationToken cancellationToken)
+        {
+            if (_discoveryConnection is { State: ConnectionState.Open } shared)
+            {
+                return new MetadataConnectionLease(shared, ownsConnection: false);
+            }
+
+            OracleConnection connection = await OpenMetadataConnectionAsync(cancellationToken);
+            return new MetadataConnectionLease(connection, ownsConnection: true);
+        }
+
+        private async Task<OracleConnection> OpenMetadataConnectionAsync(CancellationToken cancellationToken)
+        {
+            OracleConnection connection = new(ConnectionString);
+            try
+            {
+                await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName, cancellationToken);
+                await connection.OpenAsync(cancellationToken);
+                return connection;
+            }
+            catch
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
+        }
+
+        private readonly struct MetadataConnectionLease : IAsyncDisposable
+        {
+            private readonly OracleConnection _connection;
+            private readonly bool _ownsConnection;
+
+            public MetadataConnectionLease(OracleConnection connection, bool ownsConnection)
+            {
+                _connection = connection;
+                _ownsConnection = ownsConnection;
+            }
+
+            public OracleConnection Connection => _connection;
+
+            public async ValueTask DisposeAsync()
+            {
+                if (_ownsConnection)
+                {
+                    await _connection.DisposeAsync();
+                }
+            }
+        }
+
+        private sealed class DiscoveryScope : IAsyncDisposable
+        {
+            private readonly OracleMetadataProvider _owner;
+            private readonly OracleConnection _connection;
+            private readonly bool _ownsConnection;
+
+            public DiscoveryScope(OracleMetadataProvider owner, OracleConnection connection, bool ownsConnection)
+            {
+                _owner = owner;
+                _connection = connection;
+                _ownsConnection = ownsConnection;
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                if (!_ownsConnection)
+                {
+                    return;
+                }
+
+                if (ReferenceEquals(_owner._discoveryConnection, _connection))
+                {
+                    _owner._discoveryConnection = null;
+                }
+
+                await _connection.DisposeAsync();
+            }
+        }
+
+        /// <summary>
         /// Resolve config-authored sources (and FK pair tables) to the local base object
         /// before FillSchema. Private synonyms in the current schema, then public synonyms
         /// for unqualified sources. SQL and catalog lookups then use physical names.
         /// </summary>
-        protected override async Task ResolveCatalogObjectNamesAsync()
+        protected override async Task ResolveCatalogObjectNamesAsync(CancellationToken cancellationToken)
         {
             // Drop trigger staging from a previous InitializeAsync on this same instance.
             _sourceTableMap?.Clear();
             _triggerIdentityByTable?.Clear();
             _triggerTables?.Clear();
+
+            cancellationToken.ThrowIfCancellationRequested();
+            // One connection for every object-type and synonym lookup in this pass.
+            // When startup opened a discovery session, this lease reuses it.
+            await using MetadataConnectionLease lease = await LeaseMetadataConnectionAsync(cancellationToken);
 
             Dictionary<(string Owner, string Name), string?> objectTypeCache = new();
             Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> synonymCache = new();
@@ -236,26 +343,34 @@ namespace Azure.DataApiBuilder.Core.Services
             HashSet<DatabaseObject> seen = new(ReferenceEqualityComparer.Instance);
             foreach (DatabaseObject databaseObject in EntityToDatabaseObject.Values)
             {
-                await ResolveDatabaseObjectAsync(databaseObject, seen, objectTypeCache, synonymCache);
+                cancellationToken.ThrowIfCancellationRequested();
+                await ResolveDatabaseObjectAsync(
+                    databaseObject,
+                    seen,
+                    objectTypeCache,
+                    synonymCache,
+                    lease.Connection,
+                    cancellationToken);
             }
 
-            await WarnIfOpenCursorsAreLowAsync();
+            await WarnIfOpenCursorsAreLowAsync(lease.Connection, cancellationToken);
         }
 
         /// <summary>
         /// Best-effort read of <c>open_cursors</c>. A low value is logged once. Failure to read
         /// <c>v$parameter</c> (including ORA-00942) does not fail startup.
         /// </summary>
-        private async Task WarnIfOpenCursorsAreLowAsync()
+        private async Task WarnIfOpenCursorsAreLowAsync(OracleConnection connection, CancellationToken cancellationToken)
         {
             try
             {
-                using OracleConnection connection = new(ConnectionString);
-                await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
-                await connection.OpenAsync();
-                using OracleCommand command = connection.CreateCommand();
-                command.CommandText = "SELECT value FROM v$parameter WHERE name = 'open_cursors'";
-                object? raw = await command.ExecuteScalarAsync();
+                cancellationToken.ThrowIfCancellationRequested();
+                // Same command-timeout path as the other catalog reads (#26). A failure here
+                // must not dispose the shared discovery connection.
+                using OracleCommand command = CreateMetadataCommand(
+                    connection,
+                    "SELECT value FROM v$parameter WHERE name = 'open_cursors'");
+                object? raw = await command.ExecuteScalarAsync(cancellationToken);
                 if (raw is null or DBNull)
                 {
                     return;
@@ -274,6 +389,10 @@ namespace Azure.DataApiBuilder.Core.Services
                     OracleConnectionStringPolicy.OpenCursorsWarningThreshold,
                     OracleConnectionStringPolicy.DefaultStatementCacheSize);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (OracleException ex) when (ex.Number == 942)
             {
                 // v$parameter is not granted. The cache bound still applies.
@@ -288,7 +407,9 @@ namespace Azure.DataApiBuilder.Core.Services
             DatabaseObject databaseObject,
             HashSet<DatabaseObject> seen,
             Dictionary<(string Owner, string Name), string?> objectTypeCache,
-            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> synonymCache)
+            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> synonymCache,
+            OracleConnection connection,
+            CancellationToken cancellationToken)
         {
             if (!seen.Add(databaseObject))
             {
@@ -315,10 +436,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 databaseObject.SchemaName,
                 databaseObject.Name,
                 allowPublicFallback,
-                (owner, name) => GetObjectTypeAsync(owner, name, objectTypeCache),
-                (owner, name) => GetSynonymAsync(owner, name, synonymCache));
+                (owner, name) => GetObjectTypeAsync(connection, owner, name, objectTypeCache, cancellationToken),
+                (owner, name) => GetSynonymAsync(connection, owner, name, synonymCache, cancellationToken));
 
-            string? resolvedType = await GetObjectTypeAsync(resolvedSchema, resolvedName, objectTypeCache);
+            string? resolvedType = await GetObjectTypeAsync(connection, resolvedSchema, resolvedName, objectTypeCache, cancellationToken);
             if (resolvedType is not null)
             {
                 bool isTableOrView = databaseObject.SourceType is EntitySourceType.Table or EntitySourceType.View;
@@ -353,8 +474,8 @@ namespace Azure.DataApiBuilder.Core.Services
                     {
                         foreach (ForeignKeyDefinition foreignKey in foreignKeys)
                         {
-                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencingDbTable, seen, objectTypeCache, synonymCache);
-                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencedDbTable, seen, objectTypeCache, synonymCache);
+                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencingDbTable, seen, objectTypeCache, synonymCache, connection, cancellationToken);
+                            await ResolveDatabaseObjectAsync(foreignKey.Pair.ReferencedDbTable, seen, objectTypeCache, synonymCache, connection, cancellationToken);
                         }
                     }
                 }
@@ -362,9 +483,11 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         private async Task<string?> GetObjectTypeAsync(
+            OracleConnection connection,
             string owner,
             string name,
-            Dictionary<(string Owner, string Name), string?> cache)
+            Dictionary<(string Owner, string Name), string?> cache,
+            CancellationToken cancellationToken)
         {
             (string Owner, string Name) key = (owner, name);
             if (cache.TryGetValue(key, out string? cached))
@@ -372,10 +495,8 @@ namespace Azure.DataApiBuilder.Core.Services
                 return cached;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             string? objectType = null;
-            using OracleConnection connection = new(ConnectionString);
-            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
-            await connection.OpenAsync();
             using OracleCommand command = CreateMetadataCommand(
                 connection,
                 "SELECT OBJECT_TYPE FROM ALL_OBJECTS " +
@@ -387,7 +508,7 @@ namespace Azure.DataApiBuilder.Core.Services
             object? value;
             try
             {
-                value = await command.ExecuteScalarAsync();
+                value = await command.ExecuteScalarAsync(cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -407,9 +528,11 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         private async Task<OracleCatalogNameResolver.SynonymRow?> GetSynonymAsync(
+            OracleConnection connection,
             string owner,
             string name,
-            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> cache)
+            Dictionary<(string Owner, string Name), OracleCatalogNameResolver.SynonymRow?> cache,
+            CancellationToken cancellationToken)
         {
             (string Owner, string Name) key = (owner, name);
             if (cache.TryGetValue(key, out OracleCatalogNameResolver.SynonymRow? cached))
@@ -417,10 +540,8 @@ namespace Azure.DataApiBuilder.Core.Services
                 return cached;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             OracleCatalogNameResolver.SynonymRow? synonym = null;
-            using OracleConnection connection = new(ConnectionString);
-            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName);
-            await connection.OpenAsync();
             using OracleCommand command = CreateMetadataCommand(
                 connection,
                 "SELECT OWNER, SYNONYM_NAME, TABLE_OWNER, TABLE_NAME, DB_LINK " +
@@ -431,7 +552,7 @@ namespace Azure.DataApiBuilder.Core.Services
             OracleDataReader reader;
             try
             {
-                reader = await command.ExecuteReaderAsync();
+                reader = await command.ExecuteReaderAsync(cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -443,7 +564,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             using (reader)
-            if (await reader.ReadAsync())
+            if (await reader.ReadAsync(cancellationToken))
             {
                 synonym = new OracleCatalogNameResolver.SynonymRow(
                     Owner: reader.GetString(0),
@@ -720,10 +841,8 @@ namespace Azure.DataApiBuilder.Core.Services
             string tableName,
             CancellationToken cancellationToken)
         {
-            using OracleConnection conn = new();
-            conn.ConnectionString = ConnectionString;
-            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, _dataSourceName, cancellationToken);
-            await conn.OpenAsync(cancellationToken);
+            await using MetadataConnectionLease lease = await LeaseMetadataConnectionAsync(cancellationToken);
+            OracleConnection conn = lease.Connection;
 
             string owner = string.IsNullOrEmpty(schemaName) ? GetDefaultSchemaName() : schemaName;
             string table = tableName;
@@ -733,7 +852,7 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 using OracleCommand command = CreateMetadataCommand(
                     conn,
-                    "SELECT COLUMN_NAME, DATA_TYPE, DATA_DEFAULT, DATA_PRECISION, DATA_SCALE, DATA_LENGTH " +
+                    "SELECT COLUMN_NAME, DATA_TYPE, DATA_DEFAULT, DATA_PRECISION, DATA_SCALE, DATA_LENGTH, CHAR_LENGTH " +
                     "FROM ALL_TAB_COLUMNS " +
                     "WHERE OWNER = :owner AND TABLE_NAME = :table_name " +
                     "ORDER BY COLUMN_ID");
@@ -753,6 +872,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     row["DATA_PRECISION"] = reader.IsDBNull(3) ? DBNull.Value : NormalizeOracleNumber(reader.GetValue(3));
                     row["DATA_SCALE"] = reader.IsDBNull(4) ? DBNull.Value : NormalizeOracleNumber(reader.GetValue(4));
                     row["DATA_LENGTH"] = reader.IsDBNull(5) ? DBNull.Value : NormalizeOracleNumber(reader.GetValue(5));
+                    row["CHAR_LENGTH"] = reader.IsDBNull(6) ? DBNull.Value : NormalizeOracleNumber(reader.GetValue(6));
                     columns.Rows.Add(row);
                 }
             }
@@ -778,6 +898,7 @@ namespace Azure.DataApiBuilder.Core.Services
             columns.Columns.Add("DATA_PRECISION", typeof(object));
             columns.Columns.Add("DATA_SCALE", typeof(object));
             columns.Columns.Add("DATA_LENGTH", typeof(object));
+            columns.Columns.Add("CHAR_LENGTH", typeof(object));
             return columns;
         }
 
@@ -876,6 +997,19 @@ namespace Azure.DataApiBuilder.Core.Services
                         OracleObjectFacts.Column(columnDefinition).IsClob = true;
                     }
 
+                    if (physicalType is not null)
+                    {
+                        OracleObjectFacts.Column(columnDefinition).PhysicalType = physicalType;
+                    }
+
+                    if (physicalType is not null
+                        && (physicalType.Equals("CHAR", StringComparison.OrdinalIgnoreCase)
+                            || physicalType.Equals("NCHAR", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        // Fixed-length types. VARCHAR2/NVARCHAR2 are not blank-padded.
+                        OracleObjectFacts.Column(columnDefinition).IsFixedChar = true;
+                    }
+
                     if (physicalType is not null
                         && (physicalType.Equals("NVARCHAR2", StringComparison.OrdinalIgnoreCase)
                             || physicalType.Equals("NCHAR", StringComparison.OrdinalIgnoreCase)))
@@ -903,7 +1037,11 @@ namespace Azure.DataApiBuilder.Core.Services
                         && physicalType is not null
                         && !physicalType.Equals("LONG", StringComparison.OrdinalIgnoreCase))
                     {
-                        columnDefinition.Length = TryReadOracleColumnLength(columnInfo, allColumnsInTable);
+                        // CHAR/NCHAR pad to the character length. DATA_LENGTH is bytes, so a
+                        // CHAR(4 CHAR) column in AL32UTF8 reports 16 and would over-pad.
+                        columnDefinition.Length = OracleObjectFacts.Column(columnDefinition).IsFixedChar
+                            ? TryReadOracleFixedCharacterLength(columnInfo, allColumnsInTable)
+                            : TryReadOracleColumnLength(columnInfo, allColumnsInTable);
                     }
 
                     columnDefinition.DbType = TypeHelper.GetDbTypeFromSystemType(columnDefinition.SystemType);
@@ -1130,10 +1268,8 @@ namespace Azure.DataApiBuilder.Core.Services
             // OracleObjectFacts during PopulateDatabaseObjectForEntity.
             DatabaseStoredProcedure dbSp = (DatabaseStoredProcedure)EntityToDatabaseObject[entityName];
 
-            using OracleConnection conn = new();
-            conn.ConnectionString = ConnectionString;
-            await QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(conn, _dataSourceName, cancellationToken);
-            await conn.OpenAsync(cancellationToken);
+            await using MetadataConnectionLease lease = await LeaseMetadataConnectionAsync(cancellationToken);
+            OracleConnection conn = lease.Connection;
 
             string schemaFilter = string.IsNullOrEmpty(schemaName) ? GetDefaultSchemaName() : schemaName;
             string objectFilter = storedProcedureSourceName;
@@ -1202,6 +1338,9 @@ namespace Azure.DataApiBuilder.Core.Services
                 try
                 {
                     selected = SelectOracleOverload(argumentRows, configuredNames, configuredOverload, qualifiedName);
+                    // Scalar OUT and IN OUT are not bound. Reject them here so startup fails
+                    // with a clear error instead of PLS-00306 on the first call.
+                    EnsureSupportedOracleSignature(selected, qualifiedName);
                 }
                 catch (DataApiBuilderException exception)
                 {
@@ -1497,32 +1636,9 @@ namespace Azure.DataApiBuilder.Core.Services
         /// </summary>
         public override Type SqlToCLRType(string sqlType)
         {
-            return sqlType.ToUpperInvariant() switch
-            {
-                "BOOLEAN" => typeof(bool),
-                "NUMBER" => typeof(decimal),
-                "FLOAT" => typeof(double),
-                "BINARY_FLOAT" => typeof(float),
-                "BINARY_DOUBLE" => typeof(double),
-                "VARCHAR2" => typeof(string),
-                "NVARCHAR2" => typeof(string),
-                "CHAR" => typeof(string),
-                "NCHAR" => typeof(string),
-                "CLOB" => typeof(string),
-                "NCLOB" => typeof(string),
-                "DATE" => typeof(DateTime),
-                "TIMESTAMP" => typeof(DateTime),
-                "TIMESTAMP WITH TIME ZONE" => typeof(DateTimeOffset),
-                "TIMESTAMP WITH LOCAL TIME ZONE" => typeof(DateTime),
-                "RAW" => typeof(byte[]),
-                "BLOB" => typeof(byte[]),
-                "LONG" => typeof(string),
-                "LONG RAW" => typeof(byte[]),
-                "ROWID" => typeof(string),
-                "UROWID" => typeof(string),
-                "CURSOR" or "REF CURSOR" => typeof(IDataReader),
-                _ => typeof(object)
-            };
+            // ALL_ARGUMENTS and ALL_TAB_COLUMNS qualify the common defaults
+            // (TIMESTAMP(6), INTERVAL DAY(2) TO SECOND(6)). Match the unqualified name.
+            return OracleSqlType.ToClrType(sqlType);
         }
 
         /// <summary>
@@ -1565,6 +1681,79 @@ namespace Azure.DataApiBuilder.Core.Services
             int Position,
             string? Overload,
             string? Defaulted = null);
+
+        /// <summary>
+        /// Rejects a subprogram DAB cannot invoke. One REF CURSOR OUT parameter, and a function
+        /// RETURN row at position 0, are the supported results. Scalar OUT parameters are not
+        /// bound, and IN OUT values would be sent and then discarded. More than one REF CURSOR
+        /// cannot share the single <c>:dab_result</c> bind.
+        /// </summary>
+        internal static void EnsureSupportedOracleSignature(
+            IReadOnlyList<OracleArgumentRow> rows,
+            string? qualifiedName = null)
+        {
+            string target = string.IsNullOrWhiteSpace(qualifiedName) ? "the configured stored procedure" : qualifiedName;
+            List<string> unsupported = new();
+            int refCursorCount = 0;
+            foreach (OracleArgumentRow row in rows)
+            {
+                // Position 0 is a function RETURN (scalar or REF CURSOR), which the call assigns.
+                if (row.Position == 0)
+                {
+                    continue;
+                }
+
+                bool isInOut = row.InOut.Equals("IN/OUT", StringComparison.OrdinalIgnoreCase)
+                    || row.InOut.Equals("IN OUT", StringComparison.OrdinalIgnoreCase);
+                bool isOut = row.InOut.Equals("OUT", StringComparison.OrdinalIgnoreCase);
+                if (!isOut && !isInOut)
+                {
+                    continue;
+                }
+
+                if (isOut && IsRefCursorType(row.DataType))
+                {
+                    refCursorCount++;
+                    continue;
+                }
+
+                string name = string.IsNullOrEmpty(row.Name) ? $"position {row.Position}" : row.Name;
+                string direction = isInOut ? "IN OUT" : "OUT";
+                unsupported.Add($"{name} {direction} {row.DataType}".Trim());
+            }
+
+            if (refCursorCount > 1)
+            {
+                unsupported.Add($"{refCursorCount} REF CURSOR OUT parameters");
+            }
+
+            if (unsupported.Count == 0)
+            {
+                return;
+            }
+
+            throw new DataApiBuilderException(
+                message: $"Oracle subprogram {target} has an unsupported signature: {string.Join(", ", unsupported)}. " +
+                         "Scalar OUT and IN OUT parameters are not supported and are rejected at startup. " +
+                         "A single REF CURSOR OUT parameter, or a function RETURN value, is supported. " +
+                         "Change the extra parameters to IN or remove them.",
+                statusCode: HttpStatusCode.ServiceUnavailable,
+                subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+        }
+
+        private static bool IsRefCursorType(string dataType)
+        {
+            if (string.IsNullOrWhiteSpace(dataType))
+            {
+                return false;
+            }
+
+            string upper = dataType.Trim().ToUpperInvariant();
+            // ALL_ARGUMENTS reports "REF CURSOR". Some catalogs spell the same type SYS_REFCURSOR.
+            string compact = upper.Replace(" ", string.Empty).Replace("_", string.Empty);
+            return compact.Contains("REFCURSOR", StringComparison.Ordinal)
+                || upper.Equals("CURSOR", StringComparison.Ordinal);
+        }
 
         /// <summary>
         /// Picks one ALL_ARGUMENTS overload. A configured <paramref name="configuredOverload"/>
@@ -1813,7 +2002,21 @@ namespace Azure.DataApiBuilder.Core.Services
 
         private static int? TryReadOracleColumnLength(DataRow columnInfo, DataTable table)
         {
-            foreach (string columnName in new[] { "DATA_LENGTH", "LENGTH" })
+            return TryReadPositiveInt(columnInfo, table, "DATA_LENGTH", "LENGTH");
+        }
+
+        /// <summary>
+        /// Character width of a CHAR/NCHAR column. CHAR_LENGTH is characters.
+        /// DATA_LENGTH is only the fallback when the catalog row has no character length.
+        /// </summary>
+        private static int? TryReadOracleFixedCharacterLength(DataRow columnInfo, DataTable table)
+        {
+            return TryReadPositiveInt(columnInfo, table, "CHAR_LENGTH", "CHAR_COL_DECL_LENGTH", "DATA_LENGTH", "LENGTH");
+        }
+
+        private static int? TryReadPositiveInt(DataRow columnInfo, DataTable table, params string[] columnNames)
+        {
+            foreach (string columnName in columnNames)
             {
                 if (!table.Columns.Contains(columnName) || columnInfo[columnName] is DBNull)
                 {

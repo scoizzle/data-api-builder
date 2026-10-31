@@ -140,13 +140,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             OracleObjectFacts.LobFacts facts = OracleObjectFacts.Column(column);
+            // Fixed CHAR/NCHAR must be their own bind kinds. Oracle blank-pads only when both
+            // sides of the comparison are CHAR (or both NCHAR). A VARCHAR2/NVARCHAR2 bind of
+            // 'AB' does not match CHAR(4) 'AB  '.
             OracleStringBindFacts.Kind kind = facts.IsNClob
                 ? OracleStringBindFacts.Kind.NClob
                 : facts.IsClob
                     ? OracleStringBindFacts.Kind.Clob
-                    : facts.IsNChar
-                        ? OracleStringBindFacts.Kind.NChar
-                        : OracleStringBindFacts.Kind.None;
+                    : facts.IsFixedChar && facts.IsNChar
+                        ? OracleStringBindFacts.Kind.FixedNChar
+                        : facts.IsFixedChar
+                            ? OracleStringBindFacts.Kind.Char
+                            : facts.IsNChar
+                                ? OracleStringBindFacts.Kind.NChar
+                                : OracleStringBindFacts.Kind.None;
             OracleStringBindFacts.Set(created, kind);
         }
 

@@ -18,7 +18,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             None = 0,
             Clob,
             NClob,
-            NChar
+
+            /// <summary>NVARCHAR2. Variable length; not blank-padded.</summary>
+            NChar,
+
+            /// <summary>CHAR. Blank-padded to <see cref="DbConnectionParam.Length"/>.</summary>
+            Char,
+
+            /// <summary>NCHAR. Blank-padded to <see cref="DbConnectionParam.Length"/>.</summary>
+            FixedNChar
         }
 
         private static readonly ConditionalWeakTable<DbConnectionParam, Box> Facts = new();

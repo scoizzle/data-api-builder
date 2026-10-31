@@ -357,8 +357,14 @@ namespace Azure.DataApiBuilder.Core.Services
             _runtimeConfigValidator.ValidateEntityAndAutoentityConfigurations(runtimeConfig);
 
             GenerateDatabaseObjectForEntities();
-            await ResolveCatalogObjectNamesAsync();
-            await PopulateObjectDefinitionForEntities(cancellationToken);
+            // Oracle opens one catalog connection for name resolution and the column/procedure
+            // reads that follow. Other providers get a no-op scope. The scope is disposed before
+            // the rest of startup, so request connections are unchanged.
+            await using (await BeginMetadataDiscoveryScopeAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await ResolveCatalogObjectNamesAsync(cancellationToken);
+                await PopulateObjectDefinitionForEntities(cancellationToken);
+            }
             PopulateLinkingEntityExposedNames();
             cancellationToken.ThrowIfCancellationRequested();
             GenerateExposedToBackingColumnMapsForEntities();
@@ -781,11 +787,33 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Opens a provider-owned catalog session for <see cref="ResolveCatalogObjectNamesAsync"/>
+        /// and <see cref="PopulateObjectDefinitionForEntities"/>. The base scope does nothing.
+        /// Oracle uses one connection so startup does not open a session per object.
+        /// </summary>
+        protected virtual ValueTask<IAsyncDisposable> BeginMetadataDiscoveryScopeAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IAsyncDisposable>(NullMetadataDiscoveryScope.Instance);
+        }
+
+        private sealed class NullMetadataDiscoveryScope : IAsyncDisposable
+        {
+            public static readonly NullMetadataDiscoveryScope Instance = new();
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+
+        /// <summary>
         /// Provider hook after <see cref="GenerateDatabaseObjectForEntities"/> and before
         /// catalog FillSchema. The base is a no-op. Oracle resolves synonyms to the local
         /// base object so later metadata and SQL use physical catalog names.
         /// </summary>
-        protected virtual Task ResolveCatalogObjectNamesAsync() => Task.CompletedTask;
+        protected virtual Task ResolveCatalogObjectNamesAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
 
         /// <summary>
         /// Create a DatabaseObject for all the exposed entities.
