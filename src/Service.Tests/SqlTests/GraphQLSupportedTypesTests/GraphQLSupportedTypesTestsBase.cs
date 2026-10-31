@@ -398,7 +398,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests
         [DataRow(DATETIMEOFFSET_TYPE, "\"9999-12-31 23:59:59.9999999Z\"")]
         public async Task InsertIntoTypeColumn(string type, string value)
         {
-            if (!IsSupportedType(type))
+            if (!IsSupportedValue(type, value))
             {
                 Assert.Inconclusive("Type not supported");
             }
@@ -466,7 +466,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests
         [DataRow(UUID_TYPE, "3a1483a5-9ac2-4998-bcf3-78a28078c6ac")]
         public async Task InsertIntoTypeColumnWithArgument(string type, object value)
         {
-            if (!IsSupportedType(type))
+            if (!IsSupportedValue(type, value is null ? "null" : Convert.ToString(value, CultureInfo.InvariantCulture)))
             {
                 Assert.Inconclusive("Type not supported");
             }
@@ -532,7 +532,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests
         [DataRow(UUID_TYPE, "null")]
         public async Task UpdateTypeColumn(string type, string value)
         {
-            if (!IsSupportedType(type))
+            if (!IsSupportedValue(type, value))
             {
                 Assert.Inconclusive("Type not supported");
             }
@@ -572,7 +572,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests
         [DataRow(UUID_TYPE, null)]
         public async Task UpdateTypeColumnWithArgument(string type, object value)
         {
-            if (!IsSupportedType(type))
+            if (!IsSupportedValue(type, value is null ? "null" : Convert.ToString(value, CultureInfo.InvariantCulture)))
             {
                 Assert.Inconclusive("Type not supported");
             }
@@ -907,6 +907,17 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests
         protected virtual bool IsSupportedType(string type)
         {
             return true;
+        }
+
+        /// <summary>
+        /// Row-level companion to <see cref="IsSupportedType"/>. The four typed-write
+        /// matrices call this so an engine can reject one value (an extreme float, a
+        /// base64 payload the column cannot store) without hiding every other row.
+        /// The default keeps the previous type-wide behavior.
+        /// </summary>
+        protected virtual bool IsSupportedValue(string type, string value)
+        {
+            return IsSupportedType(type);
         }
     }
 }
