@@ -97,7 +97,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// The state is only reachable by assigning the predicate directly.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleBuilder_ZeroColumnInsertWithCreatePolicy_Throws()
         {
             SqlInsertStructure structure = CreateInsert(createPolicy: null, databaseType: DatabaseType.Oracle);
