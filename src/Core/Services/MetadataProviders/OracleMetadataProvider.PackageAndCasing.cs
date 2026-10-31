@@ -7,6 +7,7 @@ using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Authorization;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Service.Exceptions;
+using Microsoft.Extensions.Logging;
 
 namespace Azure.DataApiBuilder.Core.Services
 {
@@ -120,8 +121,9 @@ namespace Azure.DataApiBuilder.Core.Services
                 return;
             }
 
-            // Stored procedures and views carry no authored column permissions to verify.
-            bool validateColumns = databaseObject.SourceType == EntitySourceType.Table;
+            // Tables and views both have catalog columns, so a typo in a permission list is caught
+            // for either. Stored procedures carry no column permissions to verify.
+            bool validateColumns = databaseObject.SourceType is EntitySourceType.Table or EntitySourceType.View;
 
             foreach (EntityPermission permission in entity.Permissions)
             {
@@ -144,7 +146,7 @@ namespace Azure.DataApiBuilder.Core.Services
 
                         if (validateColumns)
                         {
-                            ValidatePermissionColumns(entityName, permission.Role, action.Action, databaseObject, sourceDefinition, fields);
+                            fields = ValidatePermissionColumns(entityName, entity.IsAutoentity, permission.Role, action.Action, databaseObject, sourceDefinition, fields);
                         }
                     }
 
@@ -198,17 +200,33 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Fails initialization when a permission names a column the table does not have. Without
-        /// this, a typo in an exclude list would silently leave the intended column readable.
+        /// Fails initialization when a hand-authored permission names a column the table or view does
+        /// not have. Without this, a typo in an exclude list would silently leave the intended column
+        /// readable. Autoentities share one permission template across every table the pattern matches,
+        /// so a name that is absent from one generated entity is dropped with a warning instead.
         /// </summary>
-        private static void ValidatePermissionColumns(
+        /// <returns>The fields to apply: unchanged for hand-authored entities, pruned for autoentities.</returns>
+        private EntityActionFields ValidatePermissionColumns(
             string entityName,
+            bool isAutoentity,
             string role,
             EntityActionOperation operation,
             DatabaseObject databaseObject,
             SourceDefinition sourceDefinition,
             EntityActionFields fields)
         {
+            HashSet<string> exclude = fields.Exclude;
+            HashSet<string>? include = fields.Include;
+
+            if (isAutoentity)
+            {
+                exclude = DropUnknownColumns(entityName, role, operation, databaseObject, sourceDefinition, "exclude", fields.Exclude);
+                include = fields.Include is null
+                    ? null
+                    : DropUnknownColumns(entityName, role, operation, databaseObject, sourceDefinition, "include", fields.Include);
+                return fields with { Exclude = exclude, Include = include };
+            }
+
             foreach (string name in fields.Exclude)
             {
                 ThrowIfUnknownColumn(entityName, role, operation, databaseObject, sourceDefinition, "exclude", name);
@@ -218,6 +236,34 @@ namespace Azure.DataApiBuilder.Core.Services
             {
                 ThrowIfUnknownColumn(entityName, role, operation, databaseObject, sourceDefinition, "include", name);
             }
+
+            return fields;
+        }
+
+        private HashSet<string> DropUnknownColumns(
+            string entityName,
+            string role,
+            EntityActionOperation operation,
+            DatabaseObject databaseObject,
+            SourceDefinition sourceDefinition,
+            string listName,
+            HashSet<string> names)
+        {
+            HashSet<string> kept = new(names.Comparer);
+            foreach (string name in names)
+            {
+                if (name == AuthorizationResolver.WILDCARD || sourceDefinition.Columns.ContainsKey(name))
+                {
+                    kept.Add(name);
+                    continue;
+                }
+
+                _logger.LogWarning(
+                    "Autoentity '{entityName}', role '{role}', action '{operation}': permission {listName} field '{name}' is not a column of '{schema}.{object}' and is ignored for this entity.",
+                    entityName, role, operation, listName, name, databaseObject.SchemaName, databaseObject.Name);
+            }
+
+            return kept;
         }
 
         private static void ThrowIfUnknownColumn(

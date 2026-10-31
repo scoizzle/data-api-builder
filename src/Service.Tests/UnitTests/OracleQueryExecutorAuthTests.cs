@@ -3,12 +3,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.Core;
+using Azure.DataApiBuilder.Config;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Resolvers;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -145,23 +150,80 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        public async Task SetManagedIdentityAccessTokenAsync_CancelledBeforeAcquisition_ThrowsAndKeepsTokenUseEnabled()
+        public async Task SetManagedIdentityAccessTokenAsync_CancelledDuringAcquisition_ThrowsAndKeepsTokenUseEnabled()
+        {
+            using CancellationTokenSource cts = new();
+            Mock<DefaultAzureCredential> credential = new();
+            // Cancel while the credential is acquiring the token so the catch in GetAccessTokenAsync runs.
+            credential
+                .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
+                .Returns<TokenRequestContext, CancellationToken>((_, ct) =>
+                {
+                    cts.Cancel();
+                    return ValueTask.FromException<AccessToken>(new OperationCanceledException(ct));
+                });
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(PASSWORDLESS);
+            executor.AzureCredential = credential.Object;
+            using OracleConnection conn = executor.CreateConnection(dataSourceName);
+
+            await Assert.ThrowsExceptionAsync<OperationCanceledException>(
+                () => executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, cts.Token));
+            Assert.IsNull(GetAccessToken(conn));
+
+            // A later, uncancelled request must still request a token: the cancellation must not
+            // have cleared the per-data-source token flag.
+            credential
+                .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
+                .Returns(new ValueTask<AccessToken>(new AccessToken("t", DateTimeOffset.UtcNow.AddHours(1))));
+            await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None);
+
+            Assert.IsNotNull(GetAccessToken(conn));
+            credential.Verify(
+                c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()),
+                Times.Exactly(2));
+        }
+
+        [TestMethod]
+        public async Task SetManagedIdentityAccessTokenAsync_ControllerTokenWithExplicitPassword_DoesNotSetToken()
+        {
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(
+                "User Id=app;Password=secret;Pooling=false;Data Source=localhost:1521/svc",
+                configToken: "config-token");
+            using OracleConnection conn = executor.CreateConnection(dataSourceName);
+
+            await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None);
+
+            Assert.IsNull(GetAccessToken(conn));
+            Assert.AreEqual("app", new OracleConnectionStringBuilder(conn.ConnectionString).UserID, "The configured credentials must not be rewritten.");
+            Assert.AreEqual("secret", new OracleConnectionStringBuilder(conn.ConnectionString).Password);
+        }
+
+        [TestMethod]
+        public async Task SetManagedIdentityAccessTokenAsync_ForcedAndCredentialUnavailable_Throws503AndKeepsTokenUseEnabled()
         {
             Mock<DefaultAzureCredential> credential = new();
             credential
                 .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
-                .Returns<TokenRequestContext, CancellationToken>((_, ct) =>
-                    ValueTask.FromException<AccessToken>(new OperationCanceledException(ct)));
-            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(PASSWORDLESS);
+                .Returns(ValueTask.FromException<AccessToken>(new CredentialUnavailableException("no credential")));
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(
+                "User Id=app;Password=secret;Pooling=false;Data Source=localhost:1521/svc",
+                options: new() { { "managed-identity", true } });
             executor.AzureCredential = credential.Object;
             using OracleConnection conn = executor.CreateConnection(dataSourceName);
-            using CancellationTokenSource cts = new();
-            cts.Cancel();
 
-            await Assert.ThrowsExceptionAsync<OperationCanceledException>(
-                () => executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, cts.Token));
+            DataApiBuilderException ex = await Assert.ThrowsExceptionAsync<DataApiBuilderException>(
+                () => executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None));
 
-            // A later, uncancelled request must still try to obtain a token.
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
+            StringAssert.Contains(ex.Message, "managed-identity");
+            Assert.IsNull(GetAccessToken(conn));
+
+            // The flag is not cleared: the next request retries, and a second failure throws again
+            // instead of silently connecting without a token.
+            await Assert.ThrowsExceptionAsync<DataApiBuilderException>(
+                () => executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None));
+
             credential
                 .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
                 .Returns(new ValueTask<AccessToken>(new AccessToken("t", DateTimeOffset.UtcNow.AddHours(1))));
@@ -169,27 +231,50 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsNotNull(GetAccessToken(conn));
         }
 
+        [TestMethod]
+        public async Task SetManagedIdentityAccessTokenAsync_InferredAndCredentialUnavailable_DisablesTokenUseWithoutThrowing()
+        {
+            Mock<DefaultAzureCredential> credential = new();
+            credential
+                .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
+                .Returns(ValueTask.FromException<AccessToken>(new CredentialUnavailableException("no credential")));
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(PASSWORDLESS);
+            executor.AzureCredential = credential.Object;
+            using OracleConnection conn = executor.CreateConnection(dataSourceName);
+
+            await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None);
+            await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None);
+
+            Assert.IsNull(GetAccessToken(conn));
+            credential.Verify(
+                c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()),
+                Times.Once,
+                "Inferred token use is best effort and is disabled after the first failure.");
+        }
+
         [DataTestMethod]
-        [DataRow("User Id=app;Data Source=localhost:1521/svc", null, false, true, DisplayName = "empty password infers token")]
-        [DataRow("User Id=app;Password=x;Data Source=localhost:1521/svc", null, false, false, DisplayName = "explicit password")]
-        [DataRow("User Id=app;Password=x;Data Source=localhost:1521/svc", null, true, true, DisplayName = "controller token enables")]
-        [DataRow("User Id=/;Data Source=localhost:1521/svc", null, true, false, DisplayName = "external auth wins over controller token")]
-        [DataRow("User Id=/;Data Source=localhost:1521/svc", null, false, false, DisplayName = "external auth")]
-        [DataRow("User Id=app;Data Source=(DESCRIPTION=(SECURITY=(MY_WALLET_DIRECTORY=/w)))", null, false, false, DisplayName = "wallet descriptor")]
-        [DataRow("User Id=app;Data Source=localhost:1521/svc", false, true, false, DisplayName = "option false wins")]
-        [DataRow("User Id=/;Data Source=localhost:1521/svc", true, false, true, DisplayName = "option true wins over external auth")]
+        [DataRow("User Id=app;Data Source=localhost:1521/svc", null, true, DisplayName = "empty password infers token")]
+        [DataRow("User Id=app;Password=x;Data Source=localhost:1521/svc", null, false, DisplayName = "explicit password")]
+        [DataRow("User Id=/;Data Source=localhost:1521/svc", null, false, DisplayName = "external auth")]
+        [DataRow("User Id=app;Data Source=(DESCRIPTION=(SECURITY=(MY_WALLET_DIRECTORY=/w)))", null, false, DisplayName = "wallet directory descriptor")]
+        [DataRow("User Id=app;Data Source=(DESCRIPTION=(SECURITY=(my_wallet_directory = /w)))", null, false, DisplayName = "wallet directory is case and space insensitive")]
+        [DataRow("User Id=app;Data Source=(DESCRIPTION=(ADDRESS=(HOST=h))(WALLET_LOCATION=(SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=/w)))))", null, false, DisplayName = "wallet location descriptor")]
+        [DataRow("User Id=app;Data Source=wallet-db.corp:1521/svc", null, true, DisplayName = "host named wallet-db is not a wallet")]
+        [DataRow("User Id=app;Data Source=(DESCRIPTION=(ADDRESS=(HOST=wallet.corp)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=wallet_svc)))", null, true, DisplayName = "wallet in host and service name is not a wallet")]
+        [DataRow("User Id=app;Data Source=localhost:1521/svc", false, false, DisplayName = "option false")]
+        [DataRow("User Id=app;Password=x;Data Source=localhost:1521/svc", true, true, DisplayName = "option true wins over password")]
+        [DataRow("User Id=/;Data Source=localhost:1521/svc", true, true, DisplayName = "option true wins over external auth")]
+        [DataRow("User Id=app;Data Source=(DESCRIPTION=(SECURITY=(MY_WALLET_DIRECTORY=/w)))", true, true, DisplayName = "option true wins over wallet")]
         public void ShouldManagedIdentityAccessBeAttempted_Precedence(
             string connectionString,
             bool? option,
-            bool controllerToken,
             bool expected)
         {
             Assert.AreEqual(
                 expected,
                 OracleQueryExecutor.ShouldManagedIdentityAccessBeAttempted(
                     new OracleConnectionStringBuilder(connectionString),
-                    option,
-                    controllerToken));
+                    option));
         }
 
         [TestMethod]
@@ -232,17 +317,103 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow(true, true)]
         [DataRow(false, false)]
         [DataRow(null, null)]
-        public void OracleOptions_ManagedIdentity_IsTriState(bool? configured, bool? expected)
+        [DataRow("1", true)]
+        [DataRow("0", false)]
+        [DataRow("true", true)]
+        [DataRow("false", false)]
+        public void OracleOptions_ManagedIdentity_IsTriState(object? configured, bool? expected)
         {
             Dictionary<string, object?> options = new();
-            if (configured.HasValue)
+            if (configured is not null)
             {
-                options["managed-identity"] = configured.Value;
+                options["managed-identity"] = configured;
             }
 
             DataSource dataSource = new(DatabaseType.Oracle, PASSWORDLESS, options);
 
             Assert.AreEqual(expected, dataSource.GetTypedOptions<OracleOptions>()!.ManagedIdentity);
+        }
+
+        [DataTestMethod]
+        [DataRow("\"maybe\"")]
+        [DataRow("\"2\"")]
+        [DataRow("\"\"")]
+        [DataRow("1")]
+        public void OracleOptions_ManagedIdentity_InvalidValueIsRejected(string jsonValue)
+        {
+            string json = "{\"database-type\":\"oracle\",\"connection-string\":\"User Id=app;Data Source=localhost:1521/svc\",\"options\":{\"managed-identity\":" + jsonValue + "}}";
+            JsonSerializerOptions serializerOptions = RuntimeConfigLoader.GetSerializationOptions();
+
+            // Strings (and numbers) outside true/false/"1"/"0" are rejected, either while the options
+            // are read at config load or when they are first materialized.
+            Assert.ThrowsException<JsonException>(() =>
+                JsonSerializer.Deserialize<DataSource>(json, serializerOptions)!.GetTypedOptions<OracleOptions>());
+        }
+
+        [DataTestMethod]
+        [DataRow("\"1\"", true)]
+        [DataRow("\"0\"", false)]
+        [DataRow("\"true\"", true)]
+        [DataRow("true", true)]
+        [DataRow("false", false)]
+        public void OracleOptions_ManagedIdentity_ParsedFromConfigJson(string jsonValue, bool expected)
+        {
+            string json = "{\"database-type\":\"oracle\",\"connection-string\":\"User Id=app;Data Source=localhost:1521/svc\",\"options\":{\"managed-identity\":" + jsonValue + "}}";
+
+            DataSource dataSource = JsonSerializer.Deserialize<DataSource>(json, RuntimeConfigLoader.GetSerializationOptions())!;
+
+            Assert.AreEqual(expected, dataSource.GetTypedOptions<OracleOptions>()!.ManagedIdentity);
+        }
+
+        /// <summary>
+        /// The schema's option description and the documented behavior must stay in step with the
+        /// implemented precedence and value forms.
+        /// </summary>
+        [TestMethod]
+        public void ManagedIdentityOption_SchemaAndDocsAreConsistent()
+        {
+            string root = FindRepositoryRoot();
+            string schema = File.ReadAllText(Path.Combine(root, "schemas", "dab.draft.schema.json"));
+            using JsonDocument schemaDocument = JsonDocument.Parse(schema);
+            JsonElement managedIdentity = default;
+            foreach (JsonElement branch in schemaDocument.RootElement
+                .GetProperty("properties").GetProperty("data-source").GetProperty("allOf").EnumerateArray())
+            {
+                if (branch.TryGetProperty("then", out JsonElement then) &&
+                    then.GetProperty("properties").TryGetProperty("options", out JsonElement options) &&
+                    options.GetProperty("properties").TryGetProperty(OracleOptions.MANAGED_IDENTITY_OPTION, out JsonElement found))
+                {
+                    managedIdentity = found;
+                }
+            }
+
+            Assert.AreNotEqual(JsonValueKind.Undefined, managedIdentity.ValueKind, "managed-identity is missing from the Oracle options schema.");
+            Assert.AreEqual("#/$defs/boolean-or-string", managedIdentity.GetProperty("$ref").GetString());
+
+            // The shared boolean-or-string definition admits exactly the forms the parser accepts.
+            string pattern = schemaDocument.RootElement.GetProperty("$defs").GetProperty("boolean-or-string")
+                .GetProperty("oneOf")[0].GetProperty("pattern").GetString()!;
+            StringAssert.Contains(pattern, "true|false|1|0");
+
+            string docs = File.ReadAllText(Path.Combine(root, "docs", "design", "oracle-support.md"));
+            StringAssert.Contains(docs, "`managed-identity`");
+            StringAssert.Contains(docs, "OracleConnection.AccessToken");
+            StringAssert.Contains(docs, "User Id=/");
+            StringAssert.Contains(docs, "MY_WALLET_DIRECTORY");
+            StringAssert.Contains(docs, "wallet-db.corp");
+            StringAssert.Contains(docs, "503");
+        }
+
+        private static string FindRepositoryRoot()
+        {
+            DirectoryInfo? directory = new(AppContext.BaseDirectory);
+            while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "schemas", "dab.draft.schema.json")))
+            {
+                directory = directory.Parent;
+            }
+
+            Assert.IsNotNull(directory, "Could not locate the repository root.");
+            return directory.FullName;
         }
 
         private static (OracleQueryExecutor Executor, string DataSourceName) CreateExecutor(

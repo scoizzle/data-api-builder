@@ -170,7 +170,7 @@
                   },
                   "managed-identity": {
                     "$ref": "#/$defs/boolean-or-string",
-                    "description": "Force (true) or disable (false) Microsoft Entra managed identity token authentication. When omitted, it is used only if the connection string has no password and no wallet or external-authentication (User Id=/) settings."
+                    "description": "Force (true) or disable (false) Microsoft Entra managed identity token authentication; accepts true, false, \"1\" or \"0\". When omitted, a token is used only if the connection string has no password and no wallet (WALLET_LOCATION, MY_WALLET_DIRECTORY) or external-authentication (User Id=/) settings. When true, failure to obtain a token fails requests with a 503. Configuration file only (no CLI option)."
                   }
                 }
               }

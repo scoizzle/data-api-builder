@@ -122,6 +122,8 @@ jobs:
     inputs:
       source: 'specific'
       project: '$(System.TeamProject)'
+      # TODO: provisional - '7' is an assumed definition ID, not verified. Replace with the real
+      # Oracle pipeline definition ID once oracle-pipelines.yml is created in Azure DevOps.
       pipeline: '7'
       runVersion: 'latest'
       patterns: 'coverage-*/**/*.cobertura.xml'
