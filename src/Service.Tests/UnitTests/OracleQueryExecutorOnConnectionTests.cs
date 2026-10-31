@@ -77,36 +77,65 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             }
         }
 
+        /// <summary>
+        /// ODP.NET defaults to a self-tuning statement cache. An unbounded cache retains one
+        /// cursor per distinct generated statement and exhausts open_cursors. When the connection
+        /// string names neither attribute, the executor fixes the cache at 20 and turns self-tuning off.
+        /// </summary>
+        [TestMethod]
+        public void DefaultConnectionStringBoundsStatementCache()
+        {
+            OracleQueryExecutor executor = CreateExecutor("User Id=x;Password=y;Data Source=localhost:1521/x");
+            OracleConnectionStringBuilder builder = SingleBuilder(executor);
+
+            Assert.AreEqual(20, builder.StatementCacheSize);
+            Assert.IsFalse(builder.SelfTuning);
+        }
+
+        /// <summary>
+        /// An explicit cache size, including zero, is the operator's choice and must not be replaced.
+        /// Supplying either attribute leaves the other one alone.
+        /// </summary>
+        [TestMethod]
+        public void PreservesUserSpecifiedStatementCache()
+        {
+            OracleQueryExecutor sized = CreateExecutor(
+                "User Id=x;Password=y;Data Source=localhost:1521/x;Statement Cache Size=100;Self Tuning=true");
+            OracleConnectionStringBuilder sizedBuilder = SingleBuilder(sized);
+            Assert.AreEqual(100, sizedBuilder.StatementCacheSize);
+            Assert.IsTrue(sizedBuilder.SelfTuning);
+
+            OracleQueryExecutor disabled = CreateExecutor(
+                "User Id=x;Password=y;Data Source=localhost:1521/x;Statement Cache Size=0");
+            Assert.AreEqual(0, SingleBuilder(disabled).StatementCacheSize);
+        }
+
+        /// <summary>
+        /// Hosted mode must not append SqlClient's Encryption keyword and must not mutate
+        /// process-wide <see cref="OracleConfiguration"/>. A second executor (hot reload)
+        /// uses the same TCPS descriptor.
+        /// </summary>
         [TestMethod]
         public void LateConfiguredOracleExecutorDoesNotAppendSqlClientEncryptionKeyword()
         {
-            RuntimeConfig mockConfig = new(
-               Schema: "",
-               DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", new()),
-               Runtime: new(
-                   Rest: new(),
-                   GraphQL: new(),
-                   Mcp: new(),
-                   Host: new(null, null)
-               ),
-               Entities: new(new Dictionary<string, Entity>())
-            );
+            const string connectionString =
+                "User Id=x;Password=y;Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=db.example)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=orcl))(SECURITY=(SSL_SERVER_DN_MATCH=TRUE)))";
+            string encryptionBefore = OracleConfiguration.SqlNetEncryptionClient;
 
-            RuntimeConfigProvider provider = TestHelper.GenerateInMemoryRuntimeConfigProvider(mockConfig);
-            provider.IsLateConfigured = true;
+            OracleQueryExecutor executor = CreateExecutor(connectionString, lateConfigured: true);
+            OracleQueryExecutor reloaded = CreateExecutor(connectionString, lateConfigured: true);
 
-            OracleQueryExecutor executor = new(
-                provider,
-                new OracleDbExceptionParser(provider),
-                new Mock<ILogger<IQueryExecutor>>().Object,
-                new Mock<IHttpContextAccessor>().Object);
-
-            Assert.AreEqual(1, executor.ConnectionStringBuilders.Count);
-            foreach (DbConnectionStringBuilder builder in executor.ConnectionStringBuilders.Values)
+            Assert.AreEqual(encryptionBefore, OracleConfiguration.SqlNetEncryptionClient);
+            foreach (OracleQueryExecutor candidate in new[] { executor, reloaded })
             {
+                OracleConnectionStringBuilder builder = SingleBuilder(candidate);
                 Assert.IsFalse(
                     builder.ConnectionString.Contains("Encryption", StringComparison.OrdinalIgnoreCase),
                     builder.ConnectionString);
+                StringAssert.Contains(builder.DataSource, "PROTOCOL=TCPS");
+                StringAssert.Contains(builder.DataSource, "SSL_SERVER_DN_MATCH=TRUE");
+                Assert.AreEqual(20, builder.StatementCacheSize);
+                Assert.IsFalse(builder.SelfTuning);
             }
         }
 
@@ -150,9 +179,14 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         private static RuntimeConfig CreateOracleConfig(Dictionary<string, object?> options)
         {
+            return CreateOracleConfig("User Id=x;Password=y;Data Source=localhost:1521/x", options);
+        }
+
+        private static RuntimeConfig CreateOracleConfig(string connectionString, Dictionary<string, object?> options)
+        {
             return new RuntimeConfig(
                 Schema: "",
-                DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", options),
+                DataSource: new(DatabaseType.Oracle, connectionString, options),
                 Runtime: new(
                     Rest: new(),
                     GraphQL: new(),
@@ -160,6 +194,23 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     Host: new(null, null)
                 ),
                 Entities: new(new Dictionary<string, Entity>()));
+        }
+
+        private static OracleQueryExecutor CreateExecutor(string connectionString, bool lateConfigured = false)
+        {
+            RuntimeConfigProvider provider = TestHelper.GenerateInMemoryRuntimeConfigProvider(
+                CreateOracleConfig(connectionString, new Dictionary<string, object?>()));
+            provider.IsLateConfigured = lateConfigured;
+            return new OracleQueryExecutor(
+                provider,
+                new OracleDbExceptionParser(provider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object);
+        }
+
+        private static OracleConnectionStringBuilder SingleBuilder(OracleQueryExecutor executor)
+        {
+            return (OracleConnectionStringBuilder)executor.ConnectionStringBuilders.Values.Single();
         }
 
         [TestMethod]

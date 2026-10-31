@@ -44,6 +44,13 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             public bool IsClob { get; set; }
 
+            public bool IsNClob { get; set; }
+
+            /// <summary>
+            /// NVARCHAR2 or NCHAR. National character data uses <c>NVarchar2</c> rather than <c>Varchar2</c>.
+            /// </summary>
+            public bool IsNChar { get; set; }
+
             public bool IsBlob { get; set; }
         }
 

@@ -21,10 +21,18 @@ Data API builder supports Oracle Database 19c and later through
 ## Hosted and managed-identity security
 
 - When the runtime config is late-configured (hosted/DAB-as-a-service scenario) the Oracle
-  provider requires native network encryption process-wide
-  (`OracleConfiguration.SqlNetEncryptionClient = "REQUIRED"`). MSSQL/MySQL/PostgreSQL force
-  connection encryption in the same situation, and ODP.NET rejects the SqlClient
-  `Encryption=true` keyword.
+  connection must already be TCPS with server certificate DN matching turned on.
+  `SSL_SERVER_DN_MATCH` accepts `TRUE`, `yes`, or `on`. A `tcps://` URL is accepted when its
+  query sets `ssl_server_dn_match` to one of those values. DAB checks this at startup and does
+  not rewrite the descriptor, inject `(SECURITY=(ENCRYPTION_CLIENT=...))`, or assign the
+  process-wide `OracleConfiguration.SqlNetEncryptionClient` property. ODP.NET rejects a later
+  change to that static after any connection has opened (`ORA-50099`), which breaks hot reload.
+  There is no switch that turns the check off. TNS aliases, cleartext `host:port/service` and
+  `tcp://` URLs, descriptors without `PROTOCOL=TCPS`, and descriptors that mix TCP with TCPS
+  fail startup. Local and dev configs (not late-configured) keep the operator's connection
+  string, including plain TCP. The v2 configuration-controller path sets the late-configured
+  flag before the executor and metadata provider are constructed, so the check covers that
+  path too.
 - Managed identity authentication sets `OracleConnection.AccessToken`; the token is never written
   to the connection string. ODP.NET requires token connections to use `User Id=/` with no password
   or proxy credentials, so DAB rewrites `User Id` to `/` and removes `Password`, `Proxy User Id`
@@ -208,11 +216,33 @@ Handle it either at the database or from the DAB connection string:
   - `Statement Cache Size=<n>` — cap the number of retained statements (honored when `Self Tuning=false`).
   - `Statement Cache Size=0;Self Tuning=false` — disable caching entirely. Cursor usage then stays flat regardless of `open_cursors`, at the cost of re-parsing each statement.
 
-  DAB preserves these attributes when it builds the ODP.NET connection. Example:
+  When the connection string sets neither `Statement Cache Size` / `StatementCacheSize` nor
+  `Self Tuning` / `SelfTuning`, DAB appends `Statement Cache Size=20;Self Tuning=false` on both
+  the executor's pooled connections and the metadata provider's connection. The keywords are
+  appended; the string is not rebuilt with `OracleConnectionStringBuilder.ToString()`, so a
+  DESCRIPTION descriptor stays intact. If either keyword is present, the string is unchanged.
+  That includes an explicit `Statement Cache Size=0`, which disables the cache and leaves
+  self-tuning at the driver default.
+
+  ODP.NET's builder reports an unset cache size as 0 and leaves self-tuning on. The driver's
+  own default is a self-tuning cache (commonly cited as 10) that can grow until the session
+  hits `open_cursors`. 20 is a fixed cap just above that cited default. It was not chosen from
+  a measured cursor plateau, and operators who need a different ceiling set the keywords
+  themselves. Example of an operator override, which DAB preserves:
 
   ```json
   "connection-string": "Data Source=...;User Id=...;Password=...;Statement Cache Size=50;Self Tuning=false;"
   ```
+
+  After catalog names are resolved, DAB reads `open_cursors` from `v$parameter` when that view
+  is granted. A value below 1500 logs one warning that names the 20-cursor default and the
+  `ALTER SYSTEM` example above. `ORA-00942` and any other probe failure are ignored and do not
+  fail startup.
+
+  The health check opens its connection from the raw configuration string. In hosted mode that
+  string has already passed the TCPS check. The health check does not apply the statement-cache
+  bound; it runs one `SELECT 1`, so the extra cursor is negligible. Sharing the internal policy
+  type with the service project would have required a new public API for that single cursor.
 
 ### Command timeout
 
@@ -227,6 +257,14 @@ ODP.NET's command timeout defaults to 0 (wait forever), while the other ADO.NET 
 ```
 
 `command-timeout` is in seconds; `0` disables the cap. The cap is applied per command rather than through ODP.NET's process-wide `OracleConfiguration.CommandTimeout`, which ODP.NET rejects once any connection has been opened (`ORA-50099`) and would therefore break hot reload and long-lived processes.
+
+## TIMESTAMP, CLOB, and RETURNING sizes
+
+A .NET `DateTime` that arrives without a `DbType` hint is bound as `OracleDbType.TimeStamp`. `OracleQueryExecutor.PopulateDbTypeForParameter` sets the Oracle type and the UTC wall-clock value together. Assigning the value first lets ODP.NET 23.7 infer `TimeStamp`, and a later type change is too late to be the decision. `DateTimeKind.Local` is still converted with `ToUniversalTime`. `DateTimeOffset` stays `TimeStampTZ`. A `DATE` value stays at midnight (`00:00:00`) because Oracle `DATE` has no fractional seconds and the wall-clock conversion does not invent a time of day. `TypeHelper` is unchanged, so MSSQL and PostgreSQL keep their own date mapping.
+
+Column facts choose string binds. `CLOB` binds as `OracleDbType.Clob`, `NCLOB` as `NClob`, and `NVARCHAR2` / `NCHAR` as `NVarchar2`. A national value whose UTF-8 length is above 4000 bytes binds as `NClob`. A string with no column fact stays the driver's `Varchar2` at or below 4000 UTF-8 bytes and binds as `Clob` above that, which covers a multi-byte `VARCHAR2(4000 CHAR)` value that would otherwise be sent as `VARCHAR2` (`ORA-01461` on a server that enforces the byte limit). Nulls still receive the column type. The facts live beside `DbConnectionParam`; that shared type has no Oracle-only fields.
+
+`RETURNING INTO` character output size is `min(max(characterLength, 1) * 4, 32767)` when the column length is known, so a character length counted in characters still has room for the byte length ODP.NET reports. An unknown length uses 4000. The registrar clamps every character output size to `[1, 32767]`. `RAW` stays on its existing size (2000 when the hint has none).
 
 ### Test database
 

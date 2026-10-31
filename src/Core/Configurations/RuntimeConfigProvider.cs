@@ -192,6 +192,11 @@ public class RuntimeConfigProvider : IDisposable
             throw new ArgumentException($"'{nameof(configuration)}' cannot be null or empty.", nameof(configuration));
         }
 
+        // Set this before config-loaded handlers build the engine. Oracle (and the other
+        // engines) read the flag while constructing executors and metadata connections.
+        // Setting it afterwards leaves the first hosted engine on the pre-flag connection string.
+        IsLateConfigured = true;
+
         if (RuntimeConfigLoader.TryParseConfig(
                 configuration,
                 out RuntimeConfig? runtimeConfig,
@@ -223,8 +228,6 @@ public class RuntimeConfigProvider : IDisposable
         }
 
         bool configLoadSucceeded = await InvokeConfigLoadedHandlersAsync();
-
-        IsLateConfigured = true;
 
         return configLoadSucceeded;
     }

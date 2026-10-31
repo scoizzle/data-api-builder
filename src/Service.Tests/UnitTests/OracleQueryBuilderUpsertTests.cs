@@ -526,6 +526,82 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// VARCHAR2/NVARCHAR2 RETURNING binds take their size from the builder hint.
+        /// Char length is scaled by 4 (AL32UTF8 worst case) and clamped to the PL/SQL maximum.
+        /// </summary>
+        [TestMethod]
+        public void OracleOutputBindRegistrarSizesVarcharFromHint()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:title=Varchar2:16000,name=NVarchar2:4000 */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"TITLE\", \"NAME\" INTO :title, :name; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(OracleDbType.Varchar2, command.Parameters["title"].OracleDbType);
+            Assert.AreEqual(16000, command.Parameters["title"].Size);
+            Assert.AreEqual(OracleDbType.NVarchar2, command.Parameters["name"].OracleDbType);
+            Assert.AreEqual(4000, command.Parameters["name"].Size);
+        }
+
+        /// <summary>
+        /// A hint above the PL/SQL VARCHAR2 maximum is clamped, and a non-positive hint is raised to 1.
+        /// Unknown hints stay at the historical 4000-byte default.
+        /// </summary>
+        [TestMethod]
+        public void OracleOutputBindRegistrarClampsExtendedVarcharSize()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:wide=Varchar2:200000,tiny=NVarchar2:0,plain=Varchar2 */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"WIDE\", \"TINY\", \"PLAIN\" INTO :wide, :tiny, :plain; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(32767, command.Parameters["wide"].Size);
+            Assert.AreEqual(1, command.Parameters["tiny"].Size);
+            Assert.AreEqual(4000, command.Parameters["plain"].Size);
+        }
+
+        /// <summary>
+        /// RETURNING hints carry a byte size for bounded character columns and the national
+        /// or LOB type recorded on the column.
+        /// </summary>
+        [TestMethod]
+        public void OracleUpsertOutputHintsSizeVarcharAndUseNationalLobTypes()
+        {
+            SqlUpsertQueryStructure structure = CreateUpsertStructure();
+            // The shared mock resolves exposed names only, so the constructor's output list is
+            // empty. Add the column under test; the hint is built from that list.
+            structure.OutputColumns.Add(new LabelledColumn("SYSTEM", "books", "TITLE", "title"));
+            ColumnDefinition title = structure.GetUnderlyingSourceDefinition().Columns["TITLE"];
+            title.Length = 1000;
+            OracleObjectFacts.Column(title).IsNChar = true;
+
+            string national = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(national, "NVarchar2:4000");
+
+            OracleObjectFacts.Column(title).IsNChar = false;
+            OracleObjectFacts.Column(title).IsNClob = true;
+            title.Length = null;
+            string nclob = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(nclob, "=NClob");
+            Assert.IsFalse(nclob.Contains("NVarchar2", StringComparison.Ordinal));
+
+            OracleObjectFacts.Column(title).IsNClob = false;
+            OracleObjectFacts.Column(title).IsClob = true;
+            string clob = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(clob, "=Clob");
+            Assert.IsFalse(clob.Contains("=NClob", StringComparison.Ordinal));
+
+            OracleObjectFacts.Column(title).IsClob = false;
+            title.Length = 20000;
+            string clamped = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(clamped, "Varchar2:32767");
+        }
+
+        /// <summary>
         /// RAW output binds need an explicit size. BLOB must not be registered as RAW.
         /// </summary>
         [TestMethod]

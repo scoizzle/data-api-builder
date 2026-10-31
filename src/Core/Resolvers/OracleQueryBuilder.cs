@@ -1737,6 +1737,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                         return $"{OUTPUT_BIND_PREFIX}{index}={outputType}:{size}";
                     }
 
+                    if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char or OracleDbType.NChar
+                        && definition?.Length is int characterLength and > 0)
+                    {
+                        // Column length is in characters. Scale by 4 for AL32UTF8 and clamp to
+                        // the PL/SQL VARCHAR2 maximum (32767 bytes).
+                        long scaled = (long)characterLength * 4L;
+                        int size = (int)Math.Min(Math.Max(scaled, 1L), 32767L);
+                        return $"{OUTPUT_BIND_PREFIX}{index}={outputType}:{size}";
+                    }
+
                     return $"{OUTPUT_BIND_PREFIX}{index}={outputType}";
                 });
 
@@ -1751,7 +1761,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (systemType == typeof(byte[]))
             {
                 // BLOB/LONG RAW do not fit in a RAW bind (PL/SQL RAW max is 32767 bytes).
-                // NCLOB is a string flagged IsClob and must not take this binary path.
+                // Character LOBs are strings and must not take this binary path.
                 return definition is not null && OracleObjectFacts.Column(definition).IsBlob ? OracleDbType.Blob : OracleDbType.Raw;
             }
 
@@ -1765,11 +1775,24 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return OracleDbType.TimeStamp;
             }
 
-            // CLOB/NCLOB columns must bind as Clob (not Varchar2, which truncates at 4000 bytes
-            // with ORA-06502) in RETURNING ... INTO output parameters.
-            if (definition is not null && OracleObjectFacts.Column(definition).IsClob)
+            if (definition is not null)
             {
-                return OracleDbType.Clob;
+                OracleObjectFacts.LobFacts facts = OracleObjectFacts.Column(definition);
+                // CLOB/NCLOB must not bind as Varchar2 (ORA-06502 past 4000 bytes).
+                if (facts.IsNClob)
+                {
+                    return OracleDbType.NClob;
+                }
+
+                if (facts.IsClob)
+                {
+                    return OracleDbType.Clob;
+                }
+
+                if (systemType == typeof(string) && facts.IsNChar)
+                {
+                    return OracleDbType.NVarchar2;
+                }
             }
 
             return dbType switch

@@ -119,7 +119,35 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     (text, name, systemType) => GetParamAsSystemType(text, name, systemType));
             }
 
-            return base.MakeDbConnectionParam(value, paramName, lengthOverride);
+            string encodedName = base.MakeDbConnectionParam(value, paramName, lengthOverride);
+            StampOracleStringBind(encodedName, paramName);
+            return encodedName;
+        }
+
+        /// <summary>
+        /// Copies Oracle LOB and national-character facts onto the parameter that was just
+        /// created. The shared <see cref="DbConnectionParam"/> model is unchanged; the executor
+        /// reads the facts when it chooses an Oracle bind type.
+        /// </summary>
+        private void StampOracleStringBind(string encodedName, string? paramName)
+        {
+            if (MetadataProvider.GetDatabaseType() is not DatabaseType.Oracle
+                || string.IsNullOrEmpty(paramName)
+                || !Parameters.TryGetValue(encodedName, out DbConnectionParam? created)
+                || !GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? column))
+            {
+                return;
+            }
+
+            OracleObjectFacts.LobFacts facts = OracleObjectFacts.Column(column);
+            OracleStringBindFacts.Kind kind = facts.IsNClob
+                ? OracleStringBindFacts.Kind.NClob
+                : facts.IsClob
+                    ? OracleStringBindFacts.Kind.Clob
+                    : facts.IsNChar
+                        ? OracleStringBindFacts.Kind.NChar
+                        : OracleStringBindFacts.Kind.None;
+            OracleStringBindFacts.Set(created, kind);
         }
 
         /// <summary>
