@@ -4246,6 +4246,127 @@
         "id": "id",
         "name": "name"
       }
+    },
+    "NumberShape": {
+      "source": {
+        "object": "number_shapes",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "NumberShape",
+          "plural": "NumberShapes"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "small_id": "small_id",
+        "big_id": "big_id",
+        "free_num": "free_num",
+        "money": "money"
+      }
+    },
+    "TouchItemOne": {
+      "source": {
+        "object": "SYSTEM.dab_overload_pkg.touch_item#1",
+        "type": "stored-procedure",
+        "parameters": {
+          "p_id": 1
+        }
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "TouchItemOne",
+          "plural": "TouchItemOnes"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "methods": [
+          "post"
+        ]
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        }
+      ]
+    },
+    "TouchItemTwo": {
+      "source": {
+        "object": "SYSTEM.dab_overload_pkg.touch_item#2",
+        "type": "stored-procedure",
+        "parameters": {
+          "p_id": 1,
+          "p_flag": "U"
+        }
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "TouchItemTwo",
+          "plural": "TouchItemTwos"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "methods": [
+          "post"
+        ]
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        }
+      ]
     }
   }
 }

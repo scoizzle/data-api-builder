@@ -156,6 +156,15 @@ namespace Azure.DataApiBuilder.Service.GraphQLBuilder
         }
 
         /// <summary>
+        /// True when the database supplies a value if the client omits the field, and the client
+        /// may still send one. This does not remove the field from create or update input.
+        /// </summary>
+        public static bool IsGeneratedByDefaultField(FieldDefinitionNode field)
+        {
+            return field.Directives.Any(d => d.Name.Value == GeneratedByDefaultDirectiveType.DirectiveName);
+        }
+
+        /// <summary>
         /// Creates a HotChocolate/GraphQL Authorize directive with a list of roles (if any) provided.
         /// Typically used to lock down Object/Field types to users who are members of the roles allowed.
         /// Will not create such a directive if one of the roles is the system role: anonymous

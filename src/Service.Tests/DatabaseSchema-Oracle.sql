@@ -82,6 +82,12 @@ begin
          dbms_output.put_line(SQLERRM);
    end;
    begin
+      execute immediate q'[DROP PACKAGE dab_overload_pkg]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
       execute immediate q'[DROP PROCEDURE count_books]';
    exception
       when others then
@@ -171,6 +177,18 @@ begin
    end;
    begin
       execute immediate q'[DROP TABLE books CASCADE CONSTRAINTS]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[DROP TABLE number_shapes CASCADE CONSTRAINTS]';
+   exception
+      when others then
+         dbms_output.put_line(SQLERRM);
+   end;
+   begin
+      execute immediate q'[DROP TABLE dab_overload_log CASCADE CONSTRAINTS]';
    exception
       when others then
          dbms_output.put_line(SQLERRM);
@@ -2936,4 +2954,35 @@ END DAB_SESSION_CONTEXT_PKG;]';
       when others then
          dbms_output.put_line(SQLERRM);
    end;
+
+    -- NUMBER precision fixture and overloaded package used by metadata tests.
+    -- These statements are not swallowed: a bad definition must fail schema setup.
+   execute immediate q'[CREATE TABLE number_shapes(
+        small_id NUMBER(9,0) PRIMARY KEY,
+        big_id NUMBER(18,0),
+        free_num NUMBER,
+        money NUMBER(18,2)
+     )]';
+   execute immediate q'[CREATE TABLE dab_overload_log(
+        id NUMBER(9,0) NOT NULL,
+        flag VARCHAR2(10),
+        which_overload NUMBER(1,0) NOT NULL
+     )]';
+   execute immediate q'[CREATE OR REPLACE PACKAGE dab_overload_pkg AS
+    PROCEDURE touch_item(p_id IN NUMBER);
+    PROCEDURE touch_item(p_id IN NUMBER, p_flag IN VARCHAR2 DEFAULT 'U');
+END dab_overload_pkg;]';
+   execute immediate q'[CREATE OR REPLACE PACKAGE BODY dab_overload_pkg AS
+    PROCEDURE touch_item(p_id IN NUMBER) IS
+    BEGIN
+        INSERT INTO dab_overload_log(id, flag, which_overload) VALUES (p_id, NULL, 1);
+        COMMIT;
+    END touch_item;
+
+    PROCEDURE touch_item(p_id IN NUMBER, p_flag IN VARCHAR2 DEFAULT 'U') IS
+    BEGIN
+        INSERT INTO dab_overload_log(id, flag, which_overload) VALUES (p_id, p_flag, 2);
+        COMMIT;
+    END touch_item;
+END dab_overload_pkg;]';
 end;
