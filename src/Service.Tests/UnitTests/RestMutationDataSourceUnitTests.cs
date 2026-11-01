@@ -75,18 +75,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
-        /// DELETE never calls <see cref="IMutationTransactionExecutor"/>. It must still resolve the
-        /// entity's metadata provider and query executor, and the TransactionScope isolation must
-        /// follow the entity's engine when that engine differs from the default source.
+        /// DELETE never calls <see cref="IMutationTransactionExecutor"/>. An Oracle entity still
+        /// resolves its own metadata provider and query executor.
         /// </summary>
         [TestMethod]
-        public async Task RestDelete_UsesEntityMetadataProviderAndEngineIsolation()
+        public async Task RestDelete_OracleEntity_UsesEntityMetadataProvider()
         {
             CapturedRoute route = new();
             SqlMutationEngine engine = CreateEngine(
                 route,
                 defaultType: DatabaseType.MSSQL,
-                entityType: DatabaseType.MySQL,
+                entityType: DatabaseType.Oracle,
                 readPolicy: false,
                 captureDelete: true);
 
@@ -94,13 +93,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.IsFalse(route.MetadataProviders.Contains(DefaultSource));
             Assert.IsTrue(route.MetadataProviders.Contains(EntitySource));
-            Assert.AreEqual(DatabaseType.MySQL, route.QueryExecutorDatabaseType);
-            Assert.AreEqual(IsolationLevel.RepeatableRead, route.Isolation);
+            Assert.AreEqual(DatabaseType.Oracle, route.QueryExecutorDatabaseType);
+            Assert.AreEqual(IsolationLevel.ReadCommitted, route.Isolation);
             Assert.IsNull(route.DataSourceName, "DELETE does not open IMutationTransactionExecutor.");
         }
 
+        /// <summary>
+        /// Two SQL Server sources keep the historical route: the default source. Routing every
+        /// engine to the entity source is a separate change.
+        /// </summary>
         [TestMethod]
-        public async Task RestMutation_TwoMsSqlSources_UsesEntityDataSource()
+        public async Task RestMutation_TwoMsSqlSources_StaysOnDefaultDataSource()
         {
             CapturedRoute route = new();
             SqlMutationEngine engine = CreateEngine(
@@ -111,13 +114,16 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             await AssertSentinelAsync(engine, CreateContext(EntityActionOperation.Insert, primaryKeyInUrl: false));
 
-            Assert.AreEqual(EntitySource, route.DataSourceName);
+            Assert.AreEqual(DefaultSource, route.DataSourceName);
             Assert.AreEqual(DatabaseType.MSSQL, route.ExecutorDatabaseType);
-            Assert.IsFalse(route.MetadataProviders.Contains(DefaultSource));
+            Assert.IsTrue(route.MetadataProviders.Contains(DefaultSource));
         }
 
+        /// <summary>
+        /// A non-Oracle entity stays on the default source even when that source is a different engine.
+        /// </summary>
         [TestMethod]
-        public async Task RestMutation_DifferentEngines_ResolvesEntityExecutor()
+        public async Task RestMutation_NonOracleEntity_StaysOnDefaultDataSource()
         {
             CapturedRoute route = new();
             SqlMutationEngine engine = CreateEngine(
@@ -128,8 +134,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             await AssertSentinelAsync(engine, CreateContext(EntityActionOperation.Insert, primaryKeyInUrl: false));
 
-            Assert.AreEqual(EntitySource, route.DataSourceName);
-            Assert.AreEqual(DatabaseType.MSSQL, route.ExecutorDatabaseType);
+            Assert.AreEqual(DefaultSource, route.DataSourceName);
+            Assert.AreEqual(DatabaseType.Oracle, route.ExecutorDatabaseType);
         }
 
         /// <summary>
@@ -164,7 +170,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SqlMutationEngine engine = CreateEngine(
                 route,
                 defaultType: DatabaseType.MSSQL,
-                entityType: DatabaseType.MSSQL,
+                entityType: DatabaseType.Oracle,
                 readPolicy: false,
                 runWork: true);
 

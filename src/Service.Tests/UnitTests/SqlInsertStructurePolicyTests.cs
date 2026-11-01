@@ -21,23 +21,17 @@ using Moq;
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
     /// <summary>
-    /// A create policy on an insert that supplies no column values cannot be evaluated.
-    /// The insert fails closed instead of becoming a DEFAULT VALUES statement.
+    /// Oracle rejects a create policy on an insert that supplies no column values.
+    /// Other engines still build that insert.
     /// </summary>
     [TestClass]
     public class SqlInsertStructurePolicyTests
     {
         /// <summary>
-        /// A create policy that references no column cannot be evaluated against a row, so the insert
-        /// is denied with 403 DatabasePolicyFailure, matching every other database policy denial.
-        /// These rows exercise the shared structure only (the check does not branch by engine);
-        /// the per-engine REST tests are the end-to-end proof.
+        /// Oracle cannot build this insert. Other engines still accept it, so the shared check
+        /// stays on Oracle. A column-free create policy there is 403 DatabasePolicyFailure.
         /// </summary>
         [DataTestMethod]
-        [DataRow(DatabaseType.MSSQL)]
-        [DataRow(DatabaseType.PostgreSQL)]
-        [DataRow(DatabaseType.MySQL)]
-        [DataRow(DatabaseType.DWSQL)]
         [DataRow(DatabaseType.Oracle)]
         public void ZeroColumnInsert_WithColumnFreeCreatePolicy_ReturnsForbidden(DatabaseType databaseType)
         {
@@ -56,9 +50,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// </summary>
         [DataTestMethod]
         [DataRow(DatabaseType.MSSQL)]
-        [DataRow(DatabaseType.PostgreSQL)]
-        [DataRow(DatabaseType.MySQL)]
-        [DataRow(DatabaseType.DWSQL)]
         [DataRow(DatabaseType.Oracle)]
         public void ZeroColumnInsert_WithFieldCreatePolicy_ReturnsForbiddenAuthorizationCheckFailed(DatabaseType databaseType)
         {

@@ -981,15 +981,19 @@ namespace Azure.DataApiBuilder.Core.Services
                         continue;
                     }
 
-                    // Permission include/exclude are catalog/backing names after Oracle identifier
-                    // rewrite. Intersect them with exposed names only after that mapping.
-                    // A name the provider does not treat as backing (a non-Oracle alias) stays as authored.
+                    // Oracle rewrites permission include/exclude to catalog spelling. Other engines
+                    // keep the authored names, which already match the exposed set.
+                    bool mapCatalogNames = metadataProvider.GetDatabaseType() == DatabaseType.Oracle;
                     HashSet<string>? include = action.Fields.Include is null
                         ? null
-                        : MapPermissionNamesToExposed(entityName, action.Fields.Include, metadataProvider);
+                        : mapCatalogNames
+                            ? MapPermissionNamesToExposed(entityName, action.Fields.Include, metadataProvider)
+                            : action.Fields.Include;
                     HashSet<string>? exclude = action.Fields.Exclude is null
                         ? null
-                        : MapPermissionNamesToExposed(entityName, action.Fields.Exclude, metadataProvider);
+                        : mapCatalogNames
+                            ? MapPermissionNamesToExposed(entityName, action.Fields.Exclude, metadataProvider)
+                            : action.Fields.Exclude;
 
                     // Determine included fields using ternary - either all fields or explicitly listed
                     HashSet<string> actionFields = (include is null || include.Contains(AuthorizationResolver.WILDCARD))
@@ -1558,13 +1562,13 @@ namespace Azure.DataApiBuilder.Core.Services
 
                     if (entityConfig?.Fields != null)
                     {
-                        // After Oracle identifier rewrite, FieldMetadata.Name is the catalog spelling
-                        // and Alias is the exposed name. Match either, plus the exposed name itself
-                        // for engines that leave FieldMetadata.Name unrewritten.
+                        // Oracle stores the catalog spelling in FieldMetadata.Name and the exposed name
+                        // in Alias. Other engines match the authored name or alias only.
+                        bool matchCatalogName = metadataProvider.GetDatabaseType() == DatabaseType.Oracle;
                         FieldMetadata? fieldMetadata = entityConfig.Fields.FirstOrDefault(candidate =>
                             string.Equals(candidate.Alias, field, StringComparison.Ordinal)
-                            || string.Equals(candidate.Name, backingColumnValue, StringComparison.Ordinal)
-                            || string.Equals(candidate.Name, field, StringComparison.Ordinal));
+                            || string.Equals(candidate.Name, field, StringComparison.Ordinal)
+                            || (matchCatalogName && string.Equals(candidate.Name, backingColumnValue, StringComparison.Ordinal)));
                         fieldDescription = fieldMetadata?.Description;
                     }
 

@@ -897,36 +897,6 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Insert
         }
 
         /// <summary>
-        /// A create policy that references no column (here "true") cannot be evaluated when the request body
-        /// supplies no column values. The insert fails closed with 403 DatabasePolicyFailure (the same
-        /// status as every other database policy denial) instead of becoming a DEFAULT VALUES insert
-        /// that bypasses the policy, and no row is inserted.
-        /// The role-scoped policy keeps <c>InsertOneWithDefaultValuesAndEmptyRequestBody</c> (anonymous, no policy) unaffected.
-        /// </summary>
-        [TestMethod]
-        public virtual async Task InsertZeroColumnWithCreatePolicyReturnsForbidden()
-        {
-            string countQuery = $"SELECT COUNT(*) AS row_count FROM {_tableWithDefaultValues}";
-            string rowCountBefore = await GetDatabaseResultAsync(countQuery, expectJson: false);
-
-            await SetupAndRunRestApiTest(
-                primaryKeyRoute: null,
-                queryString: string.Empty,
-                entityNameOrPath: _entityWithDefaultValues,
-                sqlQuery: string.Empty,
-                operationType: EntityActionOperation.Insert,
-                requestBody: "{}",
-                exceptionExpected: true,
-                clientRoleHeader: "database_policy_tester",
-                expectedErrorMessage: "An insert with no column values cannot be used when a database policy is defined for the create action.",
-                expectedStatusCode: HttpStatusCode.Forbidden,
-                expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure.ToString());
-
-            string rowCountAfter = await GetDatabaseResultAsync(countQuery, expectJson: false);
-            Assert.AreEqual(rowCountBefore, rowCountAfter, "No row may be inserted when the create policy cannot be evaluated.");
-        }
-
-        /// <summary>
         /// Abstract method overridden in each of the child classes as each database has its own specific error message.
         /// Validates request failure (HTTP 400) when an invalid foreign key is provided with an insertion.
         /// </summary>

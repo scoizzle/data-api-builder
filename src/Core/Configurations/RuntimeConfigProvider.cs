@@ -192,11 +192,6 @@ public class RuntimeConfigProvider : IDisposable
             throw new ArgumentException($"'{nameof(configuration)}' cannot be null or empty.", nameof(configuration));
         }
 
-        // Set this before config-loaded handlers build the engine. Oracle (and the other
-        // engines) read the flag while constructing executors and metadata connections.
-        // Setting it afterwards leaves the first hosted engine on the pre-flag connection string.
-        IsLateConfigured = true;
-
         if (RuntimeConfigLoader.TryParseConfig(
                 configuration,
                 out RuntimeConfig? runtimeConfig,
@@ -225,11 +220,37 @@ public class RuntimeConfigProvider : IDisposable
             _configLoader.FlushLogBuffer();
 
             ManagedIdentityAccessToken[_configLoader.RuntimeConfig.DefaultDataSourceName] = accessToken;
+
+            // Oracle reads this flag while the config-loaded handlers build the first connection.
+            // Other engines keep the historical order: the flag is set after those handlers return.
+            if (ConfiguresOracle(_configLoader.RuntimeConfig))
+            {
+                IsLateConfigured = true;
+            }
         }
 
         bool configLoadSucceeded = await InvokeConfigLoadedHandlersAsync();
 
+        IsLateConfigured = true;
+
         return configLoadSucceeded;
+    }
+
+    /// <summary>
+    /// True when any data source in <paramref name="config"/> is Oracle.
+    /// Hosted setup sets <see cref="IsLateConfigured"/> before engine construction only in that case.
+    /// </summary>
+    private static bool ConfiguresOracle(RuntimeConfig config)
+    {
+        foreach (DataSource source in config.ListAllDataSources())
+        {
+            if (source.DatabaseType == DatabaseType.Oracle)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

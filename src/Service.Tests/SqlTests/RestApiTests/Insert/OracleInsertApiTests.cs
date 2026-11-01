@@ -609,6 +609,33 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Insert
             StringAssert.Contains(stored, "20480");
         }
 
+        /// <summary>
+        /// Oracle cannot evaluate a column-free create policy against an insert that supplies no
+        /// columns. The request is rejected and no row is written. Other engines are unchanged.
+        /// </summary>
+        [TestMethod]
+        public async Task InsertZeroColumnWithCreatePolicyReturnsForbidden()
+        {
+            string countQuery = $"SELECT COUNT(*) AS row_count FROM {_tableWithDefaultValues}";
+            string rowCountBefore = await GetDatabaseResultAsync(countQuery, expectJson: false);
+
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: null,
+                queryString: string.Empty,
+                entityNameOrPath: _entityWithDefaultValues,
+                sqlQuery: string.Empty,
+                operationType: EntityActionOperation.Insert,
+                requestBody: "{}",
+                exceptionExpected: true,
+                clientRoleHeader: "database_policy_tester",
+                expectedErrorMessage: "An insert with no column values cannot be used when a database policy is defined for the create action.",
+                expectedStatusCode: HttpStatusCode.Forbidden,
+                expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure.ToString());
+
+            string rowCountAfter = await GetDatabaseResultAsync(countQuery, expectJson: false);
+            Assert.AreEqual(rowCountBefore, rowCountAfter, "No row may be inserted when the create policy cannot be evaluated.");
+        }
+
         private static async Task<string> PostEntityAsync(string entityName, string requestBody)
         {
             using HttpRequestMessage request = new(HttpMethod.Post, "api/" + entityName)
