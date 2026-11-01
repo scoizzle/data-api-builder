@@ -1,5 +1,5 @@
 {
-  "description": "Skip/execution budget for the live Oracle suite (TestCategory=Oracle), enforced by scripts/check-test-budget.ps1. No live TRX was captured for issue #27; both numbers are a static projection from the placeholder 141/400, not a measured run. maxSkipped rises from 141 to 183 because 58 typed-write DataRows (extreme floats and unsupported types) were hidden by four new+[Ignore] methods and were not part of the old 141. Arithmetic: 141 - 16 method-level ignores that now run + 58 newly visible inconclusive rows = 183. Do not raise maxSkipped further. minExecuted is 400 + 84 supported write rows + 12 other unskipped methods + 7 new results (stored-procedure id=2, four RAW/TSTZ rows, one null TSTZ write, one BLOB read of the payload and the null row) = 503. Ratchet maxSkipped down and minExecuted up after the first green Oracle TRX.",
+  "description": "Projected skip/execution ceiling for a future measured Oracle TRX. Not enforced by .pipelines/oracle-pipelines.yml. Replace maxSkipped and minExecuted with counts from the first green TRX before adding scripts/check-test-budget.ps1 to that pipeline. Until then, ignored tests are capped by OracleSkipPolicyTests and tests/oracle-skip-baseline.json. Do not raise maxSkipped once the gate is live.",
   "maxSkipped": 183,
   "minExecuted": 503
 }

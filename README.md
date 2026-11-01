@@ -26,10 +26,8 @@ Data API builder (DAB) is an open-source, no-code tool that creates secure, full
 | :-----------: | :-------: | :--------: | :---: | :-------: | :--------: | :---: | :----: |
 | **Supported** |    Yes    |     Yes    |  Yes  |    Yes    |     Yes    |  Yes  | Preview |
 
-Oracle Database 19c and later is a preview engine. The operator notes, the privilege and
-wallet runbook, and the limitations that are still accepted are in
-[docs/design/oracle-support.md](docs/design/oracle-support.md). Preview does not mean a
-cold NuGet restore of `Oracle.ManagedDataAccess.Core` was proven from this tree.
+Oracle Database 19c and later is a preview engine. Operator notes and accepted limitations are in
+[docs/design/oracle-support.md](docs/design/oracle-support.md).
 
 ### Which environments does Data API builder support?
 

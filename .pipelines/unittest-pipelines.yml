@@ -58,11 +58,12 @@ jobs:
       path: '$(Pipeline.Workspace)/unit'
 
   # DB coverage: each pipeline's numeric definition ID (Azure DevOps pipeline URL
-  # ...?definitionId=NN). Mapping: DwSql=1, MsSql=2, MySql=3, PgSql=4, Cosmos=6, Oracle=7 (assumed;
-  # set it to the real definition ID after creating the pipeline from oracle-pipelines.yml).
+  # ...?definitionId=NN). Mapping: DwSql=1, MsSql=2, MySql=3, PgSql=4, Cosmos=6.
   # (5 is THIS unit pipeline, so it is not downloaded here.) If a pipeline is
   # recreated its ID changes and that DB silently drops from the union - the merge
   # step's -ExpectedSources warning flags any source that produced no files.
+  # Oracle (.pipelines/oracle-pipelines.yml) is not downloaded here. Add that step
+  # only after Azure DevOps assigns a definition ID. Do not reserve an ID.
   # No 'artifact' name is set so ALL of a run's coverage artifacts are pulled
   # (some DBs publish one per job, e.g. MsSql linux + windows_combined +
   # windows_configuration); the pattern keeps only raw cobertura for the merger.
@@ -116,18 +117,6 @@ jobs:
       runVersion: 'latest'
       patterns: 'coverage-*/**/*.cobertura.xml'
       path: '$(Pipeline.Workspace)/db/cosmos'
-  - task: DownloadPipelineArtifact@2
-    displayName: 'Download Oracle coverage (latest)'
-    continueOnError: true
-    inputs:
-      source: 'specific'
-      project: '$(System.TeamProject)'
-      # TODO: provisional - '7' is an assumed definition ID, not verified. Replace with the real
-      # Oracle pipeline definition ID once oracle-pipelines.yml is created in Azure DevOps.
-      pipeline: '7'
-      runVersion: 'latest'
-      patterns: 'coverage-*/**/*.cobertura.xml'
-      path: '$(Pipeline.Workspace)/db/oracle'
 
   # Union-merge every downloaded cobertura and emit ONE combined Cobertura.xml
   # (test projects excluded). Dependency-free - no ReportGenerator extension.
@@ -136,7 +125,7 @@ jobs:
     continueOnError: true
     inputs:
       filePath: 'scripts/merge-coverage.ps1'
-      arguments: '-Path "$(Pipeline.Workspace)" -OutFile "$(Build.ArtifactStagingDirectory)/merged/Cobertura.xml" -ExpectedSources unit,mssql,pg,mysql,dwsql,cosmos,oracle'
+      arguments: '-Path "$(Pipeline.Workspace)" -OutFile "$(Build.ArtifactStagingDirectory)/merged/Cobertura.xml" -ExpectedSources unit,mssql,pg,mysql,dwsql,cosmos'
       pwsh: true
 
   - task: PublishCodeCoverageResults@2

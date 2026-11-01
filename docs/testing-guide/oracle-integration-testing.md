@@ -39,10 +39,11 @@ Pure unit tests need no database: `dotnet test --filter "TestCategory!=Oracle&Fu
 `.pipelines/oracle-pipelines.yml` starts the same image (pinned by digest) with a generated password, waits for the PDB to accept SQL (retrying the container once and dumping its log on failure), sets and asserts `open_cursors=1500`, writes the connection string into the built `dab-config.Oracle.json` with `FileTransform`, and runs `TestCategory=Oracle`.
 
 - Live classes that cannot reach Oracle in CI fail instead of skipping (`TF_BUILD`/`CI` set).
-- `scripts/check-test-budget.ps1` compares the TRX with `tests/oracle-test-budget.json` (`maxSkipped`, `minExecuted`) and fails on a regression. The skipped-test list is published as the `oracle-skipped-tests` artifact. Ratchet the budget down as skips are fixed; never raise `maxSkipped`.
-- Coverage is published as `coverage-oracle` and merged by the total-coverage job in `.pipelines/unittest-pipelines.yml`.
+- Ignored Oracle tests are capped offline by `OracleSkipPolicyTests` against `tests/oracle-skip-baseline.json`. The ceiling only shrinks.
+- `scripts/check-test-budget.ps1` can compare a measured TRX with `tests/oracle-test-budget.json`. It is not a pipeline step. The checked-in counts have not been measured, and wiring them in would fail the first real run. After a green TRX, replace the counts with the measured ones and add the step.
+- Coverage is published as `coverage-oracle`. The total-coverage job downloads a database pipeline only by its Azure DevOps definition ID. Add Oracle there after that ID exists. Do not reserve one.
 - Set the pipeline parameter `oracleEnabled` to `false` to confirm the readiness step fails with the container log when no database is running.
 
 ### Required check (Azure DevOps configuration)
 
-The pipeline is an Azure DevOps build, not a GitHub check, so making it required is an organization setting: create the pipeline from `.pipelines/oracle-pipelines.yml`, add it as a **branch policy** build validation on `main`, and set its definition ID in the Oracle download step of `.pipelines/unittest-pipelines.yml` (currently assumed to be `7`). Register it as required only after two consecutive green runs; Oracle Free startup is the main flake risk.
+The pipeline is an Azure DevOps build, not a GitHub check. Creating it from `.pipelines/oracle-pipelines.yml` and marking it required are organization settings, done after the pipeline has run green. Oracle Free startup is the main flake risk.
