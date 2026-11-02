@@ -127,10 +127,10 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
-        [Ignore("Oracle type mapping: is_wholesale_price is Short but GraphQL expects boolean.")]
+        [Ignore("Oracle type mapping: is_wholesale_price is Short but GraphQL expects boolean. #27")]
         public override async Task MultipleCreateMutationWithOneToOneRelationship(string expectedResponse)
         {
-            await Task.CompletedTask;
+            await base.MultipleCreateMutationWithOneToOneRelationship(expectedResponse);
         }
 
         [TestMethod]

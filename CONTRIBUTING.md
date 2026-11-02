@@ -49,7 +49,7 @@ The following steps outline an alternative way of generating config files to ass
 
 Primarily DAB uses integration tests to verify the engine operates correctly in how it creates queries and reads/writes against the database. For the integration tests to be run you will need to have the database configured with the expected schema and connection string set in the configuration files.
 
-#### Running Sql (MsSql, PostgreSQL, MySql) tests
+#### Running Sql (MsSql, PostgreSQL, MySql, Oracle) tests
 
 To run the SQL tests locally you will need to:
 
@@ -63,6 +63,7 @@ Tests can then be run using the following commands:
 - `dotnet test --filter "TestCategory=MsSql"` for SQL Server
 - `dotnet test --filter "TestCategory=PostgreSql"` for PostgreSQL
 - `dotnet test --filter "TestCategory=MySql"` for MySql
+- `dotnet test --filter "TestCategory=Oracle"` for Oracle (live database only; see [Oracle integration testing](docs/testing-guide/oracle-integration-testing.md))
 
 Alternatively, you can execute the tests from Visual Studio.
 

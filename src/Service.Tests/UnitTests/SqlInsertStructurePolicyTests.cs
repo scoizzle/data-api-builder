@@ -21,20 +21,57 @@ using Moq;
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
     /// <summary>
-    /// A create policy on an insert that supplies no column values cannot be evaluated.
-    /// The insert fails closed instead of becoming a DEFAULT VALUES statement.
+    /// Oracle rejects a create policy on an insert that supplies no column values.
+    /// Other engines still build that insert.
     /// </summary>
     [TestClass]
     public class SqlInsertStructurePolicyTests
     {
-        [TestMethod]
-        public void ZeroColumnInsert_WithCreatePolicy_ReturnsDatabasePolicyFailure()
+        /// <summary>
+        /// Oracle cannot build this insert. Other engines still accept it, so the shared check
+        /// stays on Oracle. A column-free create policy there is 403 DatabasePolicyFailure.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(DatabaseType.Oracle)]
+        public void ZeroColumnInsert_WithColumnFreeCreatePolicy_ReturnsForbidden(DatabaseType databaseType)
         {
             DataApiBuilderException exception = Assert.ThrowsException<DataApiBuilderException>(
-                () => CreateInsert(createPolicy: "true"));
+                () => CreateInsert(createPolicy: "true", databaseType: databaseType));
 
-            Assert.AreEqual(HttpStatusCode.BadRequest, exception.StatusCode);
+            Assert.AreEqual(HttpStatusCode.Forbidden, exception.StatusCode);
             Assert.AreEqual(DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure, exception.SubStatusCode);
+            StringAssert.Contains(exception.Message, "An insert with no column values cannot be used when a database policy is defined");
+        }
+
+        /// <summary>
+        /// A policy that references a column fails the earlier "fields referenced by the policy" check
+        /// (403 AuthorizationCheckFailed). Pins the check order so the two substatuses stay distinct.
+        /// The message assertion proves the intended check fired rather than the policy-processing catch.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(DatabaseType.MSSQL)]
+        [DataRow(DatabaseType.Oracle)]
+        public void ZeroColumnInsert_WithFieldCreatePolicy_ReturnsForbiddenAuthorizationCheckFailed(DatabaseType databaseType)
+        {
+            DataApiBuilderException exception = Assert.ThrowsException<DataApiBuilderException>(
+                () => CreateInsert(createPolicy: "id gt 0", databaseType: databaseType));
+
+            Assert.AreEqual(HttpStatusCode.Forbidden, exception.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.AuthorizationCheckFailed, exception.SubStatusCode);
+            StringAssert.Contains(exception.Message, "One or more fields referenced by the database policy are not present in the request body.");
+        }
+
+        /// <summary>
+        /// Negative control: supplying a column with a field-referencing create policy still builds.
+        /// </summary>
+        [TestMethod]
+        public void NonEmptyInsert_WithFieldCreatePolicy_IsAllowed()
+        {
+            SqlInsertStructure structure = CreateInsert(
+                createPolicy: "id gt 0",
+                mutationParams: new Dictionary<string, object?> { { "id", 1 } });
+
+            Assert.AreEqual(1, structure.InsertColumns.Count);
         }
 
         [TestMethod]
@@ -45,7 +82,28 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(0, structure.InsertColumns.Count);
         }
 
-        private static SqlInsertStructure CreateInsert(string? createPolicy)
+        /// <summary>
+        /// Defense in depth: if the structure check is bypassed, the Oracle builder must not emit an
+        /// insert (or an invalid "SELECT FROM DUAL" policy probe) for a create policy without columns.
+        /// The state is only reachable by assigning the predicate directly.
+        /// </summary>
+        [TestMethod]
+        public void OracleBuilder_ZeroColumnInsertWithCreatePolicy_Throws()
+        {
+            SqlInsertStructure structure = CreateInsert(createPolicy: null, databaseType: DatabaseType.Oracle);
+            structure.DbPolicyPredicatesForOperations[EntityActionOperation.Create] = "\"ID\" > 0";
+
+            DataApiBuilderException exception = Assert.ThrowsException<DataApiBuilderException>(
+                () => new OracleQueryBuilder().Build(structure));
+
+            Assert.AreEqual(HttpStatusCode.InternalServerError, exception.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.UnexpectedError, exception.SubStatusCode);
+        }
+
+        private static SqlInsertStructure CreateInsert(
+            string? createPolicy,
+            DatabaseType databaseType = DatabaseType.MSSQL,
+            Dictionary<string, object?>? mutationParams = null)
         {
             const string entityName = "Book";
             SourceDefinition source = new();
@@ -63,10 +121,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             metadata.Setup(x => x.GetEntityNamesAndDbObjects()).Returns(entities);
             metadata.Setup(x => x.EntityToDatabaseObject).Returns(entities);
             metadata.Setup(x => x.GetSourceDefinition(entityName)).Returns(source);
-            metadata.Setup(x => x.GetDatabaseType()).Returns(DatabaseType.MSSQL);
+            metadata.Setup(x => x.GetDatabaseType()).Returns(databaseType);
 
             string? exposedName = "id";
             metadata.Setup(x => x.TryGetExposedColumnName(entityName, "id", out exposedName)).Returns(true);
+
+            // The policy visitor resolves backing columns and quotes them while building the predicate.
+            string? backingColumn = "id";
+            metadata.Setup(x => x.TryGetBackingColumn(entityName, "id", out backingColumn)).Returns(true);
+            Mock<IQueryBuilder> queryBuilder = new();
+            queryBuilder.Setup(x => x.QuoteIdentifier(It.IsAny<string>())).Returns<string>(name => $"\"{name}\"");
+            metadata.Setup(x => x.GetQueryBuilder()).Returns(queryBuilder.Object);
 
             ODataParser parser = new();
             parser.BuildModel(metadata.Object);
@@ -95,7 +160,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 metadata.Object,
                 authorization.Object,
                 filterParser,
-                new Dictionary<string, object?>(),
+                mutationParams ?? new Dictionary<string, object?>(),
                 httpContext);
         }
     }

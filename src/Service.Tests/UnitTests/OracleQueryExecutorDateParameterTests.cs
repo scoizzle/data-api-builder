@@ -21,7 +21,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// Unit tests for the Oracle-specific date/time parameter conversion performed by
     /// <see cref="OracleQueryExecutor.PopulateDbTypeForParameter"/>.
     /// </summary>
-    [TestClass, TestCategory(TestCategory.ORACLE)]
+    [TestClass]
     public class OracleQueryExecutorDateParameterTests
     {
         /// <summary>
@@ -118,6 +118,28 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.AreEqual(OracleDbType.TimeStamp, parameter.OracleDbType);
             Assert.AreEqual(new DateTime(2023, 1, 24, 15, 0, 0), parameter.Value);
+        }
+
+        /// <summary>
+        /// A plain <see cref="DateTime"/> has no <see cref="TypeHelper"/> DbType mapping, so the
+        /// default branch must bind it as TIMESTAMP. ODP.NET otherwise infers DATE and drops
+        /// fractional seconds on TIMESTAMP writes.
+        /// </summary>
+        [TestMethod]
+        public void PopulateDbTypeForParameter_PlainDateTimeWithoutHint_BindsTimestampPreservingFraction()
+        {
+            DateTime value = new DateTime(1999, 1, 8, 10, 23, 54).AddTicks(9999999);
+            OracleParameter parameter = new();
+            CreateExecutor().PopulateDbTypeForParameter(
+                new KeyValuePair<string, DbConnectionParam>("@param0", new DbConnectionParam(value)),
+                parameter);
+
+            // Assert the type Populate itself selected. Reading OracleDbType after the Value
+            // setter is not enough: ODP.NET 23.7 infers TimeStamp from a DateTime value, while
+            // the parameter stays Varchar2 until that setter runs.
+            Assert.AreEqual(OracleDbType.TimeStamp, parameter.OracleDbType);
+            Assert.IsInstanceOfType<DateTime>(parameter.Value);
+            Assert.AreEqual(value.Ticks, ((DateTime)parameter.Value).Ticks);
         }
 
         /// <summary>

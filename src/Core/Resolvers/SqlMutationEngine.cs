@@ -362,8 +362,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <returns>IActionResult</returns>
         public async Task<IActionResult?> ExecuteAsync(RestRequestContext context)
         {
-            // for REST API scenarios, use the default datasource
-            string dataSourceName = _runtimeConfigProvider.GetConfig().DefaultDataSourceName;
+            // Non-Oracle REST writes stay on the default data source, which is what those engines do
+            // today. An Oracle entity uses its own source so a second Oracle database is the one written.
+            RuntimeConfig config = _runtimeConfigProvider.GetConfig();
+            string entityDataSourceName = config.GetDataSourceNameFromEntityName(context.EntityName);
+            string dataSourceName = config.GetDataSourceFromDataSourceName(entityDataSourceName).DatabaseType == DatabaseType.Oracle
+                ? entityDataSourceName
+                : config.DefaultDataSourceName;
 
             Dictionary<string, object?> parameters = PrepareParameters(context);
             ISqlMetadataProvider sqlMetadataProvider = _sqlMetadataProviderFactory.GetMetadataProvider(dataSourceName);

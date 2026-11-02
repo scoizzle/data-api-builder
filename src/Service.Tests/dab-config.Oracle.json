@@ -1048,6 +1048,17 @@
               "action": "delete"
             }
           ]
+        },
+        {
+          "role": "database_policy_tester",
+          "actions": [
+            {
+              "action": "create",
+              "policy": {
+                "database": "true"
+              }
+            }
+          ]
         }
       ],
       "mappings": {
@@ -1871,6 +1882,47 @@
         "smalldatetime_types": "smalldatetime_types",
         "bytearray_types": "bytearray_types",
         "uuid_types": "uuid_types"
+      }
+    },
+    "BlobType": {
+      "source": {
+        "object": "blob_type_table",
+        "type": "table",
+        "key-fields": [
+          "id"
+        ]
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "BlobType",
+          "plural": "BlobTypes"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "id": "id",
+        "payload": "payload"
       }
     },
     "stocks_price": {
@@ -3135,7 +3187,13 @@
     "GetBook": {
       "source": {
         "object": "get_book_by_id",
-        "type": "stored-procedure"
+        "type": "stored-procedure",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true
+          }
+        ]
       },
       "graphql": {
         "enabled": false,
@@ -4234,6 +4292,187 @@
       "mappings": {
         "id": "id",
         "name": "name"
+      }
+    },
+    "NumberShape": {
+      "source": {
+        "object": "number_shapes",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "NumberShape",
+          "plural": "NumberShapes"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "small_id": "small_id",
+        "big_id": "big_id",
+        "free_num": "free_num",
+        "money": "money"
+      }
+    },
+    "TouchItemOne": {
+      "source": {
+        "object": "SYSTEM.dab_overload_pkg.touch_item#1",
+        "type": "stored-procedure",
+        "parameters": {
+          "p_id": 1
+        }
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "TouchItemOne",
+          "plural": "TouchItemOnes"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "methods": [
+          "post"
+        ]
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        }
+      ]
+    },
+    "TouchItemTwo": {
+      "source": {
+        "object": "SYSTEM.dab_overload_pkg.touch_item#2",
+        "type": "stored-procedure",
+        "parameters": {
+          "p_id": 1,
+          "p_flag": "U"
+        }
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "TouchItemTwo",
+          "plural": "TouchItemTwos"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "methods": [
+          "post"
+        ]
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        },
+        {
+          "role": "authenticated",
+          "actions": [
+            {
+              "action": "execute"
+            }
+          ]
+        }
+      ]
+    },
+    "QuotedCustomer": {
+      "source": {
+        "object": "\"Customers\"",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "QuotedCustomer",
+          "plural": "quotedCustomers"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "Id": "id",
+        "Name": "name"
+      }
+    },
+    "QuotedCustomerViaSynonym": {
+      "source": {
+        "object": "\"CustomersSyn\"",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": false,
+        "type": {
+          "singular": "QuotedCustomerViaSynonym",
+          "plural": "quotedCustomersViaSynonym"
+        }
+      },
+      "rest": {
+        "enabled": true
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "*"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "Id": "id",
+        "Name": "name"
       }
     }
   }

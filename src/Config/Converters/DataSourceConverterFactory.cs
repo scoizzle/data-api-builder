@@ -110,7 +110,12 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                             // Determine whether to resolve the environment variable or keep as-is.
                                             string stringValue = reader.DeserializeString(_replacementSettings)!;
 
-                                            if (bool.TryParse(stringValue, out bool boolValue))
+                                            if (string.Equals(optionsSubproperty, OracleOptions.MANAGED_IDENTITY_OPTION, StringComparison.Ordinal))
+                                            {
+                                                // Accepts true/false/"1"/"0" and rejects anything else at config load.
+                                                optionsSubpropertyValue = DataSource.ParseBoolOptionString(optionsSubproperty, stringValue);
+                                            }
+                                            else if (bool.TryParse(stringValue, out bool boolValue))
                                             {
                                                 // MsSqlOptions.SetSessionContext will contain a boolean value.
                                                 optionsSubpropertyValue = boolValue;

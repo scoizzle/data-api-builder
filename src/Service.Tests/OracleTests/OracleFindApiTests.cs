@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Find;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -50,8 +51,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             },
             {
                 "FindOneStoredProcedureTestUsingParameter",
-                $"SELECT JSON_OBJECT('id' VALUE id, 'name' VALUE name) AS data " +
-                $"FROM (SELECT id, name FROM publishers WHERE id = 1 FETCH FIRST 1 ROWS ONLY)"
+                $"SELECT id, title, publisher_id FROM books WHERE id = 1"
             },
             {
                 "FindOnTableWithUniqueCharacters",
@@ -553,88 +553,60 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithQueryStringAllFieldsOrderByAsc() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithQueryStringAllFieldsOrderByAsc() => await base.FindTestWithQueryStringAllFieldsOrderByAsc();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithQueryStringAllFieldsOrderByDesc() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithQueryStringAllFieldsOrderByDesc() => await base.FindTestWithQueryStringAllFieldsOrderByDesc();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc() => await base.FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestVerifyMaintainColumnOrderForOrderBy() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestVerifyMaintainColumnOrderForOrderBy() => await base.FindTestVerifyMaintainColumnOrderForOrderBy();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithIntTypeNullValuesOrderByAsc() => await Task.CompletedTask;
+        [Ignore("Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md. #27")]
+        public override async Task FindTestWithIntTypeNullValuesOrderByAsc() => await base.FindTestWithIntTypeNullValuesOrderByAsc();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithQueryStringOnViews() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithQueryStringOnViews() => await base.FindTestWithQueryStringOnViews();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields() => await base.FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields() => await base.FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithDifferentMappedFieldsAndOrderBy() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithDifferentMappedFieldsAndOrderBy() => await base.FindTestWithDifferentMappedFieldsAndOrderBy();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy() => await base.FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy() => await base.FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy();
 
         [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithAfterMultiKeyPagination() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindTestWithFirstAndSpacedColumnOrderBy() => await base.FindTestWithFirstAndSpacedColumnOrderBy();
 
         [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithFirstMultiKeyPagination() => await Task.CompletedTask;
+        [Ignore("Oracle does not install a VPD policy on revenues. #27")]
+        public override async Task FindTestOnTableWithDatabasePolicy() => await base.FindTestOnTableWithDatabasePolicy();
 
         [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithFirstMultiKeyPaginationAndOrderBy() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithFirstMultiKeyIncludeAllInOrderByAndPagination() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithFirstMultiKeyIncludeOneInOrderByAndPagination() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle pagination cursor encoding differs from SQL Server.")]
-        public override async Task FindTestWithPaginationVerifMultiplePrimaryKeysInAfter() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle DATE literal format differs from SQL Server.")]
-        public override async Task FindTestWithFirstTwoVerifyAfterBreaksTieCorrectlyWithOrderBy() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindTestWithFirstAndSpacedColumnOrderBy() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle does not install a VPD policy on revenues.")]
-        public override async Task FindTestOnTableWithDatabasePolicy() => await Task.CompletedTask;
-
-        [TestMethod]
-        [Ignore("Oracle returns different filtered results due to collation differences.")]
-        public override async Task FindTestsWithFilterQueryStringOneOpFilter() => await Task.CompletedTask;
+        [Ignore("Oracle returns different filtered results due to collation differences. #27")]
+        public override async Task FindTestsWithFilterQueryStringOneOpFilter() => await base.FindTestsWithFilterQueryStringOneOpFilter();
 
         [TestMethod]
         public override async Task FindTestWithFilterQueryStringBoolResultFilter()
@@ -643,23 +615,20 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindWithSelectAndOrderByQueryStringsOnATable() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindWithSelectAndOrderByQueryStringsOnATable() => await base.FindWithSelectAndOrderByQueryStringsOnATable();
 
         [TestMethod]
-        [Ignore("Oracle binary collation produces different sort order than SQL Server.")]
-        public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await Task.CompletedTask;
+        [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
+        public override async Task FindWithSelectAndOrderByQueryStringsOnAView() => await base.FindWithSelectAndOrderByQueryStringsOnAView();
 
         [TestMethod]
-        [Ignore("Oracle preserves original column casing in unmapped fields.")]
-        public override async Task FindTestWithUnMappedFieldsToBeReturned() => await Task.CompletedTask;
+        [Ignore("Oracle preserves catalog spelling for unmapped fields, so the lowercase treeid expectation does not match. #27")]
+        public override async Task FindTestWithUnMappedFieldsToBeReturned() => await base.FindTestWithUnMappedFieldsToBeReturned();
 
         [TestMethod]
-        [Ignore("Oracle test schema does not install a VPD policy on revenues.")]
-        public override Task FindTestOnTableWithSecurityPolicy()
-        {
-            return Task.CompletedTask;
-        }
+        [Ignore("Oracle test schema does not install a VPD policy on revenues. #27")]
+        public override Task FindTestOnTableWithSecurityPolicy() => base.FindTestOnTableWithSecurityPolicy();
 
         [TestMethod]
         public override async Task FindManyStoredProcedureTest()
@@ -668,10 +637,16 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle fixture procedure get_book_by_id ignores its id argument (WHERE id = id binds the column), so it returns every book; the expected query also targets publishers. Needs a fixture/expectation fix, not a casing change.")]
-        public override Task FindOneStoredProcedureTestUsingParameter()
+        public async Task FindOneStoredProcedureReturnsExactlyOneBookForIdTwo()
         {
-            return Task.CompletedTask;
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: "?id=2",
+                entityNameOrPath: _integrationProcedureFindOne_EntityName,
+                operationType: EntityActionOperation.Execute,
+                restHttpVerb: SupportedHttpVerb.Get,
+                sqlQuery: "SELECT id, title, publisher_id FROM books WHERE id = 2",
+                expectJson: false);
         }
 
         [TestMethod]
@@ -681,10 +656,20 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle reports a missing required argument as ORA-06550 (HTTP 500), not the shared 400 DatabaseInputError.")]
         public override Task FindStoredProcedureWithMissingParameter()
         {
-            return Task.CompletedTask;
+            return SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: string.Empty,
+                entityNameOrPath: _integrationProcedureFindOne_EntityName,
+                sqlQuery: string.Empty,
+                operationType: EntityActionOperation.Execute,
+                restHttpVerb: SupportedHttpVerb.Get,
+                exceptionExpected: true,
+                expectedErrorMessage: "PLS-00306",
+                expectedStatusCode: HttpStatusCode.BadRequest,
+                expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseInputError.ToString(),
+                isExpectedErrorMsgSubstr: true);
         }
 
         [TestMethod]
@@ -703,11 +688,11 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 expectedStatusCode: HttpStatusCode.BadRequest
                 );
 
-            // On an entity that takes parameters other than those supplied. GetBook has no
-            // configured parameter names, so Oracle exposes its argument as the catalog spelling ID.
+            // GetBook configures the exposed name "id". The catalog formal stays ID and the
+            // named call quotes that catalog name. An unknown query field is still rejected.
             await SetupAndRunRestApiTest(
                 primaryKeyRoute: string.Empty,
-                queryString: "?ID=1&param=value",
+                queryString: "?id=1&param=value",
                 entityNameOrPath: _integrationProcedureFindOne_EntityName,
                 sqlQuery: string.Empty,
                 operationType: EntityActionOperation.Execute,
@@ -719,10 +704,22 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle reports a missing required argument as ORA-06550 (HTTP 500), not the shared 400 DatabaseInputError.")]
         public override Task FindApiTestForSPWithRequiredParamsInRequestBody()
         {
-            return Task.CompletedTask;
+            // A GET ignores the body, so the required id is still missing and Oracle raises PLS-00306.
+            return SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: string.Empty,
+                requestBody: @"{ ""id"": 1 }",
+                entityNameOrPath: _integrationProcedureFindOne_EntityName,
+                sqlQuery: string.Empty,
+                operationType: EntityActionOperation.Execute,
+                restHttpVerb: SupportedHttpVerb.Get,
+                exceptionExpected: true,
+                expectedErrorMessage: "PLS-00306",
+                expectedStatusCode: HttpStatusCode.BadRequest,
+                expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseInputError.ToString(),
+                isExpectedErrorMsgSubstr: true);
         }
 
         [DataTestMethod]
@@ -760,10 +757,16 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle SQL error message format differs from other engines.")]
         public override async Task FindByIdTestInvalidOrderByColumn()
         {
-            await Task.CompletedTask;
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: "?$orderby=Pinecone",
+                entityNameOrPath: _integrationEntityName,
+                sqlQuery: string.Empty,
+                exceptionExpected: true,
+                expectedErrorMessage: $"Could not find a property named 'Pinecone' on type 'default_namespace.{_integrationEntityName}.{GetDefaultSchemaForEdmModel()}BOOKS'.",
+                expectedStatusCode: HttpStatusCode.BadRequest);
         }
 
         [TestMethod]

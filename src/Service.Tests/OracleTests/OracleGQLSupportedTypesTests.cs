@@ -1,10 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Azure.DataApiBuilder.Service.Tests.SqlTests;
 using Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLSupportedTypesTests;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using static Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes.SupportedDateTimeTypes;
@@ -202,7 +204,7 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             string limit = "1")
         {
             string jsonFields = string.Join(", ",
-                queryFields.Select(field => $"'{field.Alias}' VALUE {field.BackingColumnName}"));
+                queryFields.Select(field => $"'{field.Alias}' VALUE {FormatColumnValue(field.BackingColumnName)}"));
 
             string selectList = string.Join(", ", queryFields.Select(field => field.BackingColumnName));
 
@@ -238,6 +240,15 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         protected override bool IsSupportedType(string type)
         {
+            return IsQueryTypeSupported(type);
+        }
+
+        /// <summary>
+        /// Query rows for DATE/TIMESTAMP stay inconclusive. Typed writes use
+        /// <see cref="IsTypedWriteSupported"/> and run those rows.
+        /// </summary>
+        private static bool IsQueryTypeSupported(string type)
+        {
             return type switch
             {
                 BYTE_TYPE => false,
@@ -253,52 +264,129 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
                 _ => true
             };
         }
-        [TestMethod]
-        [Ignore("Oracle cannot represent extreme float values (2E150, 2E35) without overflow.")]
-        public new Task InsertIntoTypeColumn(string type, string value)
+
+        /// <summary>
+        /// Keeps the shared typed-write rows. BINARY_FLOAT/BINARY_DOUBLE overflow on 2E35/2E150.
+        /// TIMESTAMP WITH TIME ZONE is covered for the seeded non-UTC offset and for null;
+        /// SQL Server's year 1/9999 literals stay out. RAW(2000) accepts the base64 rows.
+        /// DATE, DATETIME, DATETIME2, and SMALLDATETIME are DATE or TIMESTAMP columns and are
+        /// written as DateTime, so those rows run. A live mismatch stays a failure.
+        /// Query rows still use <see cref="IsSupportedType"/> and stay inconclusive.
+        /// </summary>
+        protected override bool IsSupportedValue(string type, string value)
         {
-            if (type is FLOAT_TYPE or SINGLE_TYPE)
+            return IsTypedWriteSupported(type, value);
+        }
+
+        /// <summary>
+        /// Offline gate for the typed-write matrices. DATE/DATETIME/DATETIME2/SMALLDATETIME
+        /// return true for every seeded value, including null.
+        /// </summary>
+        internal static bool IsTypedWriteSupported(string type, string value)
+        {
+            if (type is DATE_TYPE or DATETIME_TYPE or DATETIME2_TYPE or SMALLDATETIME_TYPE)
             {
-                Assert.Inconclusive("Oracle cannot represent extreme float values without overflow.");
+                return true;
             }
 
-            return base.InsertIntoTypeColumn(type, value);
+            if (IsExtremeMagnitude(type, value))
+            {
+                return false;
+            }
+
+            if (type == DATETIMEOFFSET_TYPE)
+            {
+                string trimmed = (value ?? string.Empty).Trim().Trim('"');
+                return trimmed.Equals("null", StringComparison.OrdinalIgnoreCase)
+                    || trimmed.Contains("10:23:54+8:00", StringComparison.Ordinal);
+            }
+
+            return IsQueryTypeSupported(type);
+        }
+
+        /// <summary>
+        /// Reads the seeded TIMESTAMP WITH TIME ZONE and RAW values, including the null row.
+        /// Row 1 stores a +08:00 offset. Row 5 stores NULL in both columns.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(DATETIMEOFFSET_TYPE, 1, DisplayName = "TSTZ round-trip of the +08:00 seed")]
+        [DataRow(DATETIMEOFFSET_TYPE, 5, DisplayName = "TSTZ round-trip of the null seed")]
+        [DataRow(BYTEARRAY_TYPE, 1, DisplayName = "RAW round-trip of the seeded payload")]
+        [DataRow(BYTEARRAY_TYPE, 5, DisplayName = "RAW round-trip of the null seed")]
+        public async Task Oracle_raw_and_timestamp_with_time_zone_round_trip(string type, int id)
+        {
+            string field = GetTestFieldName(type);
+            string gqlQuery = "{ supportedType_by_pk(typeid: " + id + ") { typeid, " + field + " } }";
+            string dbQuery = MakeQueryOnTypeTable(
+                queryFields: new List<DabField> { new(alias: "typeid", backingColumnName: "id"), new(backingColumnName: field) },
+                id: id);
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(gqlQuery, "supportedType_by_pk", isAuthenticated: false);
+            string expected = await GetDatabaseResultAsync(dbQuery);
+            PerformTestEqualsForExtendedTypes(type, expected, actual.ToString());
         }
 
         [TestMethod]
-        [Ignore("Oracle cannot represent extreme float values (2E150, 2E35) without overflow.")]
-        public new Task UpdateTypeColumn(string type, string value)
+        public Task Oracle_timestamp_with_time_zone_null_write()
         {
-            if (type is FLOAT_TYPE or SINGLE_TYPE)
-            {
-                Assert.Inconclusive("Oracle cannot represent extreme float values without overflow.");
-            }
-
-            return base.UpdateTypeColumn(type, value);
+            return UpdateTypeColumn(DATETIMEOFFSET_TYPE, "null");
         }
 
         [TestMethod]
-        [Ignore("Oracle cannot represent extreme float values or Base64 strings in typed columns.")]
-        public new Task InsertIntoTypeColumnWithArgument(string type, object value)
+        public async Task Oracle_blob_round_trip_includes_null()
         {
-            if (type is FLOAT_TYPE or SINGLE_TYPE or BYTEARRAY_TYPE)
-            {
-                Assert.Inconclusive("Oracle cannot represent extreme float values or Base64 strings.");
-            }
-
-            return base.InsertIntoTypeColumnWithArgument(type, value);
+            await QueryBlob(1);
+            await QueryBlob(2);
         }
 
-        [TestMethod]
-        [Ignore("Oracle cannot represent extreme float values or Base64 strings in typed columns.")]
-        public new Task UpdateTypeColumnWithArgument(string type, object value)
+        private async Task QueryBlob(int id)
         {
-            if (type is FLOAT_TYPE or SINGLE_TYPE or BYTEARRAY_TYPE)
+            string gqlQuery = "{ blobType_by_pk(id: " + id + ") { id, payload } }";
+            string dbQuery = $@"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id,
+                    'payload' VALUE {FormatColumnValue("payload")}
+                ) AS data
+                FROM (
+                    SELECT id, payload
+                    FROM blob_type_table
+                    WHERE id = {id}
+                    FETCH FIRST 1 ROWS ONLY
+                ) subq";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(gqlQuery, "blobType_by_pk", isAuthenticated: false);
+            string expected = await GetDatabaseResultAsync(dbQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        /// <summary>
+        /// RAW and BLOB are base64-encoded in the engine's JSON_OBJECT projection.
+        /// UTL_ENCODE.BASE64_ENCODE(NULL) raises ORA-29261, so null stays null.
+        /// </summary>
+        private static string FormatColumnValue(string columnName)
+        {
+            if (columnName is "bytearray_types" or "payload")
             {
-                Assert.Inconclusive("Oracle cannot represent extreme float values or Base64 strings.");
+                return $"CASE WHEN {columnName} IS NULL THEN NULL ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnName})) END";
             }
 
-            return base.UpdateTypeColumnWithArgument(type, value);
+            return columnName;
+        }
+
+        private static bool IsExtremeMagnitude(string type, string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+
+            string normalized = value.Replace("+", string.Empty, StringComparison.Ordinal).Replace("\"", string.Empty, StringComparison.Ordinal);
+            if (type == SINGLE_TYPE && normalized.Contains("2E35", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return type == FLOAT_TYPE && normalized.Contains("2E150", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

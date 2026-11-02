@@ -45,6 +45,10 @@ Use the [Getting Started](https://learn.microsoft.com/azure/data-api-builder/get
 - DAB's Health endpoint: `http://localhost:5000/health`
 - DAB's Swagger UI: `http://localhost:5000/api/openapi`
 
+## Oracle (preview)
+
+Oracle Database 19c and later is a preview engine. It is not a generally available database in the support matrix. Operator notes are in the repository at `docs/design/oracle-support.md`.
+
 ## Additional resources
 
 - [Online Documentation](https://learn.microsoft.com/en-us/azure/data-api-builder/overview)

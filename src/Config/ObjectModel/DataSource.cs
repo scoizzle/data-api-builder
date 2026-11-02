@@ -87,7 +87,8 @@ public record DataSource(
         {
             return (TOptionType)(object)new OracleOptions(
                 CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
-                SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))));
+                SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
+                ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
@@ -111,6 +112,51 @@ public record DataSource(
         }
 
         return false;
+    }
+
+    private bool? ReadNullableBoolOption(string option)
+    {
+        if (Options is not null && Options.TryGetValue(option, out object? value) && value is not null)
+        {
+            return value switch
+            {
+                bool boolValue => boolValue,
+                string stringValue => ParseBoolOptionString(option, stringValue),
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.True } => true,
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.False } => false,
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } element =>
+                    ParseBoolOptionString(option, element.GetString()),
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Null } => null,
+                _ => throw new System.Text.Json.JsonException($"Unexpected value for option '{option}': expected true, false, \"1\" or \"0\"."),
+            };
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Parses a boolean option supplied as a string. The configuration schema allows
+    /// "true"/"false" and "1"/"0"; anything else is a configuration error rather than a silent default.
+    /// </summary>
+    /// <exception cref="System.Text.Json.JsonException">The value is not a recognized boolean string.</exception>
+    internal static bool ParseBoolOptionString(string option, string? value)
+    {
+        if (string.Equals(value, "1", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (string.Equals(value, "0", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (bool.TryParse(value, out bool parsed))
+        {
+            return parsed;
+        }
+
+        throw new System.Text.Json.JsonException($"Unexpected value '{value}' for option '{option}': expected true, false, \"1\" or \"0\".");
     }
 
     private int? ReadIntOption(string option)
@@ -170,12 +216,24 @@ public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 /// because a DBA must first create the context namespace and the package that sets it (see
 /// docs/design/oracle-support.md).
 /// </param>
+/// <param name="ManagedIdentity">
+/// Tri-state switch for Microsoft Entra managed identity token authentication. null (default)
+/// infers it: a token is requested only when the connection string has no password and carries no
+/// wallet (<c>WALLET_LOCATION</c>/<c>MY_WALLET_DIRECTORY</c>) or external-authentication
+/// (<c>User Id=/</c>) markers. true forces token authentication (a failure to obtain a token then
+/// fails requests with a 503 instead of silently connecting without one) and false disables it,
+/// regardless of the connection string. Accepts true/false or "1"/"0"; configuration-file only.
+/// </param>
 public record OracleOptions(
     int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
-    bool SetSessionContext = false) : IDataSourceOptions
+    bool SetSessionContext = false,
+    bool? ManagedIdentity = null) : IDataSourceOptions
 {
     /// <summary>Default command timeout in seconds, matching the other ADO.NET providers.</summary>
     public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
+
+    /// <summary>Name of the tri-state managed identity option in the data-source options object.</summary>
+    public const string MANAGED_IDENTITY_OPTION = "managed-identity";
 }
 
 /// <summary>

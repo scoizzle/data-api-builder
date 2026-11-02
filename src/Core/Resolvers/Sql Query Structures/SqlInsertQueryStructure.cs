@@ -91,16 +91,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     subStatusCode: DataApiBuilderException.SubStatusCodes.AuthorizationCheckFailed);
             }
 
-            // A create policy cannot be evaluated when no column values are supplied (the generated
-            // statement would be a DEFAULT VALUES insert, which has no row to apply the predicate to).
-            // Fail closed for every engine rather than silently bypassing the policy; Oracle already
-            // could not represent this statement.
-            if (InsertColumns.Count == 0
+            // Oracle cannot emit a DEFAULT VALUES insert, and a create policy with no columns has no
+            // row to evaluate. Other engines still insert. Rejecting those engines is a separate change.
+            if (MetadataProvider.GetDatabaseType() == DatabaseType.Oracle
+                && InsertColumns.Count == 0
                 && !string.IsNullOrEmpty(GetDbPolicyForOperation(EntityActionOperation.Create)))
             {
                 throw new DataApiBuilderException(
                     message: "An insert with no column values cannot be used when a database policy is defined for the create action.",
-                    statusCode: HttpStatusCode.BadRequest,
+                    statusCode: HttpStatusCode.Forbidden,
                     subStatusCode: DataApiBuilderException.SubStatusCodes.DatabasePolicyFailure);
             }
         }

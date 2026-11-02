@@ -61,6 +61,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         [DataTestMethod]
         [DataRow("HR", "User Id=hr;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("Hr", "User Id=\"Hr\";Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("HR", "User Id=\"HR\";Password=x;Data Source=localhost:1521/x", true)]
         [DataRow("SYSTEM", "User Id=SYSTEM;Password=x;Data Source=localhost:1521/x", true)]
         [DataRow("", "Data Source=localhost:1521/x", false)]
         [DataRow("", "not-a-connection-string", false)]

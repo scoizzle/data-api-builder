@@ -33,7 +33,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     {
         private const string ENTITY_NAME = "Book";
         private const string SCHEMA_NAME = "SYSTEM";
-        private const string TABLE_NAME = "books";
+        // Catalog spelling. Unquoted names are folded before they reach the builder.
+        private const string TABLE_NAME = "BOOKS";
 
         private delegate void TryGetColumnCallback(string entity, string field, out string? column);
 
@@ -53,7 +54,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// REF CURSOR result set carrying the ___upsert_op___ indicator.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertUpdateBranchContainsWhereClauseScopedByPrimaryKeyAndPolicy()
         {
             // Arrange
@@ -110,7 +110,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// and that a create database policy guards the VALUES via a DUAL filter.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertContainsInsertBranchWithCreatePolicyGuard()
         {
             // Arrange
@@ -161,7 +160,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// when the policy blocks — surfacing 403 rather than ORA-01400 (400).
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleInsertWithCreatePolicyGatesOnPolicyAndOpensEmptyCursorWhenBlocked()
         {
             // Arrange
@@ -268,7 +266,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleInsertCreatePolicyProbeUsesDedupedColumns()
         {
             const string createDbPolicy = "(publisher_id != 0)";
@@ -365,7 +362,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// ('missing' indicator, 404) via a primary-key existence probe.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpsertFallbackToUpdateHasNoInsertBranch()
         {
             // Arrange
@@ -402,7 +398,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// behavior of the other database engines.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleUpdateOpensEmptyCursorWhenNoRowMatched()
         {
             // Arrange
@@ -514,7 +509,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// that the REF CURSOR result bind is registered with the correct Oracle type.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOutputBindRegistrarUsesTypedOutputParameters()
         {
             OracleCommand command = new();
@@ -533,10 +527,122 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// VARCHAR2/NVARCHAR2 RETURNING binds take their size from the builder hint.
+        /// Char length is scaled by 4 (AL32UTF8 worst case) and clamped to the PL/SQL maximum.
+        /// </summary>
+        [TestMethod]
+        public void OracleOutputBindRegistrarSizesVarcharFromHint()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:title=Varchar2:16000,name=NVarchar2:4000 */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"TITLE\", \"NAME\" INTO :title, :name; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(OracleDbType.Varchar2, command.Parameters["title"].OracleDbType);
+            Assert.AreEqual(16000, command.Parameters["title"].Size);
+            Assert.AreEqual(OracleDbType.NVarchar2, command.Parameters["name"].OracleDbType);
+            Assert.AreEqual(4000, command.Parameters["name"].Size);
+        }
+
+        /// <summary>
+        /// A hint above the PL/SQL VARCHAR2 maximum is clamped, and a non-positive hint is raised to 1.
+        /// Unknown hints stay at the historical 4000-byte default.
+        /// </summary>
+        [TestMethod]
+        public void OracleOutputBindRegistrarClampsExtendedVarcharSize()
+        {
+            OracleCommand command = new();
+            const string sql = "/* DAB_ORACLE_OUTPUT_TYPES:wide=Varchar2:200000,tiny=NVarchar2:0,plain=Varchar2 */ " +
+                "BEGIN UPDATE \"SYSTEM\".\"BOOKS\" SET \"TITLE\" = :param0 " +
+                "RETURNING \"WIDE\", \"TINY\", \"PLAIN\" INTO :wide, :tiny, :plain; END;";
+
+            OracleBindRegistrar.RegisterPlSqlOutputBinds(command, sql);
+
+            Assert.AreEqual(32767, command.Parameters["wide"].Size);
+            Assert.AreEqual(1, command.Parameters["tiny"].Size);
+            Assert.AreEqual(4000, command.Parameters["plain"].Size);
+        }
+
+        /// <summary>
+        /// RETURNING hints carry a byte size for bounded character columns and the national
+        /// or LOB type recorded on the column.
+        /// </summary>
+        [TestMethod]
+        public void OracleUpsertOutputHintsSizeVarcharAndUseNationalLobTypes()
+        {
+            SqlUpsertQueryStructure structure = CreateUpsertStructure();
+            // The shared mock resolves exposed names only, so the constructor's output list is
+            // empty. Add the column under test; the hint is built from that list.
+            structure.OutputColumns.Add(new LabelledColumn("SYSTEM", "books", "TITLE", "title"));
+            ColumnDefinition title = structure.GetUnderlyingSourceDefinition().Columns["TITLE"];
+            title.Length = 1000;
+            OracleObjectFacts.Column(title).IsNChar = true;
+
+            string national = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(national, "NVarchar2:4000");
+
+            OracleObjectFacts.Column(title).IsNChar = false;
+            OracleObjectFacts.Column(title).IsNClob = true;
+            title.Length = null;
+            string nclob = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(nclob, "=NClob");
+            Assert.IsFalse(nclob.Contains("NVarchar2", StringComparison.Ordinal));
+
+            OracleObjectFacts.Column(title).IsNClob = false;
+            OracleObjectFacts.Column(title).IsClob = true;
+            string clob = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(clob, "=Clob");
+            Assert.IsFalse(clob.Contains("=NClob", StringComparison.Ordinal));
+
+            OracleObjectFacts.Column(title).IsClob = false;
+            title.Length = 20000;
+            string clamped = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(clamped, "Varchar2:32767");
+        }
+
+        /// <summary>
+        /// DATE and TIMESTAMP both have CLR type DateTime. The RETURNING bind follows the
+        /// catalog type: DATE is OracleDbType.Date, TIMESTAMP(6) stays TimeStamp.
+        /// A DateTime column with no catalog type keeps the historical TimeStamp bind.
+        /// </summary>
+        [TestMethod]
+        public void OracleUpsertOutputHintsUseCatalogDateInsteadOfTimestamp()
+        {
+            SqlUpsertQueryStructure structure = CreateUpsertStructure();
+            structure.OutputColumns.Add(new LabelledColumn("SYSTEM", "books", "PUBLISHED", "published"));
+            ColumnDefinition published = new()
+            {
+                SystemType = typeof(DateTime)
+            };
+            structure.GetUnderlyingSourceDefinition().Columns.Add("PUBLISHED", published);
+
+            OracleObjectFacts.Column(published).PhysicalType = "DATE";
+            string dateHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(dateHint, "dab_out_0=Date");
+            Assert.IsFalse(dateHint.Contains("dab_out_0=TimeStamp", StringComparison.Ordinal), dateHint);
+
+            OracleObjectFacts.Column(published).PhysicalType = "TIMESTAMP(6)";
+            string timestampHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(timestampHint, "dab_out_0=TimeStamp");
+            Assert.IsFalse(timestampHint.Contains("dab_out_0=Date", StringComparison.Ordinal), timestampHint);
+
+            OracleObjectFacts.Column(published).PhysicalType = "TIMESTAMP(6) WITH TIME ZONE";
+            published.SystemType = typeof(DateTimeOffset);
+            string zonedHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(zonedHint, "dab_out_0=TimeStampTZ");
+
+            OracleObjectFacts.Column(published).PhysicalType = null;
+            published.SystemType = typeof(DateTime);
+            string untypedHint = new OracleQueryBuilder().Build(structure);
+            StringAssert.Contains(untypedHint, "dab_out_0=TimeStamp");
+        }
+
+        /// <summary>
         /// RAW output binds need an explicit size. BLOB must not be registered as RAW.
         /// </summary>
         [TestMethod]
-        [TestCategory(TestCategory.ORACLE)]
         public void OracleOutputBindRegistrarSetsRawSizeAndBlobType()
         {
             OracleCommand command = new();

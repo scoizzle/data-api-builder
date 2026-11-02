@@ -357,8 +357,14 @@ namespace Azure.DataApiBuilder.Core.Services
             _runtimeConfigValidator.ValidateEntityAndAutoentityConfigurations(runtimeConfig);
 
             GenerateDatabaseObjectForEntities();
-            await ResolveCatalogObjectNamesAsync();
-            await PopulateObjectDefinitionForEntities(cancellationToken);
+            // Oracle opens one catalog connection for name resolution and the column/procedure
+            // reads that follow. Other providers get a no-op scope. The scope is disposed before
+            // the rest of startup, so request connections are unchanged.
+            await using (await BeginMetadataDiscoveryScopeAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await ResolveCatalogObjectNamesAsync(cancellationToken);
+                await PopulateObjectDefinitionForEntities(cancellationToken);
+            }
             PopulateLinkingEntityExposedNames();
             cancellationToken.ThrowIfCancellationRequested();
             GenerateExposedToBackingColumnMapsForEntities();
@@ -781,11 +787,33 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
+        /// Opens a provider-owned catalog session for <see cref="ResolveCatalogObjectNamesAsync"/>
+        /// and <see cref="PopulateObjectDefinitionForEntities"/>. The base scope does nothing.
+        /// Oracle uses one connection so startup does not open a session per object.
+        /// </summary>
+        protected virtual ValueTask<IAsyncDisposable> BeginMetadataDiscoveryScopeAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IAsyncDisposable>(NullMetadataDiscoveryScope.Instance);
+        }
+
+        private sealed class NullMetadataDiscoveryScope : IAsyncDisposable
+        {
+            public static readonly NullMetadataDiscoveryScope Instance = new();
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+
+        /// <summary>
         /// Provider hook after <see cref="GenerateDatabaseObjectForEntities"/> and before
         /// catalog FillSchema. The base is a no-op. Oracle resolves synonyms to the local
         /// base object so later metadata and SQL use physical catalog names.
         /// </summary>
-        protected virtual Task ResolveCatalogObjectNamesAsync() => Task.CompletedTask;
+        protected virtual Task ResolveCatalogObjectNamesAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
 
         /// <summary>
         /// Create a DatabaseObject for all the exposed entities.
@@ -889,7 +917,7 @@ namespace Azure.DataApiBuilder.Core.Services
                         else
                         {
                             // parse source name into a tuple of (schemaName, databaseObjectName).
-                            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(entity.Source.Object!);
+                            (string schemaName, string dbObjectName) = ParseDatabaseObjectName(entity.Source.Object!);
 
                             if (sourceType is EntitySourceType.Table)
                             {
@@ -917,6 +945,7 @@ namespace Azure.DataApiBuilder.Core.Services
                     }
 
                     EntityToDatabaseObject.Add(entityName, sourceObject);
+                    ValidateDatabaseObjectIdentity(entityName, sourceObject);
 
                     if (entity.Relationships is not null && entity.Source.Type is EntitySourceType.Table)
                     {
@@ -993,13 +1022,13 @@ namespace Azure.DataApiBuilder.Core.Services
                                 subStatusCode: DataApiBuilderException.SubStatusCodes.ConfigValidationError);
                 }
 
-                (targetSchemaName, targetDbTableName) = ParseSchemaAndDbTableName(targetEntity.Source.Object)!;
+                (targetSchemaName, targetDbTableName) = ParseDatabaseObjectName(targetEntity.Source.Object)!;
                 DatabaseTable targetDbTable = new(targetSchemaName, targetDbTableName);
                 // If a linking object is specified,
                 // give that higher preference and add two foreign keys for this targetEntity.
                 if (relationship.LinkingObject is not null)
                 {
-                    (linkingTableSchema, linkingTableName) = ParseSchemaAndDbTableName(relationship.LinkingObject)!;
+                    (linkingTableSchema, linkingTableName) = ParseDatabaseObjectName(relationship.LinkingObject)!;
                     DatabaseTable linkingDbTable = new(linkingTableSchema, linkingTableName);
                     AddForeignKeyForTargetEntity(
                         sourceEntityName: entityName,
@@ -1227,7 +1256,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// </summary>
         protected virtual DatabaseObject CreateStoredProcedureDatabaseObject(string source, EntitySourceType sourceType)
         {
-            (string schemaName, string dbObjectName) = ParseSchemaAndDbTableName(source);
+            (string schemaName, string dbObjectName) = ParseDatabaseObjectName(source);
             return new DatabaseStoredProcedure(schemaName, dbObjectName)
             {
                 SourceType = sourceType,
@@ -1243,7 +1272,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <param name="source">source string to parse</param>
         /// <returns>The appropriate schema and db object name as a tuple of strings.</returns>
         /// <exception cref="DataApiBuilderException"></exception>
-        public (string, string) ParseSchemaAndDbTableName(string source)
+        public virtual (string, string) ParseSchemaAndDbTableName(string source)
         {
             (string? schemaName, string dbTableName) = EntitySourceNamesParser.ParseSchemaAndTable(source)!;
 
@@ -1274,6 +1303,36 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             return (schemaName, dbTableName);
+        }
+
+        /// <summary>
+        /// Parses a config-authored table, view, or linking source. The default is
+        /// <see cref="ParseSchemaAndDbTableName"/>. Engines that fold or quote identifiers
+        /// override this. <see cref="ParseSchemaAndDbTableName"/> stays public so
+        /// <see cref="RuntimeConfigValidator"/> sees the same spelling.
+        /// </summary>
+        protected virtual (string Schema, string Name) ParseDatabaseObjectName(string source)
+        {
+            return ParseSchemaAndDbTableName(source);
+        }
+
+        /// <summary>
+        /// Records one catalog column. The default keeps the first of two identical names.
+        /// An engine whose column dictionary is case-insensitive overrides this when two
+        /// catalog spellings differ only by case.
+        /// </summary>
+        protected virtual void AddSourceColumn(SourceDefinition sourceDefinition, string columnName, ColumnDefinition column)
+        {
+            sourceDefinition.Columns.TryAdd(columnName, column);
+        }
+
+        /// <summary>
+        /// Called after an entity is bound to its database object. The default allows every
+        /// pair. An engine whose <see cref="DatabaseObject"/> equality ignores case overrides
+        /// this to reject quoted and unquoted twins.
+        /// </summary>
+        protected virtual void ValidateDatabaseObjectIdentity(string entityName, DatabaseObject databaseObject)
+        {
         }
 
         /// <inheritdoc />
@@ -1518,7 +1577,7 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
 
                 // Store the dictionary containing result set field with its type as Columns
-                storedProcedureDefinition.Columns.TryAdd(resultFieldName, new(resultFieldType) { IsNullable = isResultFieldNullable });
+                AddSourceColumn(storedProcedureDefinition, resultFieldName, new(resultFieldType) { IsNullable = isResultFieldNullable });
             }
 
             static JsonElement GetPropertyByCaseInsensitiveName(JsonElement element, string name)
@@ -1575,7 +1634,14 @@ namespace Azure.DataApiBuilder.Core.Services
             foreach ((string entityName, Entity entity) in Entities)
             {
                 EntityExposedNamesToBackingColumnNames.TryGetValue(entityName, out Dictionary<string, string>? exposedToBacking);
-                NormalizeConfiguredIdentifiers(entityName, entity, exposedToBacking);
+                try
+                {
+                    NormalizeConfiguredIdentifiers(entityName, entity, exposedToBacking);
+                }
+                catch (Exception e)
+                {
+                    HandleOrRecordException(e);
+                }
             }
         }
 
@@ -1785,11 +1851,11 @@ namespace Azure.DataApiBuilder.Core.Services
                     IsReadOnly = (bool)columnInfoFromAdapter["IsAutoIncrement"] || isArrayType
                 };
 
-                // Tests may try to add the same column simultaneously
-                // hence we use TryAdd here.
+                // Tests may try to add the same column simultaneously.
                 // If the addition fails, it is assumed the column definition
                 // has already been added and need not error out.
-                sourceDefinition.Columns.TryAdd(columnName, column);
+                // Oracle rejects a second spelling that differs only by case.
+                AddSourceColumn(sourceDefinition, columnName, column);
             }
 
             // Store the spelling ResolvePhysicalColumnName returns. Shared providers keep the

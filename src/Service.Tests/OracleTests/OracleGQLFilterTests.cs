@@ -26,10 +26,10 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         }
 
         [TestMethod]
-        [Ignore("Oracle sorts strings with binary collation, producing different order than SQL Server.")]
+        [Ignore("Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md. #27")]
         public override async Task TestGetNullIntFields()
         {
-            await Task.CompletedTask;
+            await base.TestGetNullIntFields();
         }
 
         /// <summary>

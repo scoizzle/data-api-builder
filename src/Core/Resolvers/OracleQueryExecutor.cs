@@ -58,6 +58,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private Dictionary<string, bool> _dataSourceAccessTokenUsage;
 
         /// <summary>
+        /// DatasourceName to the explicit "managed-identity" option (null = infer from the connection string).
+        /// </summary>
+        private readonly Dictionary<string, bool?> _dataSourceManagedIdentityOptions = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// DatasourceName to boolean value indicating if session context should be set for db using Oracle application contexts.
         /// </summary>
         private Dictionary<string, bool> _dataSourceToSessionContextUsage;
@@ -93,6 +98,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// A rollback that itself fails must not replace the mutation error the caller sees.
+        /// </summary>
+        internal void LogPreservedRollbackFailure(Exception rollbackException, Exception original)
+        {
+            QueryExecutorLogger.LogWarning(
+                rollbackException,
+                "Oracle mutation rollback failed. The original mutation error is unchanged: {OriginalError}",
+                original.Message);
+        }
+
+        /// <summary>
         /// Starts a local <see cref="OracleTransaction"/> at ReadCommitted.
         /// ODP.NET Core does not expose BeginTransactionAsync; ambient TransactionScope is not used
         /// because a second Open inside the same scope promotes to XA/MSDTC, which is unsupported on .NET Core.
@@ -122,24 +138,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 OracleOptions oracleOptions = dataSource.GetTypedOptions<OracleOptions>() ?? new OracleOptions();
                 _dataSourceCommandTimeouts[dataSourceName] = oracleOptions.CommandTimeoutSeconds;
 
-                // Hosted/late-configured deployments must not send database traffic in cleartext.
-                // MySQL/PostgreSQL force SslMode=VerifyFull and MSSQL forces Encrypt=true; ODP.NET
-                // rejects SqlClient's "Encryption=true" keyword, so require native network encryption
-                // process-wide instead (covers both TCPS and Oracle native encryption).
-                if (_runtimeConfigProvider.IsLateConfigured)
-                {
-                    OracleConfiguration.SqlNetEncryptionClient = "REQUIRED";
-                }
-
-                // ODP.NET rejects SqlClient's Encryption=true keyword; do not append it when hosted.
-                OracleConnectionStringBuilder builder = new(dataSource.ConnectionString);
+                // Hosted mode validates TCPS + SSL_SERVER_DN_MATCH and does not mutate
+                // OracleConfiguration (that static is rejected with ORA-50099 after any
+                // connection opens, which breaks hot reload). Statement-cache bounds apply
+                // whenever the operator left both cache attributes unset.
+                string preparedConnectionString = OracleConnectionStringPolicy.Prepare(
+                    dataSource.ConnectionString,
+                    _runtimeConfigProvider.IsLateConfigured);
+                OracleConnectionStringBuilder builder = new(preparedConnectionString);
                 ConnectionStringBuilders.TryAdd(dataSourceName, builder);
-                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder);
+                bool? managedIdentityOption = oracleOptions.ManagedIdentity;
+                _dataSourceManagedIdentityOptions[dataSourceName] = managedIdentityOption;
+                _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder, managedIdentityOption);
 
                 // Session context (application context) forwarding is opt-in via "set-session-context".
                 // A DBA must first create the context namespace and the package that sets it; DAB then
                 // executes a parameterized anonymous block as a separate command on the same connection
-                // before each statement (see SetSessionContextIfAny and docs/design/oracle-support.md).
+                // before each statement (see ApplySessionContext and docs/design/oracle-support.md).
                 _dataSourceToSessionContextUsage[dataSourceName] = oracleOptions.SetSessionContext;
             }
         }
@@ -179,6 +194,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             cmd.BindByName = true;
 
             string translatedSql = TranslateBindParameters(sqltext);
+            translatedSql = RewriteEmptyStringEqualityBinds(translatedSql, parameters);
             cmd.CommandText = translatedSql;
 
             if (parameters is not null)
@@ -222,10 +238,110 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // string outputs), and the ':dab_result' REF CURSOR must be an OUTPUT RefCursor parameter.
             OracleBindRegistrar.RegisterPlSqlOutputBinds(cmd, translatedSql);
 
-            // Forward the caller's claims to the session before the main statement executes.
-            SetSessionContextIfEnabled(conn, httpContext, dataSourceName);
-
             return cmd;
+        }
+
+        /// <summary>
+        /// Clears and sets Oracle application-context claims after the statement command is enlisted
+        /// and before it executes. A null <paramref name="httpContext"/> still clears, so a pooled
+        /// session cannot keep a previous caller's claims. The context command is one extra round trip.
+        /// </summary>
+        protected override void ApplySessionContext(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction)
+        {
+            if (conn is not OracleConnection oracleConnection
+                || !TryCreateSessionContextCommand(oracleConnection, httpContext, dataSourceName, transaction, out OracleCommand? contextCommand)
+                || contextCommand is null)
+            {
+                return;
+            }
+
+            using (contextCommand)
+            {
+                try
+                {
+                    ExecuteSessionContextCommand(contextCommand);
+                }
+                catch (DbException e)
+                {
+                    throw DbExceptionParser.Parse(e);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        protected override async Task ApplySessionContextAsync(
+            DbConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (conn is not OracleConnection oracleConnection
+                || !TryCreateSessionContextCommand(oracleConnection, httpContext, dataSourceName, transaction, out OracleCommand? contextCommand)
+                || contextCommand is null)
+            {
+                return;
+            }
+
+            using (contextCommand)
+            {
+                try
+                {
+                    await ExecuteSessionContextCommandAsync(contextCommand, cancellationToken);
+                }
+                catch (DbException e)
+                {
+                    throw DbExceptionParser.Parse(e);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Runs the session-context block. Tests override this to record the command without a database.
+        /// </summary>
+        protected virtual void ExecuteSessionContextCommand(OracleCommand command)
+        {
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Runs the session-context block and forwards <paramref name="cancellationToken"/> to ODP.NET.
+        /// </summary>
+        protected virtual Task ExecuteSessionContextCommandAsync(OracleCommand command, CancellationToken cancellationToken)
+        {
+            return command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        private bool TryCreateSessionContextCommand(
+            OracleConnection conn,
+            HttpContext? httpContext,
+            string dataSourceName,
+            DbTransaction? transaction,
+            out OracleCommand? contextCommand)
+        {
+            // Only the option gates this. A null HttpContext still clears; GetProcessedUserClaims
+            // returns an empty dictionary, so the block is CLEAR_CLAIMS and no SET_CLAIM.
+            if (!IsSessionContextEnabled(dataSourceName))
+            {
+                contextCommand = null;
+                return false;
+            }
+
+            contextCommand = BuildSessionContextCommand(
+                conn,
+                AuthorizationResolver.GetProcessedUserClaims(httpContext),
+                dataSourceName);
+            if (transaction is OracleTransaction oracleTransaction)
+            {
+                contextCommand.Transaction = oracleTransaction;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -242,8 +358,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         ///    the UTC wall clock, matching DAB's contract that date/time values are UTC.
         ///  - TIMESTAMP WITH TIME ZONE columns carry DbType.DateTimeOffset, so their parameters
         ///    keep the offset (Oracle compares instants for those columns).
+        ///  - A plain <see cref="DateTime"/> has no DbType mapping in TypeHelper.
+        ///    Left untyped, the parameter stays VARCHAR2 until the value setter, so TIMESTAMP
+        ///    writes depend on driver inference. The default branch binds TIMESTAMP explicitly.
         /// Parameters without a DbType hint (date literals the OData parser wrapped in a
         /// ConvertNode do not inherit the column type) fall back to the plain TIMESTAMP form.
+        /// String parameters use column facts copied onto the parameter
+        /// (<see cref="OracleStringBindFacts"/>). CLOB/NCLOB bind as LOBs. CHAR and NCHAR
+        /// bind as fixed types sized to the column's character length so Oracle blank-pads
+        /// the comparison. NVARCHAR2 stays NVarchar2. A string whose UTF-8 length exceeds
+        /// the standard VARCHAR2 byte limit binds as CLOB so a multi-byte VARCHAR2(4000 CHAR)
+        /// value is not sent as VARCHAR2.
         /// </summary>
         /// <inheritdoc />
         public override void PopulateDbTypeForParameter(
@@ -251,13 +376,18 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             DbParameter parameter)
         {
             if (parameter is not OracleParameter oracleParameter
-                || parameterEntry.Value is null
-                || parameterEntry.Value.Value is null)
+                || parameterEntry.Value is null)
             {
                 return;
             }
 
-            object value = parameterEntry.Value.Value;
+            object? value = parameterEntry.Value.Value;
+            if (value is null)
+            {
+                ApplyOracleStringBind(parameterEntry.Value, null, oracleParameter);
+                return;
+            }
+
             switch (parameterEntry.Value.DbType)
             {
                 case DbType.DateTimeOffset:
@@ -275,13 +405,97 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     // TypeHelper has no DbType mapping, so most date filters have no hint.
                     if (value is Microsoft.OData.Edm.Date
                         or DateTimeOffset
-                        or DateOnly)
+                        or DateOnly
+                        or DateTime)
                     {
                         oracleParameter.OracleDbType = OracleDbType.TimeStamp;
                         oracleParameter.Value = ToUtcWallClock(value);
                     }
+                    else
+                    {
+                        ApplyOracleStringBind(parameterEntry.Value, value, oracleParameter);
+                    }
 
                     break;
+            }
+        }
+
+        /// <summary>
+        /// Standard VARCHAR2 byte limit (MAX_STRING_SIZE=STANDARD). A bind longer than this
+        /// is sent as a LOB so ODP.NET does not leave it as VARCHAR2.
+        /// </summary>
+        private const int Varchar2StandardByteLimit = 4000;
+
+        /// <summary>
+        /// Selects CLOB, NCLOB, or NVARCHAR2 from column facts. Facts win over the value length.
+        /// A national column whose value exceeds the VARCHAR2 byte limit binds as NCLOB; any
+        /// other wide string binds as CLOB. Nulls still receive the column's type.
+        /// </summary>
+        private static void ApplyOracleStringBind(DbConnectionParam parameter, object? value, OracleParameter oracleParameter)
+        {
+            OracleStringBindFacts.Kind kind = OracleStringBindFacts.Get(parameter);
+            if (kind == OracleStringBindFacts.Kind.NClob)
+            {
+                oracleParameter.OracleDbType = OracleDbType.NClob;
+                return;
+            }
+
+            if (kind == OracleStringBindFacts.Kind.Clob)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Clob;
+                return;
+            }
+
+            // CHAR/NCHAR compare with blank-padding only when the bind is that fixed type
+            // and its size is the column width. VARCHAR2 'AB' does not equal CHAR(4) 'AB  '.
+            if (kind == OracleStringBindFacts.Kind.Char)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Char;
+                ApplyFixedCharacterSize(parameter, oracleParameter);
+                return;
+            }
+
+            if (kind == OracleStringBindFacts.Kind.FixedNChar)
+            {
+                oracleParameter.OracleDbType = OracleDbType.NChar;
+                ApplyFixedCharacterSize(parameter, oracleParameter);
+                return;
+            }
+
+            if (value is not string text)
+            {
+                if (kind == OracleStringBindFacts.Kind.NChar)
+                {
+                    oracleParameter.OracleDbType = OracleDbType.NVarchar2;
+                }
+
+                return;
+            }
+
+            bool exceedsVarchar2 = Encoding.UTF8.GetByteCount(text) > Varchar2StandardByteLimit;
+            if (kind == OracleStringBindFacts.Kind.NChar)
+            {
+                oracleParameter.OracleDbType = exceedsVarchar2 ? OracleDbType.NClob : OracleDbType.NVarchar2;
+                return;
+            }
+
+            if (exceedsVarchar2)
+            {
+                oracleParameter.OracleDbType = OracleDbType.Clob;
+            }
+        }
+
+        /// <summary>
+        /// Sets the fixed CHAR/NCHAR bind width from the column length already stored on the
+        /// parameter. A missing or non-positive length leaves Size unset; ODP.NET then does not
+        /// blank-pad, so catalog reads must supply CHAR_LENGTH (characters) rather than the
+        /// byte DATA_LENGTH of a character-semantics column.
+        /// </summary>
+        private static void ApplyFixedCharacterSize(DbConnectionParam parameter, OracleParameter oracleParameter)
+        {
+            if (parameter.Length is int length && length > 0)
+            {
+                oracleParameter.Size = length;
             }
         }
 
@@ -329,6 +543,55 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// corrupting '@' characters that appear inside string literals authored in database
         /// policies (e.g. 'admin@contoso.com') which must pass through unmodified.
         /// </summary>
+        /// <summary>
+        /// Oracle stores the empty string as NULL, so <c>col = :p</c> and <c>col != :p</c>
+        /// never match when the bound value is <c>""</c>. Rewrite those comparisons to
+        /// <c>IS NULL</c> / <c>IS NOT NULL</c> for Oracle, covering GraphQL filters and any
+        /// policy predicate that reaches the executor as an empty-string parameter.
+        /// The parameter is left unreferenced, so the bind loop skips it.
+        /// </summary>
+        internal static string RewriteEmptyStringEqualityBinds(
+            string sqltext,
+            IDictionary<string, DbConnectionParam>? parameters)
+        {
+            if (string.IsNullOrEmpty(sqltext) || parameters is null || parameters.Count == 0)
+            {
+                return sqltext;
+            }
+
+            HashSet<string> emptyStringParameters = new(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, DbConnectionParam> parameter in parameters)
+            {
+                if (parameter.Value?.Value is string value && value.Length == 0)
+                {
+                    emptyStringParameters.Add(parameter.Key.TrimStart('@'));
+                }
+            }
+
+            if (emptyStringParameters.Count == 0)
+            {
+                return sqltext;
+            }
+
+            // Equality: = :param. Avoid >=, <=, != and ==.
+            sqltext = Regex.Replace(
+                sqltext,
+                @"(?<![<>!=])=(?!=)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                match => emptyStringParameters.Contains(match.Groups["name"].Value)
+                    ? "IS NULL"
+                    : match.Value);
+
+            // Inequality: != :param or <> :param.
+            sqltext = Regex.Replace(
+                sqltext,
+                @"(?:!=|<>)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                match => emptyStringParameters.Contains(match.Groups["name"].Value)
+                    ? "IS NOT NULL"
+                    : match.Value);
+
+            return sqltext;
+        }
+
         private static string TranslateBindParameters(string sqltext)
         {
             if (string.IsNullOrEmpty(sqltext) || !sqltext.Contains('@'))
@@ -396,67 +659,135 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Modifies the properties of the supplied connection string to support managed identity access.
-        /// In the case of Oracle, if a default managed identity needs to be used, the password in the
-        /// connection needs to be replaced with the default access token.
+        /// Applies a managed identity access token to the supplied connection via
+        /// <see cref="OracleConnection.AccessToken"/>. The token never appears in a connection string,
+        /// and the Data Source descriptor (TLS/wallet options) is preserved; only User Id, Password and
+        /// proxy credentials are normalized as ODP.NET requires for token authentication. This is the three-argument overload because every
+        /// core execution and metadata path calls it; the two-argument base overload chains here.
         /// </summary>
         /// <param name="conn">The supplied connection to modify for managed identity access.</param>
         /// <param name="dataSourceName">Name of datasource for which to set access token. Default dbName taken from config if null</param>
-        public override async Task SetManagedIdentityAccessTokenIfAnyAsync(DbConnection conn, string dataSourceName)
+        /// <param name="cancellationToken">Cancels token acquisition.</param>
+        public override async Task SetManagedIdentityAccessTokenIfAnyAsync(
+            DbConnection conn,
+            string dataSourceName,
+            CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // using default datasource name for first db - maintaining backward compatibility for single db scenario.
             if (string.IsNullOrEmpty(dataSourceName))
             {
                 dataSourceName = ConfigProvider.GetConfig().DefaultDataSourceName;
             }
 
-            _dataSourceAccessTokenUsage.TryGetValue(dataSourceName, out bool setAccessToken);
+            // A token supplied by the configuration controller is applied whenever the connection
+            // string/option allow token authentication; it can arrive after construction. Otherwise
+            // fall back to the flag computed at configuration time (which is cleared when the default
+            // credential turns out to be unavailable and token use was only inferred).
+            _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? accessTokenFromController);
+            bool setAccessToken;
+            if (accessTokenFromController is not null)
+            {
+                _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
+                setAccessToken = ConnectionStringBuilders.TryGetValue(dataSourceName, out DbConnectionStringBuilder? existing) &&
+                    existing is OracleConnectionStringBuilder existingBuilder &&
+                    ShouldManagedIdentityAccessBeAttempted(existingBuilder, managedIdentityOption);
+            }
+            else
+            {
+                _dataSourceAccessTokenUsage.TryGetValue(dataSourceName, out setAccessToken);
+            }
 
             // Only attempt to get the access token if the connection string is in the appropriate format
             if (setAccessToken)
             {
-                OracleConnection sqlConn = (OracleConnection)conn;
-
                 // If the configuration controller provided a managed identity access token use that,
                 // else use the default saved access token if still valid.
                 // Get a new token only if the saved token is null or expired.
-                _accessTokensFromConfiguration.TryGetValue(dataSourceName, out string? accessTokenFromController);
                 string? accessToken = accessTokenFromController ??
                     (IsDefaultAccessTokenValid() ?
                         ((AccessToken)_defaultAccessToken!).Token :
-                        await GetAccessTokenAsync(dataSourceName));
+                        await GetAccessTokenAsync(dataSourceName, cancellationToken));
 
                 if (accessToken is not null)
                 {
-                    sqlConn.ConnectionString = BuildConnectionStringWithAccessToken(sqlConn.ConnectionString, accessToken);
+                    OracleConnection oracleConnection = (OracleConnection)conn;
+                    oracleConnection.ConnectionString = PrepareConnectionStringForTokenAuthentication(oracleConnection.ConnectionString);
+                    oracleConnection.AccessToken = new OracleAccessToken(accessToken.ToCharArray());
                 }
             }
         }
 
         /// <summary>
-        /// Replaces the password in an Oracle connection string with a managed identity access
-        /// token. All other attributes are round-tripped through <see cref="OracleConnectionStringBuilder"/>,
-        /// including the Data Source descriptor, so TLS/wallet options carried in the descriptor
-        /// (e.g. PROTOCOL=TCPS, SECURITY=(MY_WALLET_DIRECTORY=...)) are preserved.
-        /// Exposed as internal to allow a regression test that the security-relevant attributes
-        /// survive token application.
+        /// ODP.NET rejects <see cref="OracleConnection.AccessToken"/> (ORA-50108) unless the connection
+        /// string has <c>User Id=/</c> and no password or proxy credentials. Normalizes those keywords
+        /// and leaves every other attribute, including the Data Source descriptor with its TLS/wallet
+        /// options, untouched. The access token itself is never written to the connection string.
+        /// Returns the input unchanged when it is already in the required form.
         /// </summary>
-        internal static string BuildConnectionStringWithAccessToken(string connectionString, string accessToken)
+        internal static string PrepareConnectionStringForTokenAuthentication(string connectionString)
         {
-            OracleConnectionStringBuilder newConnectionString = new(connectionString)
+            OracleConnectionStringBuilder builder = new(connectionString);
+            if (string.Equals(builder.UserID, "/", StringComparison.Ordinal) &&
+                string.IsNullOrEmpty(builder.Password) &&
+                string.IsNullOrEmpty(builder.ProxyUserId) &&
+                string.IsNullOrEmpty(builder.ProxyPassword))
             {
-                Password = accessToken
-            };
-            return newConnectionString.ToString();
+                return connectionString;
+            }
+
+            builder.UserID = "/";
+            builder.Remove("Password");
+            builder.Remove("Proxy User Id");
+            builder.Remove("Proxy Password");
+            return builder.ConnectionString;
         }
 
         /// <summary>
         /// Determines if managed identity access should be attempted or not.
-        /// It should only be attempted if the password is not provided
+        /// Precedence: an explicit <c>managed-identity</c> option wins; otherwise wallet or external
+        /// authentication markers disable it; otherwise it is inferred from an empty password. A
+        /// controller-supplied token does not override a configured password (MSSQL gates the same
+        /// way); set <c>managed-identity: true</c> explicitly to use a token with a TCPS+wallet
+        /// descriptor or alongside a password.
         /// </summary>
-        private static bool ShouldManagedIdentityAccessBeAttempted(OracleConnectionStringBuilder builder)
+        /// <param name="builder">The data source's connection string builder.</param>
+        /// <param name="managedIdentityOption">Explicit option value, or null to infer.</param>
+        internal static bool ShouldManagedIdentityAccessBeAttempted(
+            OracleConnectionStringBuilder builder,
+            bool? managedIdentityOption)
         {
+            if (managedIdentityOption.HasValue)
+            {
+                return managedIdentityOption.Value;
+            }
+
+            if (HasWalletOrExternalAuthMarkers(builder))
+            {
+                return false;
+            }
+
             return string.IsNullOrEmpty(builder.Password);
+        }
+
+        /// <summary>
+        /// Matches a wallet directory attribute inside the Data Source descriptor, e.g.
+        /// <c>(MY_WALLET_DIRECTORY=/wallet)</c> or <c>WALLET_LOCATION = (SOURCE=...)</c>. Anchored on the
+        /// attribute name so a host such as <c>wallet-db.corp</c> is not treated as a wallet.
+        /// </summary>
+        private static readonly Regex _walletAttributeRegex = new(
+            @"(?<![A-Za-z0-9_])(WALLET_LOCATION|MY_WALLET_DIRECTORY)\s*=",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        /// <summary>
+        /// True when the connection string requests wallet-based or external (OS/wallet) authentication,
+        /// in which case the credential must not be replaced by a managed identity token.
+        /// </summary>
+        private static bool HasWalletOrExternalAuthMarkers(OracleConnectionStringBuilder builder)
+        {
+            return string.Equals(builder.UserID?.Trim(), "/", StringComparison.Ordinal) ||
+                _walletAttributeRegex.IsMatch(builder.DataSource ?? string.Empty);
         }
 
         /// <summary>
@@ -471,34 +802,60 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Tries to get an access token using DefaultAzureCredentials.
-        /// Catches any CredentialUnavailableException and logs only a warning
-        /// since this is best effort.
+        /// When token use was only inferred, any credential failure is logged as a warning (best
+        /// effort). When <c>managed-identity: true</c> is set explicitly, a failure is surfaced as a
+        /// 503 so the data source never silently falls back to an unauthenticated connection.
         /// </summary>
         /// <returns>The string representation of the access token if found,
         /// null otherwise.</returns>
-        private async Task<string?> GetAccessTokenAsync(string dataSourceName)
+        private async Task<string?> GetAccessTokenAsync(string dataSourceName, CancellationToken cancellationToken)
         {
             bool firstAttemptAtDefaultAccessToken = _defaultAccessToken is null;
+            _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
+            bool managedIdentityForced = managedIdentityOption == true;
 
             try
             {
                 _defaultAccessToken =
                     await AzureCredential.GetTokenAsync(
-                        new TokenRequestContext(new[] { DATABASE_SCOPE }));
+                        new TokenRequestContext(new[] { DATABASE_SCOPE }),
+                        cancellationToken);
+            }
+            // A cancelled request is not evidence that the credential is unavailable; do not
+            // permanently disable token use for the data source.
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             // because there can be scenarios where password is not specified but
             // default managed identity is not the intended method of authentication
             // so a bunch of different exceptions could occur in that scenario
             catch (Exception ex)
             {
-                string messagePrefix = "{correlationId} No password detected in the connection string. Attempt to retrieve a managed identity access token using DefaultAzureCredential failed due to:\n{errorMessage}";
-                string messageSuffix = (firstAttemptAtDefaultAccessToken ? $"If authentication with DefaultAzureCredential is not intended, this warning can be safely ignored." : string.Empty);
+                string messagePrefix = managedIdentityForced
+                    ? "{correlationId} Attempt to retrieve a managed identity access token using DefaultAzureCredential failed although 'managed-identity' is set to true for the data source:\n{errorMessage}"
+                    : "{correlationId} No password detected in the connection string. Attempt to retrieve a managed identity access token using DefaultAzureCredential failed due to:\n{errorMessage}";
+                string messageSuffix = (firstAttemptAtDefaultAccessToken && !managedIdentityForced ? $"If authentication with DefaultAzureCredential is not intended, this warning can be safely ignored." : string.Empty);
                 string message = messagePrefix + messageSuffix;
                 QueryExecutorLogger.LogWarning(
                     exception: ex,
                     message: message,
                     HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
                     ex.Message);
+
+                // An explicit managed-identity: true must never degrade to an unauthenticated
+                // connection attempt, and a stale default token must not be reused: fail the request
+                // and leave the flag set so the next request retries token acquisition.
+                if (managedIdentityForced)
+                {
+                    throw new DataApiBuilderException(
+                        message: $"Managed identity authentication is enabled for data source '{dataSourceName}' ('managed-identity': true) " +
+                            "but an access token could not be obtained with DefaultAzureCredential. " +
+                            "Verify that a managed identity or Azure credential is available to the service, or remove the option.",
+                        statusCode: HttpStatusCode.ServiceUnavailable,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization,
+                        innerException: ex);
+                }
 
                 // the config doesn't contain an identity token
                 // and a default identity token cannot be obtained
@@ -536,41 +893,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string SESSION_CONTEXT_PACKAGE = "DAB_SESSION_CONTEXT_PKG";
 
         /// <summary>
-        /// Forwards the caller's claims to the database session as Oracle application context
-        /// attributes before the main statement executes, mirroring MSSQL's sp_set_session_context.
-        /// Oracle receives the setup as a separate parameterized anonymous block on the same
-        /// connection because a PL/SQL block cannot be prepended to a different statement in one
-        /// OracleCommand. Multi-valued claims are forwarded as JSON array strings
-        /// (AuthorizationResolver.GetProcessedUserClaims) so database-side policies can expand them
-        /// with JSON_TABLE and IN. Any context left on the pooled session is cleared first so a
-        /// request can never observe a previous request's claim values.
-        /// </summary>
-        private void SetSessionContextIfEnabled(OracleConnection conn, HttpContext? httpContext, string dataSourceName)
-        {
-            if (!IsSessionContextEnabled(dataSourceName) || httpContext is null)
-            {
-                return;
-            }
-
-            try
-            {
-                using OracleCommand cmd = BuildSessionContextCommand(
-                    conn,
-                    AuthorizationResolver.GetProcessedUserClaims(httpContext),
-                    dataSourceName);
-                cmd.ExecuteNonQuery();
-            }
-            catch (DbException e)
-            {
-                throw DbExceptionParser.Parse(e);
-            }
-        }
-
-        /// <summary>
         /// Whether claim forwarding is enabled for the data source. Data sources that are unknown to
         /// this executor (e.g. during startup metadata discovery) are treated as disabled.
+        /// An empty name uses the default data source, matching the other executors.
         /// </summary>
-        private bool IsSessionContextEnabled(string dataSourceName)
+        internal bool IsSessionContextEnabled(string dataSourceName)
         {
             if (string.IsNullOrEmpty(dataSourceName))
             {
@@ -807,9 +1134,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 // Variable-length outputs need an explicit size or ODP.NET returns empty
                 // or raises. RAW left at Size 0 fails every mutation that returns the column.
-                if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char)
+                // Character sizes come from the builder hint (char length × 4, already clamped
+                // to 32767). An unknown hint keeps the historical 4000-byte default.
+                if (outputType is OracleDbType.Varchar2 or OracleDbType.NVarchar2 or OracleDbType.Char or OracleDbType.NChar)
                 {
-                    output.Size = 4000;
+                    output.Size = ClampCharacterOutputSize(hint.Size ?? 4000);
                 }
                 else if (outputType == OracleDbType.Raw)
                 {
@@ -819,6 +1148,25 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 cmd.Parameters.Add(output);
                 existing.Add(bindName);
             }
+        }
+
+        /// <summary>
+        /// PL/SQL VARCHAR2/NVARCHAR2 variables cannot exceed 32767 bytes. A non-positive hint
+        /// is raised to 1 so ODP.NET does not treat the bind as unsized.
+        /// </summary>
+        private static int ClampCharacterOutputSize(int size)
+        {
+            if (size < 1)
+            {
+                return 1;
+            }
+
+            if (size > 32767)
+            {
+                return 32767;
+            }
+
+            return size;
         }
 
         [GeneratedRegex(@"RETURNING\s+.*?\s+INTO\s+([^;]*?)(?:;|$)", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
