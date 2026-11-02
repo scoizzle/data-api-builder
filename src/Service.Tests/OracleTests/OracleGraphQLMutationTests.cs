@@ -1,0 +1,595 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System;
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Azure.DataApiBuilder.Config.DatabasePrimitives;
+using Azure.DataApiBuilder.Service.Exceptions;
+using Azure.DataApiBuilder.Service.Tests.SqlTests;
+using Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace Azure.DataApiBuilder.Service.Tests.OracleTests
+{
+    [TestClass, TestCategory(TestCategory.ORACLE)]
+    public class OracleGraphQLMutationTests : GraphQLMutationTestBase
+    {
+        [ClassInitialize]
+        public static async Task SetupAsync(TestContext context)
+        {
+            DatabaseEngine = TestCategory.ORACLE;
+            await InitializeTestFixture();
+        }
+
+        [TestCleanup]
+        public async Task TestCleanup()
+        {
+            await ResetDbStateAsync();
+        }
+
+        #region Positive Tests
+
+        [TestMethod]
+        public async Task InsertMutation()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title
+                ) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE id = 5001 AND title = 'My New Book' AND publisher_id = 1234
+                    ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
+                )";
+            await InsertMutation(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task InsertMutationForComputedColumns()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'item_name' VALUE item_name,
+                    'subtotal' VALUE subtotal, 'tax' VALUE tax, 'total' VALUE total
+                ) AS data
+                FROM (
+                    SELECT id, item_name, subtotal, tax, total FROM sales
+                    WHERE id = 5001 AND item_name = 'headphones'
+                    ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
+                )";
+            await InsertMutationForComputedColumns(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task InsertMutationForConstantdefaultValue()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'content' VALUE content
+                ) AS data
+                FROM (
+                    SELECT id, content FROM reviews
+                    WHERE book_id = 1 AND content = 'Its a classic'
+                    ORDER BY id DESC FETCH FIRST 1 ROWS ONLY
+                )";
+            await InsertMutationForConstantdefaultValue(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task UpdateMutation()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'title' VALUE title, 'publisher_id' VALUE publisher_id
+                ) AS data
+                FROM (
+                    SELECT title, publisher_id FROM books WHERE id = 1 FETCH FIRST 1 ROWS ONLY
+                )";
+            await UpdateMutation(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task UpdateMutationForComputedColumns()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'item_name' VALUE item_name,
+                    'subtotal' VALUE subtotal, 'tax' VALUE tax, 'total' VALUE total
+                ) AS data
+                FROM (
+                    SELECT id, item_name, subtotal, tax, total FROM sales
+                    WHERE id = 2 FETCH FIRST 1 ROWS ONLY
+                )";
+            await UpdateMutationForComputedColumns(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task TestExplicitNullInsert()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
+                ) AS data
+                FROM (
+                    SELECT id, title, issue_number FROM foo.magazines
+                    WHERE id = 800 FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestExplicitNullInsert(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task TestImplicitNullInsert()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
+                ) AS data
+                FROM (
+                    SELECT id, title, issue_number FROM foo.magazines
+                    WHERE id = 801 FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestImplicitNullInsert(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task TestUpdateColumnToNull()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'issue_number' VALUE issue_number
+                ) AS data
+                FROM (
+                    SELECT id, issue_number FROM foo.magazines
+                    WHERE id = 1 FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestUpdateColumnToNull(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task TestMissingColumnNotUpdatedToNull()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title, 'issue_number' VALUE issue_number
+                ) AS data
+                FROM (
+                    SELECT id, title, issue_number FROM foo.magazines
+                    WHERE id = 1 FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestMissingColumnNotUpdatedToNull(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task InsertIntoSimpleView()
+        {
+            // Oracle views do not expose the underlying identity attribute, so the generated
+            // GraphQL input type marks books_view_all.id as required. Supply the PK explicitly
+            // (Oracle still auto-generates when REST omits it; GraphQL requires the field).
+            string graphQLMutationName = "createbooks_view_all";
+            string graphQLMutation = @"
+                mutation {
+                    createbooks_view_all(item: { id: 5001, title: ""Book View"", publisher_id: 1234 }) {
+                        id
+                        title
+                    }
+                }
+            ";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, graphQLMutationName, isAuthenticated: true);
+
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title
+                ) AS data
+                FROM (
+                    SELECT id, title FROM books_view_all
+                    WHERE id = 5001 AND title = 'Book View' AND publisher_id = 1234
+                    ORDER BY id
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task UpdateSimpleView()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title
+                ) AS data
+                FROM (
+                    SELECT id, title FROM books_view_all
+                    WHERE id = 1 FETCH FIRST 1 ROWS ONLY
+                )";
+            await UpdateSimpleView(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task NestedQueryingInMutation()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE table0.id,
+                    'title' VALUE table0.title,
+                    'publishers' VALUE table1_subq.data
+                ) AS data
+                FROM books table0
+                LEFT OUTER JOIN LATERAL (
+                    SELECT JSON_OBJECT('name' VALUE table1.name) AS data
+                    FROM publishers table1
+                    WHERE table1.id = table0.publisher_id
+                    FETCH FIRST 1 ROWS ONLY
+                ) table1_subq ON (1=1)
+                WHERE table0.title = 'My New Book' AND table0.publisher_id = 1234
+                FETCH FIRST 1 ROWS ONLY";
+            await NestedQueryingInMutation(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task TestAliasSupportForGraphQLMutationQueryFields()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('book_id' VALUE id, 'book_title' VALUE title) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE title = 'My New Book' AND publisher_id = 1234
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            await TestAliasSupportForGraphQLMutationQueryFields(oracleQuery);
+        }
+
+        [TestMethod]
+        public async Task InsertMutationWithVariables()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('id' VALUE id, 'title' VALUE title) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE title = 'My New Book' AND publisher_id = 1234
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "createbook";
+            string graphQLMutation = @"
+                mutation($title: String!, $publisher_id: Decimal!) {
+                    createbook(item: { title: $title, publisher_id: $publisher_id }) {
+                        id
+                        title
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "title", "My New Book" }, { "publisher_id", 1234 } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task InsertMutationWithVariablesAndMappings()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 2
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "createGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!, $col2Value: String) {
+                    createGQLmappings(item: { column1: $id, column2: $col2Value }) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 2 }, { "col2Value", "My New Value" } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task UpdateMutationWithVariablesAndMappings()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 3 AND ""__column2"" = 'Updated Value of Mapped Column'
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string graphQLMutationName = "updateGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!, $col2Value: String) {
+                    updateGQLmappings(column1: $id, item: { column2: $col2Value }) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 3 }, { "col2Value", "Updated Value of Mapped Column" } });
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        [TestMethod]
+        public async Task InsertMutationFailingDatabasePolicy()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM publishers WHERE name = 'New publisher'";
+            await InsertMutationFailingDatabasePolicy(
+                dbQuery: oracleQuery,
+                errorMessage: "Could not insert row with given values for entity: Publisher",
+                roleName: "database_policy_tester",
+                graphQLMutationName: "createPublisher",
+                graphQLMutationPayload: @"
+                mutation {
+                    createPublisher(item: { name: ""New publisher"" }) {
+                        id
+                        name
+                    }
+                }");
+        }
+
+        [TestMethod]
+        public async Task InsertMutationWithDatabasePolicy()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM publishers WHERE name = 'Not New publisher'";
+            await InsertMutationWithDatabasePolicy(
+                dbQuery: oracleQuery,
+                roleName: "database_policy_tester",
+                graphQLMutationName: "createPublisher",
+                graphQLMutationPayload: @"
+                mutation {
+                    createPublisher(item: { name: ""Not New publisher"" }) {
+                        id
+                        name
+                    }
+                }");
+        }
+
+        [TestMethod]
+        public async Task InsertWithInvalidForeignKey()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM books WHERE title = 'My New Book' AND publisher_id = -1";
+            await InsertWithInvalidForeignKey(oracleQuery, "ORA-02291");
+        }
+
+        [TestMethod]
+        public async Task UpdateWithInvalidForeignKey()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM books WHERE id = 1 AND publisher_id = -1";
+            await UpdateWithInvalidForeignKey(oracleQuery, "ORA-02291");
+        }
+
+        #endregion
+
+        #region Negative Tests
+
+        [TestMethod]
+        public async Task DeleteMutation()
+        {
+            string oracleQueryForResult = @"
+                SELECT JSON_OBJECT('title' VALUE title, 'publisher_id' VALUE publisher_id) AS data
+                FROM (SELECT title, publisher_id FROM books WHERE id = 1 FETCH FIRST 1 ROWS ONLY)";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data FROM books WHERE id = 1";
+            await DeleteMutation(oracleQueryForResult, oracleQueryToVerifyDeletion);
+        }
+
+        [TestMethod]
+        public async Task DeleteFromSimpleView()
+        {
+            string oracleQueryForResult = @"
+                SELECT JSON_OBJECT('id' VALUE id, 'title' VALUE title) AS data
+                FROM (SELECT id, title FROM books_view_all WHERE id = 1 FETCH FIRST 1 ROWS ONLY)";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data FROM books_view_all WHERE id = 1";
+            await DeleteFromSimpleView(oracleQueryForResult, oracleQueryToVerifyDeletion);
+        }
+
+        [TestMethod]
+        public async Task DeleteMutationWithVariablesAndMappings()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT('column1' VALUE ""__column1"", 'column2' VALUE ""__column2"") AS data
+                FROM (
+                    SELECT ""__column1"", ""__column2"" FROM GQLmappings
+                    WHERE ""__column1"" = 4
+                    FETCH FIRST 1 ROWS ONLY
+                )";
+            string oracleQueryToVerifyDeletion = @"
+                SELECT JSON_OBJECT('count' VALUE COUNT(*)) AS data
+                FROM GQLmappings WHERE ""__column1"" = 4";
+            string graphQLMutationName = "deleteGQLmappings";
+            string graphQLMutation = @"
+                mutation($id: Decimal!) {
+                    deleteGQLmappings(column1: $id) {
+                        column1
+                        column2
+                    }
+                }
+            ";
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            JsonElement actual = await ExecuteGraphQLRequestAsync(
+                graphQLMutation,
+                graphQLMutationName,
+                isAuthenticated: true,
+                new() { { "id", 4 } });
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+            string dbResponse = await GetDatabaseResultAsync(oracleQueryToVerifyDeletion);
+            using JsonDocument result = JsonDocument.Parse(dbResponse);
+            Assert.AreEqual(0, result.RootElement.GetProperty("count").GetInt64());
+        }
+
+        [TestMethod]
+        public override async Task TestTryInsertMutationForVariableNotNullDefault()
+        {
+            string graphQLMutationName = "createSupportedType";
+            string graphQLMutation = @"
+                mutation {
+                    createstocks_price(item: { categoryid: 100 pieceid: 99 instant: null } ) {
+                    categoryid
+                    pieceid
+                    instant
+                    }
+                }
+            ";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, graphQLMutationName, isAuthenticated: true);
+            SqlTestHelper.TestForErrorInGraphQLResponse(
+                actual.ToString(),
+                statusCode: $"{DataApiBuilderException.SubStatusCodes.DatabaseInputError}");
+        }
+
+        /// <summary>
+        /// Live check that createSupportedType stores a TIMESTAMP(7) fraction.
+        /// Not run in the default job (class is TestCategory.ORACLE; no Oracle instance here).
+        /// ArtOfWar GraphQL is disabled, so there is no GraphQL CLOB upsert here.
+        /// </summary>
+        [TestMethod]
+        public async Task CreateSupportedTypePreservesTimestampFraction()
+        {
+            string graphQLMutationName = "createSupportedType";
+            string graphQLMutation = @"
+                mutation {
+                    createSupportedType(item: { typeid: 9103, datetime2_types: ""1999-01-08T10:23:54.9999999Z"" }) {
+                        typeid
+                        datetime2_types
+                    }
+                }
+            ";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, graphQLMutationName, isAuthenticated: true);
+            StringAssert.Contains(actual.ToString(), "9999999");
+
+            string stored = await GetDatabaseResultAsync(@"
+                SELECT JSON_OBJECT('stored' VALUE TO_CHAR(datetime2_types, 'YYYY-MM-DD HH24:MI:SS.FF7')) AS data
+                FROM type_table
+                WHERE id = 9103");
+            StringAssert.Contains(stored, "1999-01-08 10:23:54.9999999");
+        }
+
+        /// books_bir assigns id only when the new value is null. Metadata must record that as
+        /// generated-by-default (writable) and NUMBER(9,0) must surface as Int. A swallowed
+        /// catalog error would leave the column as an ordinary required key.
+        /// </summary>
+        [TestMethod]
+        public async Task BookIdIsGeneratedByDefaultInt()
+        {
+            SourceDefinition book = _sqlMetadataProvider.GetSourceDefinition("Book");
+            Assert.IsTrue(TryGetColumn(book, "id", out ColumnDefinition idColumn));
+            Assert.AreEqual(typeof(int), idColumn.SystemType);
+            Assert.IsTrue(idColumn.IsAutoGenerated);
+            Assert.IsFalse(idColumn.IsReadOnly);
+
+            string introspection = @"
+                query {
+                    __type(name: ""book"") {
+                        fields {
+                            name
+                            type { name kind ofType { name kind ofType { name kind } } }
+                        }
+                    }
+                }";
+            JsonElement bookType = await ExecuteGraphQLRequestAsync(introspection, "__type", isAuthenticated: true);
+            Assert.AreEqual("Int", NamedGraphQlType(bookType, "id"));
+        }
+
+        /// <summary>
+        /// createbook accepts an explicit id that is not the sequence start (5001) and stores it.
+        /// InsertMutation covers the omit-id path.
+        /// </summary>
+        [TestMethod]
+        public async Task InsertMutationWithExplicitId()
+        {
+            string graphQLMutation = @"
+                mutation {
+                    createbook(item: { id: 4242, title: ""Explicit Id Book"", publisher_id: 1234 }) {
+                        id
+                        title
+                    }
+                }";
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'title' VALUE title
+                ) AS data
+                FROM (
+                    SELECT id, title FROM books
+                    WHERE id = 4242 AND title = 'Explicit Id Book' AND publisher_id = 1234
+                )";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(graphQLMutation, "createbook", isAuthenticated: true);
+            string expected = await GetDatabaseResultAsync(oracleQuery);
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.ToString());
+        }
+
+        private static bool TryGetColumn(SourceDefinition source, string columnName, out ColumnDefinition column)
+        {
+            foreach (KeyValuePair<string, ColumnDefinition> entry in source.Columns)
+            {
+                if (string.Equals(entry.Key, columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    column = entry.Value;
+                    return true;
+                }
+            }
+
+            column = null;
+            return false;
+        }
+
+        private static string NamedGraphQlType(JsonElement typeElement, string fieldName)
+        {
+            foreach (JsonElement field in typeElement.GetProperty("fields").EnumerateArray())
+            {
+                if (!string.Equals(field.GetProperty("name").GetString(), fieldName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                return UnwrapGraphQlTypeName(field.GetProperty("type"));
+            }
+
+            return string.Empty;
+        }
+
+        private static string UnwrapGraphQlTypeName(JsonElement type)
+        {
+            if (type.TryGetProperty("name", out JsonElement name) && name.ValueKind == JsonValueKind.String)
+            {
+                return name.GetString();
+            }
+
+            if (type.TryGetProperty("ofType", out JsonElement ofType) && ofType.ValueKind == JsonValueKind.Object)
+            {
+                return UnwrapGraphQlTypeName(ofType);
+            }
+
+            return string.Empty;
+        }
+
+        #endregion
+    }
+}

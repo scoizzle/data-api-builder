@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -22,6 +23,7 @@ using Azure.DataApiBuilder.Mcp.BuiltInTools;
 using Azure.DataApiBuilder.Mcp.Model;
 using Azure.DataApiBuilder.Mcp.Utils;
 using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
+using AggregationType = Azure.DataApiBuilder.Service.GraphQLBuilder.Sql.SchemaConverter.AggregationType;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -347,6 +349,97 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
 
             Assert.AreEqual(expected, result);
             Assert.AreEqual(paginate ? 2 : 0, structure.Parameters.Count);
+        }
+
+        [DataTestMethod]
+        [DataRow("desc", false, "count", "*", "count", "DESC", DisplayName = "Grouped count orders by the alias")]
+        [DataRow("asc", false, "sum", "price", "sum_price", "ASC", DisplayName = "Ascending sum orders by its alias")]
+        [DataRow("desc", true, "count", "publisher_id", "count_publisher_id", "DESC", DisplayName = "Distinct still orders by the aggregate alias")]
+        public void AddOracleAggregateOrder_UsesUnqualifiedAggregateAlias(
+            string orderby,
+            bool distinct,
+            string function,
+            string field,
+            string expectedAlias,
+            string expectedDirection)
+        {
+            SqlQueryStructure structure = CreateUninitializedQueryStructure();
+            structure.OrderByColumns.Clear();
+            string alias = InvokePrivate<string>("ComputeAlias", function, field);
+
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, orderby, alias);
+
+            Assert.AreEqual(expectedAlias, alias);
+            Assert.AreEqual(1, structure.OrderByColumns.Count);
+            OrderByColumn column = structure.OrderByColumns[0];
+            Assert.AreEqual(expectedAlias, column.ColumnName);
+            Assert.IsNull(column.TableAlias);
+            Assert.AreEqual(string.Empty, column.TableSchema);
+            Assert.AreEqual(string.Empty, column.TableName);
+            Assert.AreEqual(expectedDirection == "ASC" ? OrderBy.ASC : OrderBy.DESC, column.Direction);
+            Assert.IsFalse(column.ColumnName.Contains('.'));
+            Assert.IsFalse(column.ColumnName.Contains("DISTINCT", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [DataTestMethod]
+        [DataRow("desc", false, "count", "*", "ID", "count", "DESC", DisplayName = "Grouped count orders inside the JSON wrapper")]
+        [DataRow("asc", false, "sum", "price", "PRICE", "sum_price", "ASC", DisplayName = "Ascending sum orders inside the JSON wrapper")]
+        [DataRow("desc", true, "count", "publisher_id", "PUBLISHER_ID", "count_publisher_id", "DESC", DisplayName = "Distinct orders by the alias, not the DISTINCT expression")]
+        public void OracleQueryBuilder_GroupedAggregateOrdersByAliasInsideJsonWrapper(
+            string orderby,
+            bool distinct,
+            string function,
+            string field,
+            string backingField,
+            string expectedAlias,
+            string expectedDirection)
+        {
+            SqlQueryStructure structure = CreateGroupedOracleAggregateStructure(function, backingField, expectedAlias, distinct);
+            string alias = InvokePrivate<string>("ComputeAlias", function, field);
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, orderby, alias);
+            OracleQueryBuilder.BindAggregateRowOffset(structure, 0);
+
+            string sql = new OracleQueryBuilder().Build(structure);
+
+            string orderLimit = $"ORDER BY \"{expectedAlias}\" {expectedDirection} OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY";
+            StringAssert.Contains(sql, orderLimit);
+            StringAssert.Contains(sql, "JSON_ARRAYAGG(\"json_doc\" FORMAT JSON ORDER BY \"__dab_ord\" RETURNING CLOB)");
+            StringAssert.Contains(sql, $"AS \"{expectedAlias}\"");
+            StringAssert.Contains(sql, "GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"");
+            Assert.AreEqual(1, Regex.Matches(sql, "OFFSET").Count);
+            Assert.AreEqual(0, structure.Parameters["@param0"].Value);
+            Assert.IsFalse(sql.Contains("OFFSET 0"));
+            Assert.IsFalse(sql.Contains($"\"HR_BOOKS\".\"{expectedAlias}\""));
+            int groupAt = sql.IndexOf("GROUP BY \"HR_BOOKS\".\"PUBLISHER_ID\"", StringComparison.Ordinal);
+            int orderAt = sql.IndexOf(orderLimit, StringComparison.Ordinal);
+            int wrapperClose = sql.LastIndexOf(" ) ) ", StringComparison.Ordinal);
+            Assert.IsTrue(groupAt >= 0 && orderAt > groupAt && wrapperClose > orderAt);
+            if (distinct)
+            {
+                StringAssert.Contains(sql, $"DISTINCT (\"HR_BOOKS\".\"{backingField}\")");
+                Assert.IsFalse(sql.Contains("ORDER BY DISTINCT", StringComparison.Ordinal));
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow(0, DisplayName = "The first page binds offset 0")]
+        [DataRow(4, DisplayName = "A cursor binds its offset")]
+        public void GroupedAggregate_BindsRowOffsetInsideJsonWrapper(int offset)
+        {
+            SqlQueryStructure structure = CreateGroupedOracleAggregateStructure("count", "ID", "count", distinct: false);
+            OracleQueryBuilder.AddAggregateAliasOrder(structure, "desc", "count");
+            OracleQueryBuilder.BindAggregateRowOffset(structure, offset);
+
+            string sql = new OracleQueryBuilder().Build(structure);
+
+            const string clause = "OFFSET @param0 ROWS FETCH NEXT 101 ROWS ONLY";
+            StringAssert.Contains(sql, clause);
+            Assert.AreEqual(1, Regex.Matches(sql, "OFFSET").Count);
+            Assert.IsFalse(sql.Contains("OFFSET 0"));
+            Assert.AreEqual(offset, structure.Parameters["@param0"].Value);
+            int clauseAt = sql.IndexOf(clause, StringComparison.Ordinal);
+            int wrapperClose = sql.LastIndexOf(" ) ) ", StringComparison.Ordinal);
+            Assert.IsTrue(clauseAt >= 0 && wrapperClose > clauseAt);
         }
 
         #endregion
@@ -1075,6 +1168,61 @@ namespace Azure.DataApiBuilder.Service.Tests.Mcp
             });
             SetBackingField(structure, nameof(SqlQueryStructure.GroupByMetadata), new GroupByMetadata());
             return structure;
+        }
+
+        private static SqlQueryStructure CreateGroupedOracleAggregateStructure(
+            string function,
+            string backingField,
+            string alias,
+            bool distinct)
+        {
+            SourceDefinition source = new();
+            source.Columns.Add("ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("PUBLISHER_ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("PRICE", new ColumnDefinition { SystemType = typeof(decimal) });
+            DatabaseTable table = new("HR", "BOOKS") { TableDefinition = source };
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(x => x.GetSourceDefinition("Book")).Returns(source);
+
+            SqlQueryStructure structure = (SqlQueryStructure)RuntimeHelpers.GetUninitializedObject(typeof(SqlQueryStructure));
+            structure.IsListQuery = true;
+            SetLimit(structure, 101);
+            SetBackingField(structure, nameof(BaseQueryStructure.EntityName), "Book");
+            SetBackingField(structure, nameof(BaseQueryStructure.MetadataProvider), metadata.Object);
+            SetBackingField(structure, nameof(BaseQueryStructure.DatabaseObject), table);
+            SetBackingField(structure, nameof(BaseQueryStructure.SourceAlias), "HR_BOOKS");
+            SetBackingField(structure, nameof(BaseQueryStructure.Columns), new List<LabelledColumn>
+            {
+                new("HR", "BOOKS", "PUBLISHER_ID", "publisher_id", "HR_BOOKS")
+            });
+            SetBackingField(structure, nameof(BaseQueryStructure.Predicates), new List<Predicate>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.DbPolicyPredicatesForOperations), new Dictionary<EntityActionOperation, string?>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.Joins), new List<SqlJoinStructure>());
+            SetBackingField(structure, nameof(BaseSqlQueryStructure.FilterPredicates), string.Empty);
+            SetBackingField(structure, nameof(SqlQueryStructure.OrderByColumns), new List<OrderByColumn>());
+            SetBackingField(structure, nameof(SqlQueryStructure.JoinQueries), new Dictionary<string, SqlQueryStructure>());
+            SetBackingField(structure, nameof(SqlQueryStructure.PaginationMetadata), new PaginationMetadata(structure));
+
+            GroupByMetadata groupBy = new();
+            groupBy.Fields["PUBLISHER_ID"] = new Column("HR", "BOOKS", "PUBLISHER_ID", "HR_BOOKS");
+            AggregationType aggregationType = Enum.Parse<AggregationType>(function, ignoreCase: true);
+            groupBy.Aggregations.Add(new AggregationOperation(
+                new AggregationColumn("HR", "BOOKS", backingField, aggregationType, alias, distinct, "HR_BOOKS"),
+                having: null));
+            groupBy.RequestedAggregations = true;
+            SetBackingField(structure, nameof(SqlQueryStructure.GroupByMetadata), groupBy);
+            SetBackingField(structure, nameof(BaseQueryStructure.Counter), new IncrementingInteger());
+            structure.Parameters = new();
+            return structure;
+        }
+
+        private static void SetLimit(SqlQueryStructure structure, uint? limit)
+        {
+            FieldInfo? field = typeof(SqlQueryStructure).GetField(
+                "_limit",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            field.SetValue(structure, limit);
         }
 
         private static void SetBackingField(object instance, string propertyName, object value)

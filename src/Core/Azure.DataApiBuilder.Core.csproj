@@ -12,9 +12,9 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://go.microsoft.com/fwlink/?linkid=2224253</PackageProjectUrl>
-    <PackageTags>microsoft rest graphql mcp api azure sql mssql mysql pgsql postgresql azure-sql sqlserver nosql cosmosdb dataApiBuilder</PackageTags>
+    <PackageTags>microsoft rest graphql mcp api azure sql mssql mysql pgsql postgresql azure-sql sqlserver nosql cosmosdb oracle dataApiBuilder</PackageTags>
     <AssemblyName>Microsoft.DataApiBuilder.Core</AssemblyName>
-    <Description>Data API builder Core library for Azure Databases provides modern REST, GraphQL endpoints and MCP tools to your Azure Databases.</Description>
+    <Description>Data API builder Core library for Azure Databases provides modern REST, GraphQL endpoints and MCP tools to your Azure Databases. Oracle Database support is preview.</Description>
     <PackageIcon>nuget_icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
@@ -53,6 +53,7 @@
     <PackageReference Include="Newtonsoft.Json.Schema" />
     <PackageReference Include="Npgsql" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" />
     <PackageReference Include="Polly" />
     <PackageReference Include="Serilog.Sinks.File" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" />

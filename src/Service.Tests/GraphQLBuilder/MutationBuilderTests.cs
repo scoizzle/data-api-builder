@@ -686,6 +686,37 @@ type Foo @model(name:""Foo"") {
         }
 
         [TestMethod]
+        [TestCategory("Mutation Builder - Create")]
+        public void CreateMutationKeepsGeneratedByDefaultFieldOptional()
+        {
+            string gql =
+                @"
+type Foo @model(name:""Foo"") {
+    id: Int! @primaryKey @generatedByDefault
+    title: String!
+}
+                ";
+
+            DocumentNode root = Utf8GraphQLParser.Parse(gql);
+            DocumentNode mutationRoot = MutationBuilder.Build(
+                root,
+                new Dictionary<string, DatabaseType> { { "Foo", DatabaseType.Oracle } },
+                new(new Dictionary<string, Entity> { { "Foo", GenerateEmptyEntity() } }),
+                entityPermissionsMap: _entityPermissions);
+
+            ObjectTypeDefinitionNode query = GetMutationNode(mutationRoot);
+            FieldDefinitionNode field = query.Fields.First(f => f.Name.Value == "createFoo");
+            InputValueDefinitionNode inputArg = field.Arguments[0];
+            InputObjectTypeDefinitionNode inputObj = (InputObjectTypeDefinitionNode)mutationRoot.Definitions.First(
+                d => d is InputObjectTypeDefinitionNode node && node.Name == inputArg.Type.NamedType().Name);
+
+            Assert.AreEqual(2, inputObj.Fields.Count);
+            InputValueDefinitionNode id = inputObj.Fields.First(f => f.Name.Value == "id");
+            Assert.AreEqual("Int", id.Type.NamedType().Name.Value);
+            Assert.IsFalse(id.Type.IsNonNullType(), "a generated-by-default key is optional on create");
+        }
+
+        [TestMethod]
         [TestCategory("Mutation Builder - Delete")]
         [TestCategory("Schema Builder - Simple Type")]
         public void CanGenerateDeleteMutationWith_SimpleType()

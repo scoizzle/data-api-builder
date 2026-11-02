@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -82,13 +83,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             if (structure.PaginationMetadata.IsPaginated)
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName), structure.PaginationMetadata, structure.GroupByMetadata),
+                    SqlPaginationUtil.CreatePaginationConnectionFromJsonDocument(await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: false), structure.PaginationMetadata, structure.GroupByMetadata),
                     structure.PaginationMetadata);
             }
             else
             {
                 return new Tuple<JsonDocument?, IMetadata?>(
-                    await ExecuteAsync(structure, dataSourceName),
+                    await ExecuteAsync(structure, dataSourceName, isMultipleCreateOperation: false),
                     structure.PaginationMetadata);
             }
         }
@@ -103,7 +104,6 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <param name="dataSourceName">Name of datasource for which to set access token. Default dbName taken from config if empty</param>
         public async Task<Tuple<JsonDocument?, IMetadata?>> ExecuteMultipleCreateFollowUpQueryAsync(IMiddlewareContext context, List<IDictionary<string, object?>> parameters, string dataSourceName)
         {
-
             string entityName = GraphQLUtils.GetEntityNameFromContext(context);
 
             SqlQueryStructure structure = new(
@@ -305,7 +305,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         // <summary>
         // Given the SqlQueryStructure structure, obtains the query text and executes it against the backend.
         // </summary>
-        private async Task<JsonDocument?> ExecuteAsync(SqlQueryStructure structure, string dataSourceName, bool isMultipleCreateOperation = false)
+        private async Task<JsonDocument?> ExecuteAsync(
+            SqlQueryStructure structure,
+            string dataSourceName,
+            bool isMultipleCreateOperation = false)
         {
             RuntimeConfig runtimeConfig = _runtimeConfigProvider.GetConfig();
             DatabaseType databaseType = runtimeConfig.GetDataSourceFromDataSourceName(dataSourceName).DatabaseType;
@@ -325,8 +328,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 queryString = queryBuilder.Build(structure);
             }
 
-            // Global Cache enablement check
-            if (runtimeConfig.CanUseCache())
+            // An uncommitted local mutation transaction must not populate or serve the cache.
+            // TransactionScope mutations do not set this session, so their cache behavior is unchanged.
+            IMutationWorkSession? mutationSession = MutationWork.Current;
+            bool inLocalTransaction = mutationSession is { IsInLocalTransaction: true };
+            if (!inLocalTransaction && runtimeConfig.CanUseCache())
             {
                 // Entity level cache behavior checks
                 bool dbPolicyConfigured = !string.IsNullOrEmpty(structure.DbPolicyPredicatesForOperations[EntityActionOperation.Read]);
@@ -352,13 +358,27 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // 2. MSSQL datasource set-session-context property is true
             // 3. Entity level cache is disabled
             // 4. A db policy is resolved for the read operation
-            JsonDocument? response = await queryExecutor.ExecuteQueryAsync(
-                sqltext: queryString,
-                parameters: structure.Parameters,
-                dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
-                httpContext: _httpContextAccessor.HttpContext!,
-                args: null,
-                dataSourceName: dataSourceName);
+            JsonDocument? response;
+            if (inLocalTransaction)
+            {
+                response = await mutationSession!.ExecuteQueryAsync(
+                    sqltext: queryString,
+                    parameters: structure.Parameters,
+                    dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
+                    dataSourceName: dataSourceName,
+                    httpContext: _httpContextAccessor.HttpContext!,
+                    args: null);
+            }
+            else
+            {
+                response = await queryExecutor.ExecuteQueryAsync(
+                    sqltext: queryString,
+                    parameters: structure.Parameters,
+                    dataReaderHandler: queryExecutor.GetJsonResultAsync<JsonDocument>,
+                    httpContext: _httpContextAccessor.HttpContext!,
+                    args: null,
+                    dataSourceName: dataSourceName);
+            }
 
             return response;
         }

@@ -72,7 +72,7 @@ namespace Cli.Commands
             McpAggregateRecordsQueryTimeout = mcpAggregateRecordsQueryTimeout;
         }
 
-        [Option("database-type", Required = true, HelpText = "Type of database to connect. Supported values: mssql, cosmosdb_nosql, cosmosdb_postgresql, mysql, postgresql, dwsql")]
+        [Option("database-type", Required = true, HelpText = "Type of database to connect. Supported values: mssql, cosmosdb_nosql, cosmosdb_postgresql, mysql, postgresql, dwsql, oracle")]
         public DatabaseType DatabaseType { get; }
 
         [Option("connection-string", Required = false, HelpText = "(Default: '') Connection details to connect to the database.")]
@@ -87,7 +87,7 @@ namespace Cli.Commands
         [Option("graphql-schema", Required = false, HelpText = "GraphQL schema Path.")]
         public string? GraphQLSchemaPath { get; }
 
-        [Option("set-session-context", Default = false, Required = false, HelpText = "Enable sending data to MsSql using session context.")]
+        [Option("set-session-context", Default = false, Required = false, HelpText = "Enable forwarding the caller's claims to MsSql or Oracle using session context.")]
         public bool SetSessionContext { get; }
 
         [Option("host-mode", Default = HostMode.Production, Required = false, HelpText = "Specify the Host mode - development or production")]

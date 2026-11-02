@@ -110,7 +110,12 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                             // Determine whether to resolve the environment variable or keep as-is.
                                             string stringValue = reader.DeserializeString(_replacementSettings)!;
 
-                                            if (bool.TryParse(stringValue, out bool boolValue))
+                                            if (string.Equals(optionsSubproperty, OracleOptions.MANAGED_IDENTITY_OPTION, StringComparison.Ordinal))
+                                            {
+                                                // Accepts true/false/"1"/"0" and rejects anything else at config load.
+                                                optionsSubpropertyValue = DataSource.ParseBoolOptionString(optionsSubproperty, stringValue);
+                                            }
+                                            else if (bool.TryParse(stringValue, out bool boolValue))
                                             {
                                                 // MsSqlOptions.SetSessionContext will contain a boolean value.
                                                 optionsSubpropertyValue = boolValue;
@@ -124,6 +129,17 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                         else if (reader.TokenType is JsonTokenType.True or JsonTokenType.False)
                                         {
                                             optionsSubpropertyValue = reader.GetBoolean();
+                                        }
+                                        else if (reader.TokenType is JsonTokenType.Number)
+                                        {
+                                            // Numeric options (e.g. Oracle's command-timeout) are
+                                            // materialized as ints, mirroring the string/bool cases.
+                                            if (!reader.TryGetInt32(out int numberValue))
+                                            {
+                                                throw new JsonException($"Unexpected numeric value for options {optionsSubproperty} while deserializing DataSource options.");
+                                            }
+
+                                            optionsSubpropertyValue = numberValue;
                                         }
                                         else if (reader.TokenType is JsonTokenType.Null)
                                         {

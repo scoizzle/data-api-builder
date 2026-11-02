@@ -220,6 +220,13 @@ public class RuntimeConfigProvider : IDisposable
             _configLoader.FlushLogBuffer();
 
             ManagedIdentityAccessToken[_configLoader.RuntimeConfig.DefaultDataSourceName] = accessToken;
+
+            // Oracle reads this flag while the config-loaded handlers build the first connection.
+            // Other engines keep the historical order: the flag is set after those handlers return.
+            if (ConfiguresOracle(_configLoader.RuntimeConfig))
+            {
+                IsLateConfigured = true;
+            }
         }
 
         bool configLoadSucceeded = await InvokeConfigLoadedHandlersAsync();
@@ -227,6 +234,23 @@ public class RuntimeConfigProvider : IDisposable
         IsLateConfigured = true;
 
         return configLoadSucceeded;
+    }
+
+    /// <summary>
+    /// True when any data source in <paramref name="config"/> is Oracle.
+    /// Hosted setup sets <see cref="IsLateConfigured"/> before engine construction only in that case.
+    /// </summary>
+    private static bool ConfiguresOracle(RuntimeConfig config)
+    {
+        foreach (DataSource source in config.ListAllDataSources())
+        {
+            if (source.DatabaseType == DatabaseType.Oracle)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
