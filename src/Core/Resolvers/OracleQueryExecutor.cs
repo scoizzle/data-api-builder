@@ -573,23 +573,296 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return sqltext;
             }
 
-            // Equality: = :param. Avoid >=, <=, != and ==.
-            sqltext = Regex.Replace(
-                sqltext,
-                @"(?<![<>!=])=(?!=)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+            return RewritePredicatesOnly(sqltext, emptyStringParameters);
+        }
+
+        /// <summary>
+        /// Rewrites empty-string equality binds only where they are predicates.
+        /// <para>
+        /// Oracle DML is not a bare statement: inserts, updates and upserts are emitted as an
+        /// anonymous block prefixed by a comment, for example
+        /// <c>/* DAB_ORACLE_OUTPUT_TYPES:... *&#47; DECLARE ...; BEGIN UPDATE ... SET ... WHERE ... END;</c>.
+        /// The scope is therefore resolved per top-level statement: an UPDATE/DELETE is rewritten
+        /// from its first top-level WHERE, and everything else is rewritten whole. A PL/SQL block
+        /// is split at its top-level semicolons and each statement is scoped on its own, so that
+        /// <c>SET "col" = :param</c> (ORA-00936 if rewritten) and the leading declaration section
+        /// are left alone while the block's real filters are still converted.
+        /// </para>
+        /// </summary>
+        private static string RewritePredicatesOnly(string sqltext, HashSet<string> emptyStringParameters)
+        {
+            string kind = GetStatementKind(sqltext);
+            if (kind is "DECLARE")
+            {
+                return RewritePlSqlBlock(sqltext, emptyStringParameters);
+            }
+
+            return RewriteStatement(sqltext, kind, emptyStringParameters);
+        }
+
+        /// <summary>
+        /// Scopes one statement: assignment lists are preserved, predicates are rewritten.
+        /// </summary>
+        private static string RewriteStatement(string statement, string kind, HashSet<string> emptyStringParameters)
+        {
+            int predicateStart = kind is "UPDATE" or "DELETE" or "MERGE"
+                ? FindFirstTopLevelKeyword(statement, "WHERE")
+                : 0;
+
+            if (predicateStart < 0)
+            {
+                // A DML statement with no WHERE has no predicate to rewrite; its only equality
+                // would be an assignment or a key match, neither of which may become IS NULL.
+                return statement;
+            }
+
+            return statement[..predicateStart]
+                + RewriteEqualityBinds(statement[predicateStart..], emptyStringParameters);
+        }
+
+        /// <summary>
+        /// Applies the equality/inequality rewrites to a text that contains only predicates.
+        /// </summary>
+        private static string RewriteEqualityBinds(string text, HashSet<string> emptyStringParameters)
+        {
+            // Equality: = :param. Avoid >=, <=, !=, == and the PL/SQL assignment operator (:=).
+            text = Regex.Replace(
+                text,
+                @"(?<![<>!=:])=(?!=)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
                 match => emptyStringParameters.Contains(match.Groups["name"].Value)
                     ? "IS NULL"
                     : match.Value);
 
             // Inequality: != :param or <> :param.
-            sqltext = Regex.Replace(
-                sqltext,
+            return Regex.Replace(
+                text,
                 @"(?:!=|<>)\s*:(?<name>[A-Za-z_][A-Za-z0-9_]*)",
                 match => emptyStringParameters.Contains(match.Groups["name"].Value)
                     ? "IS NOT NULL"
                     : match.Value);
+        }
 
-            return sqltext;
+        /// <summary>
+        /// Splits an anonymous PL/SQL block at its top-level semicolons and rewrites each
+        /// statement on its own. Semicolons inside string literals and parentheses are ignored.
+        /// </summary>
+        private static string RewritePlSqlBlock(string block, HashSet<string> emptyStringParameters)
+        {
+            StringBuilder rewritten = new(block.Length);
+            int segmentStart = 0;
+            int depth = 0;
+            bool inLiteral = false;
+            bool inQuotedIdentifier = false;
+
+            for (int i = 0; i < block.Length; i++)
+            {
+                char current = block[i];
+
+                if (inLiteral)
+                {
+                    if (current == '\'')
+                    {
+                        if (i + 1 < block.Length && block[i + 1] == '\'')
+                        {
+                            i++;
+                        }
+                        else
+                        {
+                            inLiteral = false;
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (inQuotedIdentifier)
+                {
+                    if (current == '"')
+                    {
+                        inQuotedIdentifier = false;
+                    }
+
+                    continue;
+                }
+
+                if (current == '\'')
+                {
+                    inLiteral = true;
+                }
+                else if (current == '"')
+                {
+                    inQuotedIdentifier = true;
+                }
+                else if (current == '(')
+                {
+                    depth++;
+                }
+                else if (current == ')')
+                {
+                    depth = Math.Max(0, depth - 1);
+                }
+                else if (current == ';' && depth == 0)
+                {
+                    string segment = block[segmentStart..(i + 1)];
+                    rewritten.Append(RewriteStatement(segment, GetStatementKind(segment), emptyStringParameters));
+                    segmentStart = i + 1;
+                }
+            }
+
+            if (segmentStart < block.Length)
+            {
+                string segment = block[segmentStart..];
+                rewritten.Append(RewriteStatement(segment, GetStatementKind(segment), emptyStringParameters));
+            }
+
+            return rewritten.ToString();
+        }
+
+        /// <summary>
+        /// Returns the first SQL keyword of a statement in upper case, skipping leading comments
+        /// and the PL/SQL <c>BEGIN</c> that opens an anonymous block.
+        /// </summary>
+        private static string GetStatementKind(string sqltext)
+        {
+            int index = SkipTrivia(sqltext, 0);
+            int start = index;
+            while (index < sqltext.Length && IsIdentifierChar(sqltext[index]))
+            {
+                index++;
+            }
+
+            string kind = sqltext[start..index];
+            if (kind.Equals("BEGIN", StringComparison.OrdinalIgnoreCase))
+            {
+                index = SkipTrivia(sqltext, index);
+                start = index;
+                while (index < sqltext.Length && IsIdentifierChar(sqltext[index]))
+                {
+                    index++;
+                }
+
+                kind = sqltext[start..index];
+            }
+
+            return kind.ToUpperInvariant();
+        }
+
+        /// <summary>
+        /// Skips whitespace, <c>--</c> line comments and <c>/* ... *&#47;</c> block comments.
+        /// </summary>
+        private static int SkipTrivia(string sqltext, int index)
+        {
+            while (index < sqltext.Length)
+            {
+                if (char.IsWhiteSpace(sqltext[index]))
+                {
+                    index++;
+                }
+                else if (sqltext.AsSpan(index).StartsWith("--"))
+                {
+                    int newline = sqltext.IndexOf('\n', index);
+                    index = newline < 0 ? sqltext.Length : newline + 1;
+                }
+                else if (sqltext.AsSpan(index).StartsWith("/*"))
+                {
+                    int close = sqltext.IndexOf("*/", index + 2, StringComparison.Ordinal);
+                    index = close < 0 ? sqltext.Length : close + 2;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return index;
+        }
+
+        /// <summary>
+        /// Finds the first occurrence of <paramref name="keyword"/> outside string literals,
+        /// quoted identifiers and parentheses, or -1 when the statement has no such clause.
+        /// </summary>
+        private static int FindFirstTopLevelKeyword(string sqltext, string keyword)
+        {
+            int depth = 0;
+            bool inLiteral = false;
+            bool inQuotedIdentifier = false;
+
+            for (int i = 0; i < sqltext.Length; i++)
+            {
+                char current = sqltext[i];
+
+                if (inLiteral)
+                {
+                    if (current == '\'')
+                    {
+                        if (i + 1 < sqltext.Length && sqltext[i + 1] == '\'')
+                        {
+                            i++;
+                        }
+                        else
+                        {
+                            inLiteral = false;
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (inQuotedIdentifier)
+                {
+                    if (current == '"')
+                    {
+                        inQuotedIdentifier = false;
+                    }
+
+                    continue;
+                }
+
+                if (current == '\'')
+                {
+                    inLiteral = true;
+                }
+                else if (current == '"')
+                {
+                    inQuotedIdentifier = true;
+                }
+                else if (current == '(')
+                {
+                    depth++;
+                }
+                else if (current == ')')
+                {
+                    depth = Math.Max(0, depth - 1);
+                }
+                else if (depth == 0 && IsKeywordAt(sqltext, i, keyword))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// True when <paramref name="keyword"/> starts at <paramref name="index"/> as a whole word.
+        /// </summary>
+        private static bool IsKeywordAt(string sqltext, int index, string keyword)
+        {
+            if (index + keyword.Length > sqltext.Length
+                || !sqltext.AsSpan(index, keyword.Length).Equals(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            bool startsWord = index == 0 || !IsIdentifierChar(sqltext[index - 1]);
+            int afterKeyword = index + keyword.Length;
+            bool endsWord = afterKeyword >= sqltext.Length || !IsIdentifierChar(sqltext[afterKeyword]);
+            return startsWord && endsWord;
+        }
+
+        private static bool IsIdentifierChar(char value)
+        {
+            return char.IsLetterOrDigit(value) || value == '_';
         }
 
         private static string TranslateBindParameters(string sqltext)
