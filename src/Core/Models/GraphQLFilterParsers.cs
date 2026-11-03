@@ -113,6 +113,9 @@ public class GQLFilterParser
 
         string dataSourceName = _configProvider.GetConfig().GetDataSourceNameFromEntityName(entityName);
         ISqlMetadataProvider metadataProvider = _metadataProviderFactory.GetMetadataProvider(dataSourceName);
+        SqlLiteralRewriter literalRewriter = metadataProvider is ISqlLiteralSource literalSource
+            ? literalSource.LiteralRewriter
+            : SqlLiteralRewriter.Shared;
 
         InputObjectType filterArgumentObject = ExecutionHelper.InputObjectTypeFromIInputField(filterArgumentSchema);
 
@@ -313,6 +316,7 @@ public class GQLFilterParser
                            tableName: sourceName,
                            tableAlias: sourceAlias,
                            processLiterals: queryStructure.MakeDbConnectionParam,
+                           literalRewriter: literalRewriter,
                            isListType: isListType)));
                 }
             }
@@ -548,6 +552,7 @@ public class GQLFilterParser
     /// <param name="tableName">The name of the table underlying the *FilterInput being processed</param>
     /// <param name="tableAlias">The alias of the table underlying the *FilterInput being processed</param>
     /// <param name="processLiterals">Parametrizes literals before they are written in string predicate operands</param>
+    /// <param name="literalRewriter">Engine-specific literal rules, e.g. Oracle storing '' as NULL</param>
     /// <param name="isListType">Flag to give a hint about the node type. It is only applicable for CosmosDB</param>
     private static Predicate ParseScalarType(
         IMiddlewareContext ctx,
@@ -558,11 +563,12 @@ public class GQLFilterParser
         string tableName,
         string tableAlias,
         Func<object, string?, bool, string> processLiterals,
+        SqlLiteralRewriter literalRewriter,
         bool isListType = false)
     {
         Column column = new(schemaName, tableName, columnName: fieldName, tableAlias);
 
-        return FieldFilterParser.Parse(ctx, argumentSchema, column, fields, processLiterals, isListType);
+        return FieldFilterParser.Parse(ctx, argumentSchema, column, fields, processLiterals, literalRewriter, isListType);
     }
 
     /// <summary>
@@ -681,13 +687,15 @@ public static class FieldFilterParser
     /// <param name="column">The table column targeted by the field</param>
     /// <param name="fields">The subfields of the scalar field</param>
     /// <param name="processLiterals">Parametrizes literals before they are written in string predicate operands</param>
+    /// <param name="literalRewriter">Engine-specific literal rules, e.g. Oracle storing '' as NULL</param>
     /// <param name="isListType">Flag which gives a hint about the node type in the given schema. only for CosmosDB it can be of list type. Refer <a href=https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/query/array-contains>here</a>.</param>
-    public static Predicate Parse(
+    internal static Predicate Parse(
         IMiddlewareContext ctx,
         IInputValueDefinition argumentSchema,
         Column column,
         List<ObjectFieldNode> fields,
         Func<object, string?, bool, string> processLiterals,
+        SqlLiteralRewriter literalRewriter,
         bool isListType = false)
     {
         List<PredicateOperand> predicates = new();
@@ -738,7 +746,61 @@ public static class FieldFilterParser
                         continue;
                     }
 
-                    break;
+                    // An engine that stores '' as NULL can never match it with IN, so
+                    // each such element becomes an IS NULL test instead. A variable can
+                    // resolve to null after PreprocessInOperatorValues saw a non-null node,
+                    // so drop null elements here as well; otherwise the IN list could render
+                    // as an empty "()" beside the IS NULL branch.
+                    List<IValueNode> inNodes = (List<IValueNode>)value;
+                    List<IValueNode> bindableNodes = new(inNodes.Count);
+                    bool includesNull = false;
+                    foreach (IValueNode inNode in inNodes)
+                    {
+                        object? element = ExecutionHelper.ExtractValueFromIValueNode(
+                            inNode,
+                            argumentObject.Fields[name],
+                            ctx.Variables);
+                        if (element is null)
+                        {
+                            continue;
+                        }
+
+                        if (literalRewriter.StoresEmptyStringAsNull(element))
+                        {
+                            includesNull = true;
+                            continue;
+                        }
+
+                        bindableNodes.Add(inNode);
+                    }
+
+                    if (!includesNull)
+                    {
+                        break;
+                    }
+
+                    Predicate nullPredicate = new(
+                        new PredicateOperand(column),
+                        PredicateOperation.IS,
+                        new PredicateOperand(GQLFilterParser.NullStringValue));
+                    if (bindableNodes.Count == 0)
+                    {
+                        predicates.Push(new PredicateOperand(nullPredicate));
+                    }
+                    else
+                    {
+                        Predicate inPredicate = new(
+                            new PredicateOperand(column),
+                            op,
+                            GenerateRightOperand(ctx, argumentObject, name, column, processLiterals, bindableNodes, processLiteral, lengthOverride));
+                        predicates.Push(new PredicateOperand(new Predicate(
+                            new PredicateOperand(inPredicate),
+                            PredicateOperation.OR,
+                            new PredicateOperand(nullPredicate),
+                            addParenthesis: true)));
+                    }
+
+                    continue;
                 case "contains":
                     if (isListType)
                     {
@@ -785,6 +847,14 @@ public static class FieldFilterParser
                     throw new NotSupportedException($"Operation {name} on int type not supported.");
             }
 
+            // Engines that store '' as NULL compare against it with IS [NOT] NULL.
+            if (literalRewriter.TryGetEmptyStringNullTest(op, value, out PredicateOperation nullTest))
+            {
+                op = nullTest;
+                processLiteral = false;
+                value = GQLFilterParser.NullStringValue;
+            }
+
             predicates.Push(new PredicateOperand(new Predicate(
                 new PredicateOperand(column),
                 op,
@@ -807,7 +877,7 @@ public static class FieldFilterParser
     /// <exception cref="DataApiBuilderException">
     /// Thrown if the input is not a list of <see cref="IValueNode"/> or if the list contains more than 100 items.
     /// </exception>
-    private static object? PreprocessInOperatorValues(object value)
+    private static List<IValueNode>? PreprocessInOperatorValues(object value)
     {
         if (value is not List<IValueNode> inValues)
         {

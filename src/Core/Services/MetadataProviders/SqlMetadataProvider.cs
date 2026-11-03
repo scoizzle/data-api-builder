@@ -24,6 +24,7 @@ using static Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLNaming;
 using KeyNotFoundException = System.Collections.Generic.KeyNotFoundException;
 
 [assembly: InternalsVisibleTo("Azure.DataApiBuilder.Service.Tests")]
+[assembly: InternalsVisibleTo("DynamicProxyGenAssembly2")]
 namespace Azure.DataApiBuilder.Core.Services
 {
     /// <summary>

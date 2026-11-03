@@ -6,6 +6,7 @@ using System.Reflection;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Service.Exceptions;
 using HotChocolate;
@@ -191,6 +192,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 new Column("dbo", "books", "title"),
                 new List<ObjectFieldNode> { new(operation, value) },
                 (literal, columnName, lengthOverride) => $"{columnName}:{literal}:{lengthOverride}",
+                SqlLiteralRewriter.Shared,
                 isListType);
 
             Assert.AreEqual(expectedOperation, result.Op);
@@ -204,7 +206,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 CreateFilterArgumentSchema(),
                 new Column("dbo", "books", "title"),
                 new List<ObjectFieldNode> { new("eq", NullValueNode.Default) },
-                (literal, columnName, lengthOverride) => literal.ToString()!);
+                (literal, columnName, lengthOverride) => literal.ToString()!,
+                SqlLiteralRewriter.Shared);
 
             Assert.IsNotNull(result);
         }
@@ -217,7 +220,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 CreateFilterArgumentSchema(),
                 new Column("dbo", "books", "title"),
                 new List<ObjectFieldNode> { new("unsupported", new StringValueNode("value")) },
-                (literal, columnName, lengthOverride) => literal.ToString()!));
+                (literal, columnName, lengthOverride) => literal.ToString()!,
+                SqlLiteralRewriter.Shared));
         }
 
         private static GQLFilterParser CreateParserWithDepthLimit(int? depthLimit)

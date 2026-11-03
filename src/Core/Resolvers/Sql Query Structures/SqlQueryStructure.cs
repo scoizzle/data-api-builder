@@ -1121,7 +1121,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                                 operationObjectField.Arguments[QueryBuilder.GROUP_BY_AGGREGATE_FIELD_HAVING_NAME],
                                 column,
                                 filterFields,
-                                this.MakeDbConnectionParam
+                                this.MakeDbConnectionParam,
+                                this.MetadataProvider is ISqlLiteralSource literalSource
+                                    ? literalSource.LiteralRewriter
+                                    : SqlLiteralRewriter.Shared
                             )
                         );
                     }
