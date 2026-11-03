@@ -667,7 +667,33 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                      MakeDbConnectionParam(null, column.ColumnName);
             }
 
-            PaginationMetadata.PaginationPredicate = new KeysetPaginationPredicate(afterJsonValues.ToList());
+            PaginationMetadata.PaginationPredicate = new KeysetPaginationPredicate(
+                afterJsonValues.ToList(),
+                terminatingColumnCanBeNull: TerminatingColumnCanBeNull(afterJsonValues));
+
+        }
+
+        /// <summary>
+        /// True when the last cursor column can hold NULL. A primary-key column cannot, but a
+        /// grouped cursor has no primary-key tie-break, and a client sort can end on a nullable
+        /// non-key column (order by the primary key, then a nullable title), so only a
+        /// non-grouped cursor whose final column is a primary key is NULL-free.
+        /// </summary>
+        private bool TerminatingColumnCanBeNull(IEnumerable<PaginationColumn> afterJsonValues)
+        {
+            if (GroupByMetadata.Fields.Count > 0)
+            {
+                return true;
+            }
+
+            string? terminatingColumn = afterJsonValues.LastOrDefault()?.ColumnName;
+            if (string.IsNullOrEmpty(terminatingColumn))
+            {
+                return true;
+            }
+
+            return !PrimaryKey().Any(primaryKeyColumn =>
+                string.Equals(primaryKeyColumn, terminatingColumn, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
