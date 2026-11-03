@@ -37,6 +37,59 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string COUNT_ROWS_WITH_GIVEN_PK = "cnt_rows_to_update";
         public const string IS_FALLBACK_TO_UPDATE = "is_fallback_to_update";
 
+        /// <summary>
+        /// Builds the keyset pagination predicate for Oracle.
+        /// <para>
+        /// Oracle sorts NULLs last on ASC and first on DESC. A plain <c>col &gt; :cursor</c>
+        /// therefore never reaches the NULL (or blank, since Oracle stores '' as NULL) tail of
+        /// an ascending sort: no NULL is greater than any value. For each step of the sort whose
+        /// cursor column can hold NULL, add the group of rows whose cursor column is NULL so the
+        /// tail is reachable.
+        /// </para>
+        /// <para>
+        /// On DESC a NULL cursor value means the page ended inside the NULL block, which sorts
+        /// first; the whole non-NULL segment comes after it, so that segment is added explicitly.
+        /// A non-NULL cursor value needs no extra group: the tie-break equality already reaches
+        /// the rows that follow, and adding one would re-emit rows already delivered.
+        /// </para>
+        /// </summary>
+        protected override string Build(KeysetPaginationPredicate? predicate)
+        {
+            if (predicate is null || predicate.Columns.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            List<string> groups = new();
+            for (int i = 0; i < predicate.Columns.Count; i++)
+            {
+                groups.Add($"({MakePaginationInequality(predicate.Columns, i)})");
+
+                PaginationColumn column = predicate.Columns[i];
+                bool isTerminatingColumn = i == predicate.Columns.Count - 1;
+                bool canBeNull = !isTerminatingColumn || predicate.TerminatingColumnCanBeNull;
+                if (canBeNull && column.Direction is OrderBy.ASC && column.Value is not null)
+                {
+                    // Rows with a NULL sort key come after every non-NULL value on ASC, so they
+                    // are never returned by the comparison group above, and the tie-break
+                    // equality cannot reach them because it requires equality on this column.
+                    groups.Add($"({MakePaginationEqualityPrefix(predicate.Columns, i)}{Build(column, printDirection: false)} IS NULL)");
+                }
+                else if (canBeNull && column.Direction is OrderBy.DESC && column.Value is null)
+                {
+                    // DESC sorts NULLs first. A NULL cursor value means the page ended inside the
+                    // NULL block; the non-NULL segment sorts after it and would otherwise be
+                    // skipped for the rest of the walk.
+                    groups.Add($"({MakePaginationEqualityPrefix(predicate.Columns, i)}{Build(column, printDirection: false)} IS NOT NULL)");
+                }
+            }
+
+            // No NULL tail was added: keep the shared shape byte for byte.
+            return groups.Count == predicate.Columns.Count
+                ? base.Build(predicate)
+                : $"({string.Join(" OR ", groups)})";
+        }
+
         // DML RETURNING INTO fills output binds, not the DbDataReader. Wrap DML in a PL/SQL block
         // that opens :dab_result so ExtractResultSetFromDbDataReaderAsync can consume one row.
         // Literals cannot appear in RETURNING (upsert indicators go on the REF CURSOR SELECT).
