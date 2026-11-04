@@ -659,15 +659,73 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return;
             }
 
+            SqlLiteralRewriter literalRewriter = MetadataProvider is ISqlLiteralSource literalSource
+                ? literalSource.LiteralRewriter
+                : SqlLiteralRewriter.Shared;
+
+            List<PaginationColumn> columns = new();
             foreach (PaginationColumn column in afterJsonValues)
             {
-                column.TableAlias = SourceAlias;
-                column.ParamName = column.Value is not null ?
-                     MakeDbConnectionParam(GetParamAsSystemType(column.Value!.ToString()!, column.ColumnName, GetColumnSystemType(column.ColumnName)), column.ColumnName) :
-                     MakeDbConnectionParam(null, column.ColumnName);
+                // An engine that stores '' as NULL cannot match an empty-string cursor with
+                // = :param; normalize it to a NULL cursor so the builder applies its existing
+                // null-cursor shapes.
+                PaginationColumn normalized = NormalizePaginationColumn(column, literalRewriter);
+                normalized.TableAlias = SourceAlias;
+                normalized.ParamName = normalized.Value is not null ?
+                     MakeDbConnectionParam(GetParamAsSystemType(normalized.Value!.ToString()!, normalized.ColumnName, GetColumnSystemType(normalized.ColumnName)), normalized.ColumnName) :
+                     MakeDbConnectionParam(null, normalized.ColumnName);
+                columns.Add(normalized);
             }
 
-            PaginationMetadata.PaginationPredicate = new KeysetPaginationPredicate(afterJsonValues.ToList());
+            PaginationMetadata.PaginationPredicate = new KeysetPaginationPredicate(
+                columns,
+                terminatingColumnCanBeNull: TerminatingColumnCanBeNull(columns));
+        }
+
+        /// <summary>
+        /// Replaces an empty-string cursor value with NULL on engines that store '' as NULL.
+        /// The keyset builder then emits IS NULL instead of a bind that can never match.
+        /// </summary>
+        internal static PaginationColumn NormalizePaginationColumn(
+            PaginationColumn column,
+            SqlLiteralRewriter literalRewriter)
+        {
+            if (!literalRewriter.StoresEmptyStringAsNull(column.Value))
+            {
+                return column;
+            }
+
+            return new PaginationColumn(
+                tableSchema: column.TableSchema,
+                tableName: column.TableName,
+                columnName: column.ColumnName,
+                value: null,
+                tableAlias: column.TableAlias,
+                direction: column.Direction,
+                paramName: column.ParamName);
+        }
+
+        /// <summary>
+        /// True when the last cursor column can hold NULL. A primary-key column cannot, but a
+        /// grouped cursor has no primary-key tie-break, and a client sort can end on a nullable
+        /// non-key column (order by the primary key, then a nullable title), so only a
+        /// non-grouped cursor whose final column is a primary key is NULL-free.
+        /// </summary>
+        private bool TerminatingColumnCanBeNull(IEnumerable<PaginationColumn> afterJsonValues)
+        {
+            if (GroupByMetadata.Fields.Count > 0)
+            {
+                return true;
+            }
+
+            string? terminatingColumn = afterJsonValues.LastOrDefault()?.ColumnName;
+            if (string.IsNullOrEmpty(terminatingColumn))
+            {
+                return true;
+            }
+
+            return !PrimaryKey().Any(primaryKeyColumn =>
+                string.Equals(primaryKeyColumn, terminatingColumn, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
@@ -1090,12 +1148,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         // Parse the filtering conditions and apply them to the aggregation
                         predicates.Add(
-                            FieldFilterParser.Parse(
+                            FieldFilterParser.ParseCore(
                                 ctx,
                                 operationObjectField.Arguments[QueryBuilder.GROUP_BY_AGGREGATE_FIELD_HAVING_NAME],
                                 column,
                                 filterFields,
-                                this.MakeDbConnectionParam
+                                this.MakeDbConnectionParam,
+                                this.MetadataProvider is ISqlLiteralSource literalSource
+                                    ? literalSource.LiteralRewriter
+                                    : SqlLiteralRewriter.Shared
                             )
                         );
                     }
