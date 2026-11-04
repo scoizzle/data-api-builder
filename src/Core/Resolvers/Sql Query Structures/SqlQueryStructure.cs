@@ -659,18 +659,50 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 return;
             }
 
+            SqlLiteralRewriter literalRewriter = MetadataProvider is ISqlLiteralSource literalSource
+                ? literalSource.LiteralRewriter
+                : SqlLiteralRewriter.Shared;
+
+            List<PaginationColumn> columns = new();
             foreach (PaginationColumn column in afterJsonValues)
             {
-                column.TableAlias = SourceAlias;
-                column.ParamName = column.Value is not null ?
-                     MakeDbConnectionParam(GetParamAsSystemType(column.Value!.ToString()!, column.ColumnName, GetColumnSystemType(column.ColumnName)), column.ColumnName) :
-                     MakeDbConnectionParam(null, column.ColumnName);
+                // An engine that stores '' as NULL cannot match an empty-string cursor with
+                // = :param; normalize it to a NULL cursor so the builder applies its existing
+                // null-cursor shapes.
+                PaginationColumn normalized = NormalizePaginationColumn(column, literalRewriter);
+                normalized.TableAlias = SourceAlias;
+                normalized.ParamName = normalized.Value is not null ?
+                     MakeDbConnectionParam(GetParamAsSystemType(normalized.Value!.ToString()!, normalized.ColumnName, GetColumnSystemType(normalized.ColumnName)), normalized.ColumnName) :
+                     MakeDbConnectionParam(null, normalized.ColumnName);
+                columns.Add(normalized);
             }
 
             PaginationMetadata.PaginationPredicate = new KeysetPaginationPredicate(
-                afterJsonValues.ToList(),
-                terminatingColumnCanBeNull: TerminatingColumnCanBeNull(afterJsonValues));
+                columns,
+                terminatingColumnCanBeNull: TerminatingColumnCanBeNull(columns));
+        }
 
+        /// <summary>
+        /// Replaces an empty-string cursor value with NULL on engines that store '' as NULL.
+        /// The keyset builder then emits IS NULL instead of a bind that can never match.
+        /// </summary>
+        internal static PaginationColumn NormalizePaginationColumn(
+            PaginationColumn column,
+            SqlLiteralRewriter literalRewriter)
+        {
+            if (!literalRewriter.StoresEmptyStringAsNull(column.Value))
+            {
+                return column;
+            }
+
+            return new PaginationColumn(
+                tableSchema: column.TableSchema,
+                tableName: column.TableName,
+                columnName: column.ColumnName,
+                value: null,
+                tableAlias: column.TableAlias,
+                direction: column.Direction,
+                paramName: column.ParamName);
         }
 
         /// <summary>
