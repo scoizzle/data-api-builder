@@ -50,7 +50,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string? nullVariableName)
         {
             List<object?> captured = new();
-            Predicate predicate = FieldFilterParser.Parse(
+            Predicate predicate = FieldFilterParser.ParseCore(
                 CreateMiddlewareContext(nullVariableName),
                 CreateFilterArgumentSchema(),
                 TitleColumn,

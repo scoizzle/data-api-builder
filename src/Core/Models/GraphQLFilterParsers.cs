@@ -568,7 +568,7 @@ public class GQLFilterParser
     {
         Column column = new(schemaName, tableName, columnName: fieldName, tableAlias);
 
-        return FieldFilterParser.Parse(ctx, argumentSchema, column, fields, processLiterals, literalRewriter, isListType);
+        return FieldFilterParser.ParseCore(ctx, argumentSchema, column, fields, processLiterals, literalRewriter, isListType);
     }
 
     /// <summary>
@@ -687,9 +687,23 @@ public static class FieldFilterParser
     /// <param name="column">The table column targeted by the field</param>
     /// <param name="fields">The subfields of the scalar field</param>
     /// <param name="processLiterals">Parametrizes literals before they are written in string predicate operands</param>
-    /// <param name="literalRewriter">Engine-specific literal rules, e.g. Oracle storing '' as NULL</param>
     /// <param name="isListType">Flag which gives a hint about the node type in the given schema. only for CosmosDB it can be of list type. Refer <a href=https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/query/array-contains>here</a>.</param>
-    internal static Predicate Parse(
+    public static Predicate Parse(
+        IMiddlewareContext ctx,
+        IInputValueDefinition argumentSchema,
+        Column column,
+        List<ObjectFieldNode> fields,
+        Func<object, string?, bool, string> processLiterals,
+        bool isListType = false)
+    {
+        return ParseCore(ctx, argumentSchema, column, fields, processLiterals, SqlLiteralRewriter.Shared, isListType);
+    }
+
+    /// <summary>
+    /// Parse a scalar field into a predicate using the engine's value semantics.
+    /// </summary>
+    /// <param name="literalRewriter">Engine-specific literal rules, e.g. Oracle storing '' as NULL</param>
+    internal static Predicate ParseCore(
         IMiddlewareContext ctx,
         IInputValueDefinition argumentSchema,
         Column column,

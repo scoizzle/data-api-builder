@@ -1148,7 +1148,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                         // Parse the filtering conditions and apply them to the aggregation
                         predicates.Add(
-                            FieldFilterParser.Parse(
+                            FieldFilterParser.ParseCore(
                                 ctx,
                                 operationObjectField.Arguments[QueryBuilder.GROUP_BY_AGGREGATE_FIELD_HAVING_NAME],
                                 column,
