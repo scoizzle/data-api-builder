@@ -38,9 +38,9 @@ namespace Azure.DataApiBuilder.Core.Parsers
         /// <returns>String concatenation of (left op right).</returns>
         public override string Visit(BinaryOperatorNode nodeIn)
         {
-            // Engines that store the empty string as NULL rewrite a policy comparison against ''
-            // to IS [NOT] NULL. The shared visitor does not know which engine that is.
-            if (TryRewriteEmptyStringComparison(nodeIn, out string? nullPredicate))
+            // Engines that store the empty string as NULL render a comparison against '' as
+            // IS [NOT] NULL. The shared visitor does not know which engine that is.
+            if (TryGetEmptyStringNullTest(nodeIn, out string? nullPredicate))
             {
                 return nullPredicate!;
             }
@@ -60,25 +60,35 @@ namespace Azure.DataApiBuilder.Core.Parsers
             return CreateResult(nodeIn.OperatorKind, left, right);
         }
 
-        private bool TryRewriteEmptyStringComparison(BinaryOperatorNode nodeIn, out string? predicate)
+        private bool TryGetEmptyStringNullTest(BinaryOperatorNode nodeIn, out string? predicate)
         {
             predicate = null;
             SqlLiteralRewriter rewriter = _metadataProvider is ISqlLiteralSource literalSource
                 ? literalSource.LiteralRewriter
                 : SqlLiteralRewriter.Shared;
-            if (!rewriter.TryRewriteEmptyStringComparison(
+            if (!rewriter.TryGetEmptyStringNullTest(
                     nodeIn.OperatorKind,
                     nodeIn.Left,
                     nodeIn.Right,
                     out SingleValuePropertyAccessNode? propertyNode,
-                    out bool isNullPredicate))
+                    out PredicateOperation nullTestOperation))
             {
                 return false;
             }
 
             string column = Visit(propertyNode!);
-            predicate = $"({column} {(isNullPredicate ? "IS NULL" : "IS NOT NULL")})";
+            predicate = $"({column} {GetNullTestOperator(nullTestOperation)})";
             return true;
+        }
+
+        private static string GetNullTestOperator(PredicateOperation operation)
+        {
+            return operation switch
+            {
+                PredicateOperation.IS => "IS NULL",
+                PredicateOperation.IS_NOT => "IS NOT NULL",
+                _ => throw new NotSupportedException($"Null test operation {operation} is not supported."),
+            };
         }
 
         /// <summary>

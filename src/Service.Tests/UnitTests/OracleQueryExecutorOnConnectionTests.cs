@@ -177,6 +177,52 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS, defaultsCommand.CommandTimeout);
         }
 
+        /// <summary>
+        /// Oracle stores '' as NULL, but the executor must not rewrite SQL text to express that.
+        /// The predicate producers emit IS NULL / IS NOT NULL before the command is prepared.
+        /// </summary>
+        [TestMethod]
+        public void PrepareDbCommand_DoesNotRewriteEmptyStringEqualityBinds()
+        {
+            using OracleConnection conn = new("User Id=x;Password=y;Data Source=localhost:1521/x");
+            OracleQueryExecutor executor = CreateExecutor("User Id=x;Password=y;Data Source=localhost:1521/x");
+            Dictionary<string, DbConnectionParam> parameters = new()
+            {
+                ["@param0"] = new DbConnectionParam(string.Empty)
+            };
+
+            DbCommand command = executor.PrepareDbCommand(
+                conn,
+                "SELECT * FROM \"BOOKS\" WHERE \"TITLE\" = @param0",
+                parameters,
+                httpContext: null,
+                dataSourceName: string.Empty);
+
+            StringAssert.Contains(command.CommandText, "= :param0");
+            Assert.IsFalse(
+                command.CommandText.Contains("IS NULL", StringComparison.Ordinal),
+                $"The executor must leave predicate text alone, but produced: {command.CommandText}");
+
+            // The deleted scanner also matched the SET clause and produced
+            // SET "TITLE" IS NULL, which Oracle rejects with ORA-00936. A write of '' must stay
+            // a bind so Oracle stores its NULL value.
+            DbCommand update = executor.PrepareDbCommand(
+                conn,
+                "UPDATE \"BOOKS\" SET \"TITLE\" = @param0 WHERE \"ID\" = @param1",
+                new Dictionary<string, DbConnectionParam>
+                {
+                    ["@param0"] = new DbConnectionParam(string.Empty),
+                    ["@param1"] = new DbConnectionParam(1)
+                },
+                httpContext: null,
+                dataSourceName: string.Empty);
+
+            StringAssert.Contains(update.CommandText, "SET \"TITLE\" = :param0");
+            Assert.IsFalse(
+                update.CommandText.Contains("IS NULL", StringComparison.Ordinal),
+                $"The executor must leave the assignment alone, but produced: {update.CommandText}");
+        }
+
         private static RuntimeConfig CreateOracleConfig(Dictionary<string, object?> options)
         {
             return CreateOracleConfig("User Id=x;Password=y;Data Source=localhost:1521/x", options);

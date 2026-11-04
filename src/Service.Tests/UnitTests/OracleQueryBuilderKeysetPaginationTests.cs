@@ -2,11 +2,18 @@
 // Licensed under the MIT License.
 
 using System.Collections.Generic;
+using System.Data;
+using Azure.DataApiBuilder.Auth;
+using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
+using Azure.DataApiBuilder.Core.Services;
+using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Service.GraphQLBuilder.GraphQLTypes;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -29,7 +36,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         private static PaginationColumn Column(
             string name,
             object? value,
-            string paramName,
+            string? paramName = null,
             OrderBy direction = OrderBy.ASC)
         {
             return new PaginationColumn(
@@ -150,6 +157,50 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void EmptyStringCursor_OnOracle_BecomesNull()
+        {
+            // Oracle stores '' as NULL, so an empty-string cursor is a NULL cursor.
+            PaginationColumn normalized = SqlQueryStructure.NormalizePaginationColumn(
+                Column("string_types", string.Empty, "@param0"),
+                new OracleSqlLiteralRewriter());
+
+            Assert.IsNull(normalized.Value);
+            Assert.AreEqual("string_types", normalized.ColumnName);
+        }
+
+        [TestMethod]
+        public void EmptyStringCursor_OnNonOracle_KeepsValue()
+        {
+            PaginationColumn normalized = SqlQueryStructure.NormalizePaginationColumn(
+                Column("string_types", string.Empty, "@param0"),
+                SqlLiteralRewriter.Shared);
+
+            Assert.AreEqual(string.Empty, normalized.Value);
+        }
+
+        [TestMethod]
+        public void AscendingEmptyStringCursor_DoesNotRepeatNullRows()
+        {
+            // Normalizing '' to NULL must reuse the NULL-cursor shape, not add the extra
+            // IS NULL tail that a non-null cursor needs.
+            PaginationColumn normalized = SqlQueryStructure.NormalizePaginationColumn(
+                Column("string_types", string.Empty, "@param0"),
+                new OracleSqlLiteralRewriter());
+            KeysetPaginationPredicate predicate = new(new List<PaginationColumn>
+            {
+                normalized,
+                Column("id", 10, "@param1")
+            });
+
+            string sql = new TestableOracleQueryBuilder().BuildPagination(predicate);
+
+            Assert.AreEqual(
+                "((\"T1\".\"string_types\" > @param0) " +
+                "OR (\"T1\".\"string_types\" is NULL AND \"T1\".\"id\" > @param1))",
+                sql);
+        }
+
+        [TestMethod]
         public void AscendingWithNullCursorValue_DoesNotRepeatNullRows()
         {
             // The cursor itself is NULL: the rows after it are in the same NULL block, which the
@@ -197,6 +248,85 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 "((\"T1\".\"int_types\" < @param0) " +
                 "OR (\"T1\".\"int_types\" = @param0 AND \"T1\".\"id\" < @param1))",
                 sql);
+        }
+
+        [TestMethod]
+        public void AddPaginationPredicate_NormalizesEmptyStringCursorOnOracle()
+        {
+            SqlQueryStructure structure = CreateStructure(new OracleSqlLiteralRewriter());
+
+            structure.AddPaginationPredicate(new List<PaginationColumn>
+            {
+                Column("STRING_TYPES", string.Empty)
+            });
+
+            Assert.IsNull(structure.PaginationMetadata.PaginationPredicate!.Columns[0].Value);
+        }
+
+        [TestMethod]
+        public void AddPaginationPredicate_KeepsEmptyStringCursorOnNonOracle()
+        {
+            SqlQueryStructure structure = CreateStructure(SqlLiteralRewriter.Shared);
+
+            structure.AddPaginationPredicate(new List<PaginationColumn>
+            {
+                Column("STRING_TYPES", string.Empty)
+            });
+
+            Assert.AreEqual(string.Empty, structure.PaginationMetadata.PaginationPredicate!.Columns[0].Value);
+        }
+
+        private static SqlQueryStructure CreateStructure(SqlLiteralRewriter literalRewriter)
+        {
+            const string entityName = "SupportedType";
+            SourceDefinition sourceDefinition = new() { PrimaryKey = new() { "ID" } };
+            sourceDefinition.Columns.Add("ID", new ColumnDefinition
+            {
+                SystemType = typeof(int),
+                DbType = DbType.Int32
+            });
+            sourceDefinition.Columns.Add("STRING_TYPES", new ColumnDefinition
+            {
+                SystemType = typeof(string),
+                DbType = DbType.String,
+                IsNullable = true
+            });
+
+            DatabaseTable table = new("DBO", "TYPE_TABLE")
+            {
+                TableDefinition = sourceDefinition,
+                SourceType = EntitySourceType.Table
+            };
+
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(x => x.EntityToDatabaseObject)
+                .Returns(new Dictionary<string, DatabaseObject> { { entityName, table } });
+            metadata.Setup(x => x.GetSourceDefinition(entityName)).Returns(sourceDefinition);
+            metadata.Setup(x => x.GetDatabaseType()).Returns(DatabaseType.Oracle);
+            metadata.Setup(x => x.GetQueryBuilder()).Returns(new OracleQueryBuilder());
+
+            string? backingColumn = "ID";
+            metadata.Setup(x => x.TryGetBackingColumn(It.IsAny<string>(), It.IsAny<string>(), out backingColumn))
+                .Returns(true);
+            metadata.As<ISqlLiteralSource>().Setup(x => x.LiteralRewriter).Returns(literalRewriter);
+
+            RuntimeConfigProvider runtimeConfigProvider =
+                TestHelper.GetRuntimeConfigProvider(TestHelper.GetRuntimeConfigLoader());
+            GQLFilterParser filterParser = new(
+                runtimeConfigProvider,
+                new Mock<IMetadataProviderFactory>().Object);
+            FindRequestContext context = new(entityName, table, isList: true)
+            {
+                FieldsToBeReturned = new List<string> { "ID" }
+            };
+
+            return new SqlQueryStructure(
+                context,
+                metadata.Object,
+                new Mock<IAuthorizationResolver>().Object,
+                runtimeConfigProvider,
+                filterParser,
+                httpContext: null!);
         }
     }
 }
