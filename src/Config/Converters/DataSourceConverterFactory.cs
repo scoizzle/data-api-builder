@@ -139,6 +139,13 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                                 throw new JsonException($"Unexpected numeric value for options {optionsSubproperty} while deserializing DataSource options.");
                                             }
 
+                                            // The schema's minimum is 0 (no cap); a negative timeout would
+                                            // otherwise reach OracleCommand.CommandTimeout at request time.
+                                            if (numberValue < 0 && string.Equals(optionsSubproperty, "command-timeout", StringComparison.Ordinal))
+                                            {
+                                                throw new JsonException($"Option {optionsSubproperty} must be 0 or greater; found {numberValue}.");
+                                            }
+
                                             optionsSubpropertyValue = numberValue;
                                         }
                                         else if (reader.TokenType is JsonTokenType.Null)

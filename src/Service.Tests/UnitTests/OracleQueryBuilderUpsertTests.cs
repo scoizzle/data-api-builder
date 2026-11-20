@@ -152,6 +152,17 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(
                 query.Contains("'inserted'", StringComparison.Ordinal),
                 $"The INSERT branch MUST emit the 'inserted' indicator. Query: {query}");
+
+            // "WHERE 1 = 0" and "SELECT COUNT(*) INTO" above are also emitted by the update and
+            // existence branches. Pin the create-policy gate and its blocked-insert cursor exactly.
+            StringAssert.Contains(
+                query,
+                $"FROM DUAL) WHERE {createDbPolicy}; IF v_dab_upsert_count > 0 THEN INSERT INTO ",
+                $"The INSERT MUST run only when the create policy admits the named values. Query: {query}");
+            StringAssert.Contains(
+                query,
+                $"'inserted' AS \"{OracleQueryBuilder.UPSERT_IDENTIFIER_COLUMN_NAME}\" FROM DUAL WHERE 1 = 0; END IF; END IF; END IF; END;",
+                $"A create-policy block MUST open an empty 'inserted' cursor so the executor returns 403. Query: {query}");
         }
 
         /// <summary>
