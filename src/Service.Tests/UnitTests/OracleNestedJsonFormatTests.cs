@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System;
 using System.Collections.Generic;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -20,9 +18,12 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
     /// ResolveObject/ResolveList reparses a stringified object or array, so a passing GraphQL
     /// test does not prove the driver returned JsonValueKind.Object/Array. Capturing the raw
     /// JsonDocument requires running the generated SQL through the Oracle executor.
+    ///
+    /// Not a test class: the probes are reference SQL for a live run. The shapes the builder
+    /// emits are pinned by OracleQueryBuilderNestedReadTests (keyed CTE, FORMAT JSON, COALESCE,
+    /// flattened CASE and the depth-1 golden).
     /// </summary>
-    [TestClass]
-    public class OracleNestedJsonFormatTests
+    public static class OracleNestedJsonFormatTests
     {
         /// <summary>
         /// SQL to run on 19c and 23c. A probe that returns a JSON string (leading quote) instead
@@ -40,18 +41,5 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             "SELECT JSON_OBJECT('o' VALUE CASE WHEN 1 = 1 THEN JSON_OBJECT('b' VALUE 1) ELSE NULL END FORMAT JSON) FROM dual",
             "SELECT JSON_OBJECT('o' VALUE COALESCE(JSON_OBJECT('b' VALUE 1), TO_CLOB(JSON_ARRAY())) FORMAT JSON) FROM dual"
         };
-
-        [TestMethod]
-        public void LiveProbes_CoverInlineMaterializedArrayCaseAndCoalesce()
-        {
-            Assert.AreEqual(8, LiveProbes.Count);
-            Assert.IsTrue(LiveProbes[2].Contains("MATERIALIZE", StringComparison.Ordinal), LiveProbes[2]);
-            Assert.IsTrue(LiveProbes[3].Contains("JSON_ARRAYAGG", StringComparison.Ordinal), LiveProbes[3]);
-            Assert.IsTrue(LiveProbes[4].Contains("FORMAT JSON", StringComparison.Ordinal), LiveProbes[4]);
-            Assert.IsTrue(LiveProbes[5].Contains("JSON_OBJECT(*)", StringComparison.Ordinal), LiveProbes[5]);
-            Assert.IsTrue(LiveProbes[6].Contains("CASE", StringComparison.Ordinal), LiveProbes[6]);
-            Assert.IsTrue(LiveProbes[7].Contains("COALESCE", StringComparison.Ordinal), LiveProbes[7]);
-            Assert.IsTrue(LiveProbes[7].Contains("FORMAT JSON", StringComparison.Ordinal), LiveProbes[7]);
-        }
     }
 }
