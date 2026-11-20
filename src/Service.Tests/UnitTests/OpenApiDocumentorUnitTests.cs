@@ -115,6 +115,22 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void CreateDocument_McpDescription_PopulatesInfoDescription()
+        {
+            const string description = "This server provides access to the company database.";
+            OpenApiDocumentor documentor = CreateDocumentor(
+                new Dictionary<string, Entity> { [ENTITY_NAME] = CreateTableEntity(restEnabled: true) },
+                CreateBookMetadata(),
+                mcpDescription: description);
+
+            documentor.CreateDocument();
+
+            Assert.IsTrue(documentor.TryGetDocument(out string? document));
+            using JsonDocument doc = JsonDocument.Parse(document!);
+            Assert.AreEqual(description, doc.RootElement.GetProperty("info").GetProperty("description").GetString());
+        }
+
+        [TestMethod]
         public void CreateDocument_CalledTwiceWithoutOverride_Throws()
         {
             OpenApiDocumentor documentor = CreateDocumentorWithBookTable();
@@ -559,7 +575,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             bool requestBodyStrict = true,
             string? baseRoute = null,
             DatabaseType databaseType = DatabaseType.MSSQL,
-            IReadOnlyDictionary<string, string>? backingToExposed = null)
+            IReadOnlyDictionary<string, string>? backingToExposed = null,
+            string? mcpDescription = null)
         {
             Mock<ISqlMetadataProvider> mockMetadataProvider = new();
             mockMetadataProvider.Setup(x => x.EntityToDatabaseObject).Returns(dbObjects);
@@ -614,7 +631,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Mock<IMetadataProviderFactory> mockFactory = new();
             mockFactory.Setup(x => x.GetMetadataProvider(It.IsAny<string>())).Returns(mockMetadataProvider.Object);
 
-            RuntimeConfig config = CreateConfig(entities, restEnabledGlobally, requestBodyStrict, baseRoute, databaseType);
+            RuntimeConfig config = CreateConfig(entities, restEnabledGlobally, requestBodyStrict, baseRoute, databaseType, mcpDescription);
             RuntimeConfigProvider configProvider = TestHelper.GenerateInMemoryRuntimeConfigProvider(config);
 
             return new OpenApiDocumentor(
@@ -629,7 +646,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             bool restEnabledGlobally,
             bool requestBodyStrict = true,
             string? baseRoute = null,
-            DatabaseType databaseType = DatabaseType.MSSQL)
+            DatabaseType databaseType = DatabaseType.MSSQL,
+            string? mcpDescription = null)
         {
             return new RuntimeConfig(
                 Schema: "test-schema",
@@ -637,7 +655,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 Runtime: new(
                     Rest: new(Enabled: restEnabledGlobally, RequestBodyStrict: requestBodyStrict),
                     GraphQL: new(),
-                    Mcp: null,
+                    Mcp: mcpDescription is null ? null : new(Description: mcpDescription),
                     Host: new(Cors: null, Authentication: null, Mode: HostMode.Development),
                     BaseRoute: baseRoute),
                 Entities: new(entities));

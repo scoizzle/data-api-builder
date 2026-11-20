@@ -211,7 +211,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 httpContextAccessor.Object,
                 authorizationService.Object,
                 provider,
-                requestValidator);
+                requestValidator,
+                authorizationResolver);
 
             // client is mapped as belonging to the sql data source.
             // customer is mapped as belonging to the cosmos data source.
