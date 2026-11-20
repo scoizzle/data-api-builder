@@ -614,6 +614,22 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             await base.FindTestWithFilterQueryStringBoolResultFilter();
         }
 
+        /// <summary>
+        /// Oracle stores '' as NULL, so a REST $filter comparing a string column to '' must
+        /// become IS NULL. Rows 1, 5 and 10 of type_table (10 has a NULL string_types) match.
+        /// The exposed primary-key field is typeid; the backing column is id.
+        /// </summary>
+        [TestMethod]
+        public async Task FindTestWithFilterQueryStringEmptyStringEquality()
+        {
+            await SetupAndRunRestApiTest(
+                primaryKeyRoute: string.Empty,
+                queryString: "?$filter=string_types eq ''&$select=typeid&$orderby=typeid",
+                entityNameOrPath: "SupportedType",
+                sqlQuery: "SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('typeid' VALUE id) RETURNING CLOB), TO_CLOB('[]')) AS data " +
+                    "FROM (SELECT id FROM type_table WHERE string_types IS NULL ORDER BY id ASC)");
+        }
+
         [TestMethod]
         [Ignore("Oracle binary collation produces different sort order than SQL Server. #27")]
         public override async Task FindWithSelectAndOrderByQueryStringsOnATable() => await base.FindWithSelectAndOrderByQueryStringsOnATable();

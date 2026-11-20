@@ -85,11 +85,12 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         {
             string oracleQuery = @"
                 SELECT JSON_ARRAYAGG(
-                    JSON_OBJECT('string_types' VALUE string_types)
+                    JSON_OBJECT('string_types' VALUE string_types) ORDER BY id
                 ) AS data
                 FROM (
-                    SELECT string_types FROM type_table
-                    WHERE string_types IN ('lksa;jdflasdf;alsdflksdfkldj', ' ', NULL)
+                    SELECT id, string_types FROM type_table
+                    WHERE (string_types IN ('lksa;jdflasdf;alsdflksdfkldj') OR string_types IS NULL)
+                    ORDER BY id
                 )";
             await InQueryWithNullAndEmptyvalues(oracleQuery);
         }

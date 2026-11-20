@@ -90,7 +90,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// untilIndex: 2
         /// generate <c>a = A AND b = B AND c > C</c>
         /// </summary>
-        private string MakePaginationInequality(List<PaginationColumn> columns, int untilIndex)
+        protected string MakePaginationInequality(List<PaginationColumn> columns, int untilIndex)
         {
             StringBuilder result = new();
             for (int i = 0; i <= untilIndex; i++)
@@ -107,6 +107,30 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 {
                     result.Append(" AND ");
                 }
+            }
+
+            return result.ToString();
+        }
+
+        /// <summary>
+        /// Builds the equality prefix used by a keyset pagination predicate for the columns
+        /// before <paramref name="columnIndex"/>, terminated with " AND ".
+        /// E.g. for columns [a, b, c] and columnIndex 2, generate <c>a = A AND b = B AND </c>.
+        /// Returns the empty string when <paramref name="columnIndex"/> is 0.
+        /// </summary>
+        protected string MakePaginationEqualityPrefix(List<PaginationColumn> columns, int columnIndex)
+        {
+            if (columnIndex <= 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder result = new();
+            for (int i = 0; i < columnIndex; i++)
+            {
+                string opAndParam = columns[i].Value is not null ?
+                    $"= {columns[i].ParamName}" : "is NULL";
+                result.Append($"{Build(columns[i], printDirection: false)} {opAndParam} AND ");
             }
 
             return result.ToString();

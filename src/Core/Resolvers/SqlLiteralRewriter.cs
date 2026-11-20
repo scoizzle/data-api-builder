@@ -1,31 +1,99 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using Azure.DataApiBuilder.Core.Models;
 using Microsoft.OData.UriParser;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
 {
     /// <summary>
-    /// Engine-specific literal adjustments. The shared visitor and query structure call this
-    /// instead of branching on a database type.
+    /// Engine-specific literal decisions. The predicate producers and the query structure call
+    /// this instead of branching on a database type. It answers with an operation; it never
+    /// returns SQL text.
     /// </summary>
     internal class SqlLiteralRewriter
     {
         public static readonly SqlLiteralRewriter Shared = new();
 
         /// <summary>
-        /// Rewrites a property-vs-empty-string comparison when the engine stores '' as NULL.
+        /// True when the engine stores the given value as NULL (Oracle: the empty string).
         /// </summary>
-        public virtual bool TryRewriteEmptyStringComparison(
+        public virtual bool StoresEmptyStringAsNull(object? value) => false;
+
+        /// <summary>
+        /// Maps an equality comparison against a value stored as NULL to the matching null test.
+        /// Equal becomes IS and NotEqual becomes IS_NOT; other operations are not rewritten.
+        /// </summary>
+        public virtual bool TryGetEmptyStringNullTest(
+            PredicateOperation comparison,
+            object? value,
+            out PredicateOperation nullTestOperation)
+        {
+            nullTestOperation = PredicateOperation.None;
+            if (!StoresEmptyStringAsNull(value))
+            {
+                return false;
+            }
+
+            switch (comparison)
+            {
+                case PredicateOperation.Equal:
+                    nullTestOperation = PredicateOperation.IS;
+                    return true;
+                case PredicateOperation.NotEqual:
+                    nullTestOperation = PredicateOperation.IS_NOT;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// OData form of the null test: a property compared to a constant on either side.
+        /// </summary>
+        public bool TryGetEmptyStringNullTest(
             BinaryOperatorKind operatorKind,
             SingleValueNode left,
             SingleValueNode right,
             out SingleValuePropertyAccessNode? propertyNode,
-            out bool isNullPredicate)
+            out PredicateOperation nullTestOperation)
         {
             propertyNode = null;
-            isNullPredicate = false;
-            return false;
+            nullTestOperation = PredicateOperation.None;
+
+            PredicateOperation comparison;
+            switch (operatorKind)
+            {
+                case BinaryOperatorKind.Equal:
+                    comparison = PredicateOperation.Equal;
+                    break;
+                case BinaryOperatorKind.NotEqual:
+                    comparison = PredicateOperation.NotEqual;
+                    break;
+                default:
+                    return false;
+            }
+
+            SingleValueNode unwrappedLeft = UnwrapConvertNode(left);
+            SingleValueNode unwrappedRight = UnwrapConvertNode(right);
+
+            SingleValueNode constantSide = unwrappedRight;
+            SingleValuePropertyAccessNode? property = unwrappedLeft as SingleValuePropertyAccessNode;
+            if (property is null)
+            {
+                property = unwrappedRight as SingleValuePropertyAccessNode;
+                constantSide = unwrappedLeft;
+            }
+
+            if (property is null
+                || constantSide is not ConstantNode constant
+                || !TryGetEmptyStringNullTest(comparison, constant.Value, out nullTestOperation))
+            {
+                return false;
+            }
+
+            propertyNode = property;
+            return true;
         }
 
         /// <summary>
@@ -55,49 +123,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     }
 
     /// <summary>
-    /// Oracle stores the empty string as NULL, and compares string binds to DATE/TIMESTAMP
-    /// columns with the session NLS format. Rewrite both before the SQL is sent.
+    /// Oracle stores the empty string as NULL and compares string binds to DATE/TIMESTAMP
+    /// columns with the session NLS format. The first rule is answered when the predicate is
+    /// generated; the second coerces a bind before it is sent.
     /// </summary>
     internal sealed class OracleSqlLiteralRewriter : SqlLiteralRewriter
     {
-        public override bool TryRewriteEmptyStringComparison(
-            BinaryOperatorKind operatorKind,
-            SingleValueNode left,
-            SingleValueNode right,
-            out SingleValuePropertyAccessNode? propertyNode,
-            out bool isNullPredicate)
-        {
-            propertyNode = null;
-            isNullPredicate = false;
-
-            if (operatorKind is not (BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual))
-            {
-                return false;
-            }
-
-            SingleValueNode unwrappedLeft = UnwrapConvertNode(left);
-            SingleValueNode unwrappedRight = UnwrapConvertNode(right);
-
-            SingleValueNode? constantSide = unwrappedRight;
-            SingleValuePropertyAccessNode? property = unwrappedLeft as SingleValuePropertyAccessNode;
-            if (property is null)
-            {
-                property = unwrappedRight as SingleValuePropertyAccessNode;
-                constantSide = unwrappedLeft;
-            }
-
-            if (property is null
-                || constantSide is not ConstantNode constant
-                || constant.Value is not string constantString
-                || constantString.Length != 0)
-            {
-                return false;
-            }
-
-            propertyNode = property;
-            isNullPredicate = operatorKind is BinaryOperatorKind.Equal;
-            return true;
-        }
+        public override bool StoresEmptyStringAsNull(object? value) => value is string text && text.Length == 0;
 
         public override object? CoerceParameterValue(
             object? value,

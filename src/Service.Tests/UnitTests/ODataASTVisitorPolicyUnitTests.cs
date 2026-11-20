@@ -1,10 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using Azure.DataApiBuilder.Auth;
+using Azure.DataApiBuilder.Config.ObjectModel;
+using Azure.DataApiBuilder.Core.Models;
+using Azure.DataApiBuilder.Core.Parsers;
 using Azure.DataApiBuilder.Core.Resolvers;
+using Azure.DataApiBuilder.Core.Services;
 using Microsoft.OData.Edm;
 using Microsoft.OData.UriParser;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -45,15 +51,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
+            bool matched = new OracleSqlLiteralRewriter().TryGetEmptyStringNullTest(
                 BinaryOperatorKind.Equal,
                 propertyNode,
                 emptyStringNode,
                 out SingleValuePropertyAccessNode? resolvedProperty,
-                out bool isNullPredicate);
+                out PredicateOperation nullTestOperation);
 
             Assert.IsTrue(matched);
-            Assert.IsTrue(isNullPredicate);
+            Assert.AreEqual(PredicateOperation.IS, nullTestOperation);
             Assert.AreSame(propertyNode, resolvedProperty);
         }
 
@@ -63,15 +69,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
+            bool matched = new OracleSqlLiteralRewriter().TryGetEmptyStringNullTest(
                 BinaryOperatorKind.NotEqual,
                 propertyNode,
                 emptyStringNode,
                 out SingleValuePropertyAccessNode? resolvedProperty,
-                out bool isNullPredicate);
+                out PredicateOperation nullTestOperation);
 
             Assert.IsTrue(matched);
-            Assert.IsFalse(isNullPredicate);
+            Assert.AreEqual(PredicateOperation.IS_NOT, nullTestOperation);
             Assert.AreSame(propertyNode, resolvedProperty);
         }
 
@@ -81,15 +87,15 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
+            bool matched = new OracleSqlLiteralRewriter().TryGetEmptyStringNullTest(
                 BinaryOperatorKind.Equal,
                 emptyStringNode,
                 propertyNode,
                 out SingleValuePropertyAccessNode? resolvedProperty,
-                out bool isNullPredicate);
+                out PredicateOperation nullTestOperation);
 
             Assert.IsTrue(matched);
-            Assert.IsTrue(isNullPredicate);
+            Assert.AreEqual(PredicateOperation.IS, nullTestOperation);
             Assert.AreSame(propertyNode, resolvedProperty);
         }
 
@@ -99,7 +105,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode nonEmptyStringNode = CreateStringConstantNode("SciFi");
 
-            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
+            bool matched = new OracleSqlLiteralRewriter().TryGetEmptyStringNullTest(
                 BinaryOperatorKind.Equal,
                 propertyNode,
                 nonEmptyStringNode,
@@ -115,7 +121,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = SqlLiteralRewriter.Shared.TryRewriteEmptyStringComparison(
+            bool matched = SqlLiteralRewriter.Shared.TryGetEmptyStringNullTest(
                 BinaryOperatorKind.Equal,
                 propertyNode,
                 emptyStringNode,
@@ -131,7 +137,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SingleValuePropertyAccessNode propertyNode = CreatePropertyNode("categoryName");
             ConstantNode emptyStringNode = CreateStringConstantNode(string.Empty);
 
-            bool matched = new OracleSqlLiteralRewriter().TryRewriteEmptyStringComparison(
+            bool matched = new OracleSqlLiteralRewriter().TryGetEmptyStringNullTest(
                 BinaryOperatorKind.GreaterThan,
                 propertyNode,
                 emptyStringNode,
@@ -139,6 +145,55 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 out _);
 
             Assert.IsFalse(matched);
+        }
+
+        private delegate void TryGetBackingColumnCallback(string entity, string field, out string? column);
+
+        [TestMethod]
+        public void OraclePolicyEmptyStringEquality_ProducesIsNullPredicate()
+        {
+            BinaryOperatorNode node = new(
+                BinaryOperatorKind.Equal,
+                CreatePropertyNode("title"),
+                CreateStringConstantNode(string.Empty));
+
+            Assert.AreEqual("(\"TITLE\" IS NULL)", CreatePolicyVisitor().Visit(node));
+        }
+
+        [TestMethod]
+        public void OraclePolicyEmptyStringInequality_ProducesIsNotNullPredicate()
+        {
+            BinaryOperatorNode node = new(
+                BinaryOperatorKind.NotEqual,
+                CreatePropertyNode("title"),
+                CreateStringConstantNode(string.Empty));
+
+            Assert.AreEqual("(\"TITLE\" IS NOT NULL)", CreatePolicyVisitor().Visit(node));
+        }
+
+        private static ODataASTVisitor CreatePolicyVisitor()
+        {
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(provider => provider.GetQueryBuilder()).Returns(new OracleQueryBuilder());
+            string? backingColumn;
+            metadata.Setup(provider => provider.TryGetBackingColumn(It.IsAny<string>(), It.IsAny<string>(), out backingColumn))
+                .Callback(new TryGetBackingColumnCallback((string _, string _, out string? column) => column = "TITLE"))
+                .Returns(true);
+            metadata.As<ISqlLiteralSource>().Setup(source => source.LiteralRewriter).Returns(new OracleSqlLiteralRewriter());
+
+            Mock<BaseSqlQueryStructure> structure = new(
+                metadata.Object,
+                Mock.Of<IAuthorizationResolver>(),
+                null!,
+                null,
+                string.Empty,
+                null,
+                null,
+                EntityActionOperation.None,
+                false);
+            structure.Object.EntityName = "Book";
+
+            return new ODataASTVisitor(structure.Object, metadata.Object);
         }
     }
 }

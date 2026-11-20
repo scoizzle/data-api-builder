@@ -384,9 +384,23 @@ public class KeysetPaginationPredicate
     /// </summary>
     public List<PaginationColumn> Columns { get; }
 
-    public KeysetPaginationPredicate(List<PaginationColumn> columns)
+    /// <summary>
+    /// True when the last column of <see cref="Columns"/> can hold NULL, so a keyset predicate
+    /// that only compares it must also reach (or skip) its NULL block.
+    /// <para>
+    /// It is false only when the query is not grouped and the last cursor column is a primary-key
+    /// column: a primary key is never NULL. A grouped cursor has no primary-key tie-break, and a
+    /// client sort can leave a nullable non-key column in the final position (for example
+    /// ordering by the primary key and then a nullable title), so both cases are true.
+    /// This describes the last column only; it does not claim the cursor identifies a row.
+    /// </para>
+    /// </summary>
+    public bool TerminatingColumnCanBeNull { get; }
+
+    public KeysetPaginationPredicate(List<PaginationColumn> columns, bool terminatingColumnCanBeNull = false)
     {
         Columns = columns;
+        TerminatingColumnCanBeNull = terminatingColumnCanBeNull;
     }
 }
 

@@ -576,7 +576,7 @@ namespace Azure.DataApiBuilder.Core.Services
             return new string(chars);
         }
 
-        private static DataApiBuilderException MetadataTimeoutException(string operation, Exception inner)
+        internal static DataApiBuilderException MetadataTimeoutException(string operation, Exception inner)
         {
             return new DataApiBuilderException(
                 message: $"Oracle metadata command timed out while {operation}. " +

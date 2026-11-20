@@ -202,6 +202,24 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             SetBaseAutoProperty(provider, "SqlQueryBuilder", queryBuilder.Object);
         }
 
+        [TestMethod]
+        public void MetadataTimeoutMapping_IsServiceUnavailableInitializationError()
+        {
+            // A metadata command that exceeds command-timeout must fail initialization with a
+            // clear 503 instead of hanging startup or surfacing a raw ORA-01013.
+            Azure.DataApiBuilder.Service.Exceptions.DataApiBuilderException exception =
+                OracleMetadataProvider.MetadataTimeoutException(
+                    "reading insert triggers for HR.T",
+                    new InvalidOperationException("ORA-01013: user requested cancel of current operation"));
+
+            Assert.AreEqual(System.Net.HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+            Assert.AreEqual(
+                Azure.DataApiBuilder.Service.Exceptions.DataApiBuilderException.SubStatusCodes.ErrorInInitialization,
+                exception.SubStatusCode);
+            StringAssert.Contains(exception.Message, "reading insert triggers for HR.T");
+            StringAssert.Contains(exception.Message, "command-timeout");
+        }
+
         private static void SetBaseField(OracleMetadataProvider provider, string fieldName, object value) =>
             typeof(OracleMetadataProvider).BaseType!.GetField(
                 fieldName,

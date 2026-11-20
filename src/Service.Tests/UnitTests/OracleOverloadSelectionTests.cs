@@ -76,6 +76,30 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         [TestMethod]
+        public void IdenticalInputFormalsInSeveralOverloadsFailStartup()
+        {
+            // Two overloads with the same required formals cannot be told apart from the
+            // configured names alone. Picking the lowest number silently could run a different
+            // operation (for example a delete instead of an update), so this must fail closed.
+            List<OracleMetadataProvider.OracleArgumentRow> rows = new()
+            {
+                new("p_id", "NUMBER", "IN", 1, "1"),
+                new("p_id", "NUMBER", "IN", 1, "2"),
+            };
+
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(() =>
+                OracleMetadataProvider.SelectOracleOverload(
+                    rows,
+                    configuredParameterNames: new[] { "p_id" },
+                    qualifiedName: "SYSTEM.PKG.DELETE_OR_UPDATE"));
+
+            StringAssert.Contains(ex.Message, "More than one overload");
+            StringAssert.Contains(ex.Message, "#1");
+            StringAssert.Contains(ex.Message, "#2");
+            StringAssert.Contains(ex.Message, "SYSTEM.PKG.DELETE_OR_UPDATE");
+        }
+
+        [TestMethod]
         public void ZeroConfiguredNamesDoesNotChooseAnAllDefaultedOverload()
         {
             List<OracleMetadataProvider.OracleArgumentRow> rows = new()

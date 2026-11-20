@@ -190,6 +190,33 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             PerformTestEqualsForExtendedTypes(type, expected, actual.GetProperty("items").ToString());
         }
 
+        /// <summary>
+        /// Oracle stores '' as NULL, so an IN list containing "" must match NULL rows through
+        /// IS NULL rather than binding the empty string into the IN list.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("[\"\"]", "string_types IS NULL", DisplayName = "in [''] is a NULL test")]
+        [DataRow("[\"\", \"lksa;jdflasdf;alsdflksdfkldj\"]", "(string_types IN ('lksa;jdflasdf;alsdflksdfkldj') OR string_types IS NULL)", DisplayName = "in ['', value] is IN or NULL")]
+        public async Task Oracle_graphql_in_filter_treats_empty_string_as_null(string gqlList, string sqlPredicate)
+        {
+            string gqlQuery = @"{
+                supportedTypes(first: 100 orderBy: { typeid: ASC } filter: { string_types: { in: " + gqlList + @" } }) {
+                    items {
+                        typeid, string_types
+                    }
+                }
+            }";
+
+            string dbQuery = $@"
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('typeid' VALUE typeid, 'string_types' VALUE string_types) RETURNING CLOB), TO_CLOB('[]')) AS data
+                FROM (SELECT id AS typeid, string_types FROM type_table WHERE {sqlPredicate} ORDER BY id ASC)";
+
+            JsonElement actual = await ExecuteGraphQLRequestAsync(gqlQuery, "supportedTypes", isAuthenticated: false);
+            string expected = await GetDatabaseResultAsync(dbQuery);
+
+            SqlTestHelper.PerformTestEqualJsonStrings(expected, actual.GetProperty("items").ToString());
+        }
+
         protected override string MakeQueryOnTypeTable(List<DabField> queryFields, int id)
         {
             return MakeQueryOnTypeTable(queryFields, filterValue: id.ToString(), filterField: "id");
