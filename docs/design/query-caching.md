@@ -95,7 +95,7 @@ __Data returned by the database is received over the same TLS connection establi
 
 ### Access token metadata usage
 
-Response caching is disabled for an MSSQL or DWSQL data source when its
+Response caching is disabled for an MSSQL, DWSQL or Oracle data source when its
 `set-session-context` option is enabled. This check uses the data source being
 queried, including sources loaded through `data-source-files`, not the default
 source's options. Both cache reads and writes are bypassed, including

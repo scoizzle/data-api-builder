@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.IO;
 using System.IO.Abstractions;
 using System.Net;
@@ -56,6 +57,72 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         {
             PostgreSqlMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
             Assert.AreEqual(expected, actual);
+        }
+
+        [DataTestMethod]
+        [DataRow("HR", "User Id=hr;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("Hr", "User Id=\"Hr\";Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("HR", "User Id=\"HR\";Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("SYSTEM", "User Id=SYSTEM;Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("", "Data Source=localhost:1521/x", false)]
+        [DataRow("", "not-a-connection-string", false)]
+        // #54: wallet / external / token authentication; the database decides the user.
+        [DataRow("", "User Id=/;Data Source=localhost:1521/x", false)]
+        [DataRow("", "User Id= / ;Data Source=localhost:1521/x", false)]
+        // #54: proxy authentication runs the session as the bracketed target user.
+        [DataRow("APP", "User Id=px[app];Password=x;Data Source=localhost:1521/x", true)]
+        [DataRow("App", "User Id=px[\"App\"];Password=x;Data Source=localhost:1521/x", true)]
+        // ODP.NET rejects a quoted proxy user followed by a target, so there is no schema to read.
+        [DataRow("", "User Id=\"Px\"[\"App\"];Password=x;Data Source=localhost:1521/x", false)]
+        [DataRow("a[b]", "User Id=\"a[b]\";Password=x;Data Source=localhost:1521/x", true)]
+        public void OracleConnectionStringParsingDoesNotFallBackToSystem(string expectedSchema, string connectionString, bool expectedSuccess)
+        {
+            bool success = OracleMetadataProvider.TryGetSchemaFromConnectionString(connectionString, out string actual);
+            Assert.AreEqual(expectedSuccess, success);
+            Assert.AreEqual(expectedSchema, actual);
+        }
+
+        /// <summary>
+        /// #59: the session CURRENT_SCHEMA (what unqualified SQL in that session resolves
+        /// against) wins over the connection-string User ID; the User ID is only the fallback.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("APP", "APP_RO", "APP", DisplayName = "CURRENT_SCHEMA wins over User Id")]
+        [DataRow("Hr", "HR", "Hr", DisplayName = "quoted CURRENT_SCHEMA keeps its spelling")]
+        [DataRow("APP", null, "APP", DisplayName = "CURRENT_SCHEMA without User Id (User Id=/)")]
+        [DataRow(null, "APP_RO", "APP_RO", DisplayName = "User Id fallback when the session query failed")]
+        [DataRow("", "APP_RO", "APP_RO", DisplayName = "User Id fallback when CURRENT_SCHEMA is empty")]
+        public void OracleDefaultSchemaPrefersSessionCurrentSchema(string sessionCurrentSchema, string connectionStringSchema, string expected)
+        {
+            Assert.AreEqual(expected, OracleMetadataProvider.SelectDefaultSchema(sessionCurrentSchema, connectionStringSchema));
+        }
+
+        [TestMethod]
+        public void OracleDefaultSchemaWithNeitherSourceThrows()
+        {
+            Assert.ThrowsException<DataApiBuilderException>(() => OracleMetadataProvider.SelectDefaultSchema(null, null));
+        }
+
+        [TestMethod]
+        public void OracleDefaultSchemaQueryReadsCurrentSchemaNotUser()
+        {
+            Assert.AreEqual("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL", OracleMetadataProvider.CURRENT_SCHEMA_QUERY);
+        }
+
+        [DataTestMethod]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow("SELECT hr.books_seq.NEXTVAL INTO :new.id FROM dual", "id")]
+        [DataRow(":new.id := books_seq.NEXTVAL;", "id")]
+        [DataRow(":new.id := hr.books_seq.NEXTVAL;", "id")]
+        [DataRow("IF :new.id IS NULL THEN :new.id := books_seq.NEXTVAL; END IF;", "id")]
+        [DataRow("SELECT books_seq.NEXTVAL INTO :new.\"ID\" FROM dual", "ID")]
+        public void OracleTriggerParserFindsSequenceAssignedColumns(string triggerBody, string expectedColumn)
+        {
+            IReadOnlyList<string> columns = OracleMetadataProvider.FindTriggerAssignedColumnNames(triggerBody);
+            Assert.AreEqual(1, columns.Count, string.Join(",", columns));
+            Assert.IsTrue(
+                columns.Any(column => column.Equals(expectedColumn, StringComparison.OrdinalIgnoreCase)),
+                string.Join(",", columns));
         }
 
         /// <summary>

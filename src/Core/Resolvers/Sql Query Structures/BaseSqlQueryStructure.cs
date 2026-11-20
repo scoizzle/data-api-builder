@@ -108,7 +108,53 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
             }
 
-            return base.MakeDbConnectionParam(value, paramName, lengthOverride);
+            if (MetadataProvider is ISqlLiteralSource literalSource
+                && !string.IsNullOrEmpty(paramName)
+                && GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? coercedColumn))
+            {
+                value = literalSource.LiteralRewriter.CoerceParameterValue(
+                    value,
+                    paramName,
+                    coercedColumn.SystemType,
+                    (text, name, systemType) => GetParamAsSystemType(text, name, systemType));
+            }
+
+            string encodedName = base.MakeDbConnectionParam(value, paramName, lengthOverride);
+            StampOracleStringBind(encodedName, paramName);
+            return encodedName;
+        }
+
+        /// <summary>
+        /// Copies Oracle LOB and national-character facts onto the parameter that was just
+        /// created. The shared <see cref="DbConnectionParam"/> model is unchanged; the executor
+        /// reads the facts when it chooses an Oracle bind type.
+        /// </summary>
+        private void StampOracleStringBind(string encodedName, string? paramName)
+        {
+            if (MetadataProvider.GetDatabaseType() is not DatabaseType.Oracle
+                || string.IsNullOrEmpty(paramName)
+                || !Parameters.TryGetValue(encodedName, out DbConnectionParam? created)
+                || !GetUnderlyingSourceDefinition().Columns.TryGetValue(paramName, out ColumnDefinition? column))
+            {
+                return;
+            }
+
+            OracleObjectFacts.LobFacts facts = OracleObjectFacts.Column(column);
+            // Fixed CHAR/NCHAR must be their own bind kinds. Oracle blank-pads only when both
+            // sides of the comparison are CHAR (or both NCHAR). A VARCHAR2/NVARCHAR2 bind of
+            // 'AB' does not match CHAR(4) 'AB  '.
+            OracleStringBindFacts.Kind kind = facts.IsNClob
+                ? OracleStringBindFacts.Kind.NClob
+                : facts.IsClob
+                    ? OracleStringBindFacts.Kind.Clob
+                    : facts.IsFixedChar && facts.IsNChar
+                        ? OracleStringBindFacts.Kind.FixedNChar
+                        : facts.IsFixedChar
+                            ? OracleStringBindFacts.Kind.Char
+                            : facts.IsNChar
+                                ? OracleStringBindFacts.Kind.NChar
+                                : OracleStringBindFacts.Kind.None;
+            OracleStringBindFacts.Set(created, kind);
         }
 
         /// <summary>

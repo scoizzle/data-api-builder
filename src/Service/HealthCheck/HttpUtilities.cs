@@ -7,15 +7,19 @@ using System.Data.Common;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Authorization;
 using Azure.DataApiBuilder.Core.Configurations;
+using Azure.DataApiBuilder.Core.Resolvers;
+using Azure.DataApiBuilder.Core.Resolvers.Factories;
 using Azure.DataApiBuilder.Core.Services;
 using Azure.DataApiBuilder.Core.Services.MetadataProviders;
 using Azure.DataApiBuilder.Service.GraphQLBuilder;
 using Microsoft.Extensions.Logging;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.HealthCheck
 {
@@ -28,6 +32,7 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
         private HttpClient _httpClient;
         private IMetadataProviderFactory _metadataProviderFactory;
         private RuntimeConfigProvider _runtimeConfigProvider;
+        private readonly IAbstractQueryManagerFactory? _queryManagerFactory;
 
         /// <summary>
         /// HttpUtility constructor.
@@ -36,12 +41,15 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
         /// <param name="metadataProviderFactory">MetadataProviderFactory</param>
         /// <param name="runtimeConfigProvider">RuntimeConfigProvider</param>
         /// <param name="httpClientFactory">HttpClientFactory</param>
+        /// <param name="queryManagerFactory">Query executors; the Oracle probe connects through the Oracle executor.</param>
         public HttpUtilities(
             ILogger<HttpUtilities> logger,
             IMetadataProviderFactory metadataProviderFactory,
             RuntimeConfigProvider runtimeConfigProvider,
-            IHttpClientFactory httpClientFactory)
+            IHttpClientFactory httpClientFactory,
+            IAbstractQueryManagerFactory? queryManagerFactory = null)
         {
+            _queryManagerFactory = queryManagerFactory;
             _logger = logger;
             _metadataProviderFactory = metadataProviderFactory;
             _runtimeConfigProvider = runtimeConfigProvider;
@@ -51,6 +59,11 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
         // Executes the DB query by establishing a connection to the DB.
         public async Task<string?> ExecuteDbQueryAsync(string query, string connectionString, DbProviderFactory providerFactory, DatabaseType databaseType)
         {
+            if (databaseType is DatabaseType.Oracle && _queryManagerFactory is not null)
+            {
+                return await ExecuteOracleDbQueryAsync(query);
+            }
+
             string? errorMessage = null;
             // Execute the query on DB and return the response time.
             DbConnection? connection = providerFactory.CreateConnection();
@@ -84,6 +97,40 @@ namespace Azure.DataApiBuilder.Service.HealthCheck
             }
 
             return errorMessage;
+        }
+
+        /// <summary>
+        /// Runs the Oracle probe on a connection from the Oracle query executor, so it uses the same
+        /// prepared connection string (hosted TLS check, bounded statement cache) and managed
+        /// identity token as requests. The probe does not set session context.
+        /// </summary>
+        private async Task<string?> ExecuteOracleDbQueryAsync(string query)
+        {
+            try
+            {
+                if (_queryManagerFactory!.GetQueryExecutor(DatabaseType.Oracle) is not OracleQueryExecutor executor)
+                {
+                    return "The Oracle query executor is not available.";
+                }
+
+                string dataSourceName = _runtimeConfigProvider.GetConfig().DefaultDataSourceName;
+                using OracleConnection connection = executor.CreateConnection(dataSourceName);
+                await executor.SetManagedIdentityAccessTokenIfAnyAsync(connection, dataSourceName, CancellationToken.None);
+                using DbCommand command = connection.CreateCommand();
+                command.CommandText = query;
+                await connection.OpenAsync();
+                using (DbDataReader reader = await command.ExecuteReaderAsync())
+                {
+                    _logger.LogTrace("The health check query for datasource executed successfully.");
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("An exception occurred while executing the health check query: {message}", ex.Message);
+                return ex.Message;
+            }
         }
 
         // Executes the REST query by sending a GET request to the API.

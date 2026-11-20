@@ -15,6 +15,7 @@ This package is intended for developers who want to embed or extend the Data API
 - Azure Cosmos DB (NoSQL)
 - PostgreSQL
 - MySQL
+- Oracle Database 19c and later (preview)
 
 ## Key Capabilities
 

@@ -694,8 +694,15 @@ public record RuntimeConfig
     public virtual bool CanUseCache(string dataSourceName)
     {
         DataSource dataSource = GetDataSourceFromDataSourceName(dataSourceName);
-        bool setSessionContextEnabled = dataSource.DatabaseType is DatabaseType.MSSQL or DatabaseType.DWSQL
-            && dataSource.GetTypedOptions<MsSqlOptions>()?.SetSessionContext is true;
+        bool setSessionContextEnabled = dataSource.DatabaseType switch
+        {
+            DatabaseType.MSSQL or DatabaseType.DWSQL =>
+                dataSource.GetTypedOptions<MsSqlOptions>()?.SetSessionContext is true,
+            // Oracle forwards claims as application-context values when the option is set.
+            DatabaseType.Oracle =>
+                dataSource.GetTypedOptions<OracleOptions>()?.SetSessionContext is true,
+            _ => false,
+        };
         return IsCachingEnabled && !setSessionContextEnabled;
     }
 
@@ -721,7 +728,7 @@ public record RuntimeConfig
     private void SetupDataSourcesUsed()
     {
         SqlDataSourceUsed = _dataSourceNameToDataSource.Values.Any
-            (x => x.DatabaseType is DatabaseType.MSSQL || x.DatabaseType is DatabaseType.PostgreSQL || x.DatabaseType is DatabaseType.MySQL || x.DatabaseType is DatabaseType.DWSQL);
+            (x => x.DatabaseType is DatabaseType.MSSQL || x.DatabaseType is DatabaseType.PostgreSQL || x.DatabaseType is DatabaseType.MySQL || x.DatabaseType is DatabaseType.DWSQL || x.DatabaseType is DatabaseType.Oracle);
 
         CosmosDataSourceUsed = _dataSourceNameToDataSource.Values.Any
             (x => x.DatabaseType is DatabaseType.CosmosDB_NoSQL);

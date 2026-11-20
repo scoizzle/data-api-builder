@@ -112,6 +112,82 @@ namespace Azure.DataApiBuilder.Service.Tests.Caching
                 "The default source must not disable caching for an eligible child source.");
         }
 
+        /// <summary>
+        /// A read inside an uncommitted local Oracle mutation transaction sees that
+        /// transaction's writes. It must neither be served from the cache nor populate it,
+        /// or other callers would read uncommitted (possibly rolled back) rows.
+        /// </summary>
+        [TestMethod]
+        public async Task ExecuteAsync_InsideLocalMutationTransaction_NeitherReadsNorFillsCache()
+        {
+            const string uncommitted = "[{\"owner\":\"uncommitted\"}]";
+            RuntimeConfig config = CreateConfig(DatabaseType.Oracle, defaultSessionContext: false, storedProcedure: false);
+            Assert.IsTrue(config.CanUseCache(CHILD_SOURCE), "The Oracle child source must be cache-eligible outside a transaction.");
+            using FusionCache fusionCache = new(new FusionCacheOptions());
+            HttpContextAccessor accessor = new() { HttpContext = CreateCaller("alice") };
+            DabCacheService cache = new(fusionCache, null, accessor);
+            Mock<IQueryExecutor> executor = CreateExecutor(accessor);
+            SqlQueryEngine engine = CreateEngine(config, cache, accessor, executor.Object, DatabaseType.Oracle, storedProcedure: false);
+            LocalTransactionSession session = new(uncommitted);
+
+            // Cold cache: the transactional read must not populate it.
+            using (MutationWork.Push(session))
+            {
+                AssertRows(uncommitted, await ReadAsync(engine, storedProcedure: false));
+            }
+
+            AssertRows(Payload(accessor), await ReadAsync(engine, storedProcedure: false));
+
+            // Warm cache: the transactional read must not be served from it.
+            using (MutationWork.Push(session))
+            {
+                AssertRows(uncommitted, await ReadAsync(engine, storedProcedure: false));
+            }
+
+            Assert.AreEqual(2, session.Calls, "Both transactional reads must run on the mutation session.");
+            Assert.AreEqual(1, executor.Invocations.Count(call => call.Method.Name == nameof(IQueryExecutor.ExecuteQueryAsync)),
+                "Only the read outside the transaction reaches the pooled executor.");
+            JsonElement? cached = cache.TryGet<JsonElement?>(new DatabaseQueryMetadata(QUERY_TEXT, CHILD_SOURCE, new()), EntityCacheLevel.L1)!.Value.Value;
+            AssertRows(Payload(accessor), cached!.Value.GetRawText());
+        }
+
+        private sealed class LocalTransactionSession : IMutationWorkSession
+        {
+            private readonly string _payload;
+
+            public LocalTransactionSession(string payload)
+            {
+                _payload = payload;
+            }
+
+            public int Calls { get; private set; }
+
+            public bool IsInLocalTransaction => true;
+
+            public Task<TResult?> ExecuteQueryAsync<TResult>(
+                string sqltext,
+                IDictionary<string, DbConnectionParam> parameters,
+                Func<DbDataReader, List<string>?, Task<TResult>>? dataReaderHandler,
+                string dataSourceName,
+                HttpContext? httpContext,
+                List<string>? args)
+            {
+                Calls++;
+                return Task.FromResult((TResult?)(object)JsonDocument.Parse(_payload));
+            }
+
+            public TResult? ExecuteQuery<TResult>(
+                string sqltext,
+                IDictionary<string, DbConnectionParam> parameters,
+                Func<DbDataReader, List<string>?, TResult>? dataReaderHandler,
+                HttpContext? httpContext,
+                List<string>? args,
+                string dataSourceName)
+            {
+                throw new NotSupportedException("The engine reads asynchronously.");
+            }
+        }
+
         private static DefaultHttpContext CreateCaller(string? caller)
         {
             DefaultHttpContext context = new();

@@ -1,0 +1,171 @@
+{
+  "description": "Every [Ignore] on an Oracle-category test. maxIgnored only shrinks. Each issue number must appear in the Ignore message as #N. Regenerated from grep of [Ignore] after issue #27; a live TRX was not available in this change. Six Assert.Inconclusive-only stubs in OracleMultipleCreateMutationTests were converted to [Ignore] by #70; they were already skipped but not counted. Six GraphQLMutationTestBase scenarios that had no Oracle wrapper were added as [Ignore] by #74 so the baseline counts them.",
+  "maxIgnored": 33,
+  "ignores": {
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestOnTableWithDatabasePolicy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "No DBMS_RLS policy is installed on revenues."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestOnTableWithSecurityPolicy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "No DBMS_RLS policy is installed on revenues."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestVerifyMaintainColumnOrderForOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappedFieldsAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappingAfterSingleKeyPaginationAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithDifferentMappingFirstSingleKeyPaginationAndOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithFirstAndSpacedColumnOrderBy": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithIntTypeNullValuesOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsMappedEntityOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsOrderByAsc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringAllFieldsOrderByDesc": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithQueryStringOnViews": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithSelectFieldsWithSomeKeyFieldsOnViewWithMultipleKeyFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithSelectFieldsWithoutKeyFieldsOnViewWithMultipleKeyFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestWithUnMappedFieldsToBeReturned": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Unmapped REST names keep catalog spelling. The expected JSON still uses lowercase treeid. Not verified live."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindTestsWithFilterQueryStringOneOpFilter": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces different filtered order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindWithSelectAndOrderByQueryStringsOnATable": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleFindApiTests.FindWithSelectAndOrderByQueryStringsOnAView": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle binary collation produces a different order than SQL Server."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGQLFilterTests.TestGetNullIntFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.CanCreateItemWithCultureInvariant": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "Added without a live Oracle run; verify NUMBER(18,2) round-trips under each culture."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.ExecuteMutationWithOnlyTypenameInSelectionSet": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "Added without a live Oracle run; verify stored-procedure __typename selection."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.InsertMutationWithDefaultBuiltInFunctions": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "The base asserts SQL Server defaults: Oracle's random_number has no default and default_string_with_parenthesis is '() '. Not run live."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.TestViolatingOneToOneRelationship": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "Added without a live Oracle run; verify ORA-00001 on book_website_placements.book_id."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.UpdateWithInvalidIdentifier": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "Added without a live Oracle run; verify the invalid-identifier error."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLMutationTests.UpdateWithNoNewValues": {
+      "issue": 74,
+      "owner": "oracle-tests",
+      "reason": "Added without a live Oracle run; verify the no-new-values error."
+    },
+    "Azure.DataApiBuilder.Service.Tests.OracleTests.OracleGraphQLQueryTests.TestGetNullIntFields": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Keyset pagination does not reach a NULL sort key. See docs/design/oracle-support.md."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.ManyTypeMultipleCreateMutationOperationRelationshipsDefinedInConfig": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle test config does not map *_mm entities used by config-defined multiple-create relationships."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithAllRelationshipTypesDefinedInConfigFile": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle test config does not map *_mm entities used by config-defined multiple-create relationships."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithManyToManyRelationshipDefinedInConfigFile": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle test config does not map book_author_link_mm as a GraphQL linking entity."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithManyToOneRelationshipDefinedInConfigFile": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle test config does not map book_mm / publisher_mm config-defined relationships."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithOneToManyRelationshipDefinedInConfigFile": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle test config does not map book_mm / reviews_mm config-defined relationships."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithOneToOneRelationship": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "NUMBER(1) is_wholesale_price is mapped as a short, not a GraphQL boolean."
+    },
+    "Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.MultipleCreateMutationTests.OracleMultipleCreateMutationTests.MultipleCreateMutationWithOneToOneRelationshipDefinedInConfigFile": {
+      "issue": 27,
+      "owner": "oracle-tests",
+      "reason": "Oracle fixtures expose users/user_profiles but not User_NonAutogenRelationshipColumn GraphQL types."
+    }
+  }
+}

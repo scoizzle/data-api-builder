@@ -667,6 +667,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Mock<IAbstractQueryManagerFactory> queryManagerFactory = new();
             queryManagerFactory.Setup(x => x.GetQueryBuilder(DatabaseType.MSSQL)).Returns(queryBuilder.Object);
             queryManagerFactory.Setup(x => x.GetQueryExecutor(DatabaseType.MSSQL)).Returns(queryExecutor.Object);
+            queryManagerFactory.Setup(x => x.GetMutationTransactionExecutor(DatabaseType.MSSQL))
+                .Returns(new TransactionScopeMutationExecutor(DatabaseType.MSSQL));
 
             Mock<IHttpContextAccessor> accessor = new();
             DefaultHttpContext httpContext = new();
@@ -753,6 +755,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Mock<IAbstractQueryManagerFactory> queryManagerFactory = new();
             queryManagerFactory.Setup(x => x.GetQueryBuilder(DatabaseType.MSSQL)).Returns(queryBuilder.Object);
             queryManagerFactory.Setup(x => x.GetQueryExecutor(DatabaseType.MSSQL)).Returns(queryExecutor.Object);
+            queryManagerFactory.Setup(x => x.GetMutationTransactionExecutor(DatabaseType.MSSQL))
+                .Returns(new TransactionScopeMutationExecutor(DatabaseType.MSSQL));
 
             DefaultHttpContext httpContext = new();
             httpContext.Request.Scheme = "https";

@@ -53,8 +53,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public string Build(BaseSqlQueryStructure structure);
 
         /// <summary>
-        /// Builds the query to obtain foreign key information with the given
-        /// number of parameters.
+        /// Builds the query to obtain foreign key information.
         /// </summary>
         public string BuildForeignKeyInfoQuery(int numberOfParameters);
 

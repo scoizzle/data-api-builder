@@ -145,7 +145,7 @@ Where applicable, `.configured` and `.effective` are separate. States are `enabl
 Cache `.effective` states account for source-specific eligibility. Runtime cache
 is effective when at least one loaded data source permits response caching; entity
 cache is effective only when caching is enabled for that entity and its own data
-source permits caching. An MSSQL or DWSQL source with `set-session-context` enabled
+source permits caching. An MSSQL, DWSQL or Oracle source with `set-session-context` enabled
 does not permit response-cache reads or writes.
 
 ## Events and usage

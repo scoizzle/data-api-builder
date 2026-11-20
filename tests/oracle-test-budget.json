@@ -1,0 +1,5 @@
+{
+  "description": "Projected skip/execution ceiling for a future measured Oracle TRX. Not enforced by .pipelines/oracle-pipelines.yml. Replace maxSkipped and minExecuted with counts from the first green TRX before adding scripts/check-test-budget.ps1 to that pipeline. Until then, ignored tests are capped by OracleSkipPolicyTests and tests/oracle-skip-baseline.json. Do not raise maxSkipped once the gate is live.",
+  "maxSkipped": 183,
+  "minExecuted": 503
+}

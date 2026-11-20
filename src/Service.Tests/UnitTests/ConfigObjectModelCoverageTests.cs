@@ -189,6 +189,132 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(wrongTypes.GetTypedOptions<MsSqlOptions>()!.SetSessionContext);
             Assert.ThrowsException<NotSupportedException>(() => wrongTypes.GetTypedOptions<UnsupportedOptions>());
             StringAssert.Contains(wrongTypes.DatabaseTypeNotSupportedMessage, DatabaseType.MSSQL.ToString());
+
+            // Oracle options: default command timeout, explicit override, and invalid values
+            // falling back to the default.
+            DataSource oracleDefaults = new(DatabaseType.Oracle, string.Empty, new());
+            Assert.AreEqual(
+                OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                oracleDefaults.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource oracleOverride = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["command-timeout"] = 12 });
+            Assert.AreEqual(12, oracleOverride.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource oracleInvalid = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["command-timeout"] = "not-a-number" });
+            Assert.AreEqual(
+                OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                oracleInvalid.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            // Oracle session-context forwarding: defaults to disabled and parses an explicit enable.
+            Assert.IsFalse(oracleDefaults.GetTypedOptions<OracleOptions>()!.SetSessionContext);
+
+            DataSource oracleSessionContext = new(
+                DatabaseType.Oracle,
+                string.Empty,
+                new Dictionary<string, object?> { ["set-session-context"] = true });
+            Assert.IsTrue(oracleSessionContext.GetTypedOptions<OracleOptions>()!.SetSessionContext);
+        }
+
+        /// <summary>
+        /// The data-source converter materializes numeric options as ints so Oracle's
+        /// command-timeout can be read from raw config JSON.
+        /// </summary>
+        [TestMethod]
+        public void DataSourceConverter_MaterializesNumericOptions()
+        {
+            System.Text.Json.JsonSerializerOptions options = new();
+            options.Converters.Add(new Azure.DataApiBuilder.Config.Converters.DataSourceConverterFactory());
+
+            DataSource dataSource = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"command-timeout":45}}""",
+                options)!;
+
+            Assert.AreEqual(DatabaseType.Oracle, dataSource.DatabaseType);
+            Assert.AreEqual(45, dataSource.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+
+            DataSource sessionContext = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"set-session-context":true}}""",
+                options)!;
+
+            Assert.IsTrue(sessionContext.GetTypedOptions<OracleOptions>()!.SetSessionContext);
+        }
+
+        /// <summary>
+        /// A negative command-timeout is rejected when the config is read, matching the schema's
+        /// minimum of 0, instead of reaching OracleCommand.CommandTimeout at request time.
+        /// 0 (no cap) stays valid.
+        /// </summary>
+        [TestMethod]
+        public void DataSourceConverter_NegativeCommandTimeout_IsRejected()
+        {
+            System.Text.Json.JsonSerializerOptions options = new();
+            options.Converters.Add(new Azure.DataApiBuilder.Config.Converters.DataSourceConverterFactory());
+
+            System.Text.Json.JsonException exception = Assert.ThrowsException<System.Text.Json.JsonException>(
+                () => System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                    """{"database-type":"oracle","connection-string":"","options":{"command-timeout":-1}}""",
+                    options));
+            StringAssert.Contains(exception.Message, "command-timeout");
+
+            DataSource noCap = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"command-timeout":0}}""",
+                options)!;
+            Assert.AreEqual(0, noCap.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+        }
+
+        /// <summary>
+        /// Cache eligibility is decided per data source: a secondary Oracle source with
+        /// set-session-context enabled is not cacheable, and it does not change the answer for the
+        /// default source.
+        /// </summary>
+        [TestMethod]
+        public void CanUseCache_SecondaryOracleSourceWithSessionContext_IsDisabledForThatSource()
+        {
+            DataSource defaultSource = new(DatabaseType.MSSQL, "Server=localhost;Database=TestDb;", new());
+            DataSource oracleWithSessionContext = new(
+                DatabaseType.Oracle,
+                "Data Source=localhost:1521/x",
+                new Dictionary<string, object?> { ["set-session-context"] = true });
+            DataSource oracleWithoutSessionContext = new(
+                DatabaseType.Oracle,
+                "Data Source=localhost:1521/x",
+                new Dictionary<string, object?> { ["command-timeout"] = 30 });
+
+            RuntimeConfig withSessionContext = CreateCacheTestConfig(defaultSource, oracleWithSessionContext);
+            Assert.IsFalse(withSessionContext.CanUseCache("secondary-source"));
+            Assert.IsTrue(withSessionContext.CanUseCache("default-source"));
+            Assert.IsTrue(withSessionContext.CanUseCache());
+
+            RuntimeConfig withoutSessionContext = CreateCacheTestConfig(defaultSource, oracleWithoutSessionContext);
+            Assert.IsTrue(withoutSessionContext.CanUseCache("secondary-source"));
+            Assert.IsTrue(withoutSessionContext.CanUseCache());
+        }
+
+        private static RuntimeConfig CreateCacheTestConfig(DataSource defaultSource, DataSource secondarySource)
+        {
+            return new RuntimeConfig(
+                Schema: string.Empty,
+                DataSource: defaultSource,
+                Runtime: new RuntimeOptions(
+                    Rest: new(),
+                    GraphQL: new(),
+                    Mcp: new(),
+                    Host: new(null, null),
+                    Cache: new RuntimeCacheOptions { Enabled = true }),
+                Entities: new RuntimeEntities(new Dictionary<string, Entity>()),
+                DefaultDataSourceName: "default-source",
+                DataSourceNameToDataSource: new Dictionary<string, DataSource>
+                {
+                    ["default-source"] = defaultSource,
+                    ["secondary-source"] = secondarySource,
+                },
+                EntityNameToDataSourceName: new Dictionary<string, string>());
         }
 
         [TestMethod]

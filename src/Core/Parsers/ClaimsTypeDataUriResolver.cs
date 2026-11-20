@@ -99,7 +99,7 @@ namespace Azure.DataApiBuilder.Core.Parsers
             {
                 if (int.TryParse(preConvertedConstant.Value.ToString(), out int result))
                 {
-                    operandToConvert = new ConstantNode(constantValue: result);
+                    operandToConvert = PolicyClaimConstants.CopyMark(preConvertedConstant, new ConstantNode(constantValue: result));
                 }
             }
             else if (targetType == EdmPrimitiveTypeKind.String)
@@ -107,21 +107,21 @@ namespace Azure.DataApiBuilder.Core.Parsers
                 string? objectValue = preConvertedConstant.Value.ToString();
                 if (objectValue is not null)
                 {
-                    operandToConvert = new ConstantNode(constantValue: objectValue);
+                    operandToConvert = PolicyClaimConstants.CopyMark(preConvertedConstant, new ConstantNode(constantValue: objectValue));
                 }
             }
             else if (targetType == EdmPrimitiveTypeKind.Boolean)
             {
                 if (bool.TryParse(preConvertedConstant.Value.ToString(), out bool result))
                 {
-                    operandToConvert = new ConstantNode(constantValue: result);
+                    operandToConvert = PolicyClaimConstants.CopyMark(preConvertedConstant, new ConstantNode(constantValue: result));
                 }
             }
             else if (targetType == EdmPrimitiveTypeKind.Guid)
             {
                 if (Guid.TryParse(preConvertedConstant.Value.ToString(), out Guid result))
                 {
-                    operandToConvert = new ConstantNode(constantValue: result);
+                    operandToConvert = PolicyClaimConstants.CopyMark(preConvertedConstant, new ConstantNode(constantValue: result));
                 }
             }
         }

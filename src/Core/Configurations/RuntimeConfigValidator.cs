@@ -49,7 +49,8 @@ public class RuntimeConfigValidator : IConfigValidator
     [
         DatabaseType.MSSQL,
         DatabaseType.DWSQL,
-        DatabaseType.PostgreSQL
+        DatabaseType.PostgreSQL,
+        DatabaseType.Oracle
     ];
 
     // Error messages for user-delegated authentication configuration.
@@ -1884,10 +1885,10 @@ public class RuntimeConfigValidator : IConfigValidator
     /// <param name="excluded">Set of fields which are not accessible to the user.</param>
     /// <returns>Boolean value indicating whether the field is accessible or not.</returns>
     /// <exception cref="DataApiBuilderException">Throws exception if the field is not accessible.</exception>
-    private static bool IsFieldAccessible(Match columnNameMatch, HashSet<string>? includedFields, HashSet<string> excludedFields)
+    internal static bool IsFieldAccessible(Match columnNameMatch, HashSet<string>? includedFields, HashSet<string> excludedFields)
     {
         string columnName = columnNameMatch.Value.Substring(AuthorizationResolver.FIELD_PREFIX.Length);
-        if (excludedFields.Contains(columnName!) || excludedFields.Contains(AuthorizationResolver.WILDCARD) ||
+        if (excludedFields.Contains(columnName) || excludedFields.Contains(AuthorizationResolver.WILDCARD) ||
             (includedFields is not null && !includedFields.Contains(AuthorizationResolver.WILDCARD) && !includedFields.Contains(columnName)))
         {
             // If column is present in excluded OR excluded='*'
