@@ -318,7 +318,7 @@ These items from the Oracle review are documented here and are not treated as op
 
 ## Driver package
 
-`Oracle.ManagedDataAccess.Core` 23.7.0 is a central package version in `src/Directory.Packages.props` and a package reference on `Azure.DataApiBuilder.Core`. It is not vendored. Restore uses the repository `Nuget.config` unchanged, the same feed as every other dependency.
+`Oracle.ManagedDataAccess.Core` 23.26.401 is a central package version in `src/Directory.Packages.props` and a package reference on `Azure.DataApiBuilder.Core`. It is not vendored. Restore uses the repository `Nuget.config` unchanged, the same feed as every other dependency.
 
 ## Mutation errors
 
