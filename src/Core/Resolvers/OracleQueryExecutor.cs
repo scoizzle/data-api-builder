@@ -26,8 +26,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     /// </summary>
     public class OracleQueryExecutor : QueryExecutor<OracleConnection>
     {
-        // Scope for Oracle Cloud Infrastructure authentication
-        // This may need to be configured based on the specific Oracle Cloud setup
+        /// <summary>
+        /// Scope requested when the data source sets no <c>managed-identity-scope</c>. Oracle's
+        /// Microsoft Entra integration normally expects the database app registration's App ID URI
+        /// (<c>&lt;App ID URI&gt;/session:scope:connect</c>), so most deployments that let DAB
+        /// acquire the token must set the option; see docs/design/oracle-support.md.
+        /// </summary>
         public const string DATABASE_SCOPE = @"https://database.oracle.com/.default";
 
         /// <summary>
@@ -47,10 +51,15 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             => base.ConnectionStringBuilders;
 
         /// <summary>
-        /// The saved cached access token obtained from DefaultAzureCredentials
-        /// representing a managed identity.
+        /// Access tokens obtained from DefaultAzureCredential, keyed by the requested scope so a
+        /// token issued for one data source's scope is never sent to another.
         /// </summary>
-        private AccessToken? _defaultAccessToken;
+        private readonly Dictionary<string, AccessToken> _defaultAccessTokens = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// DatasourceName to the token scope requested from DefaultAzureCredential.
+        /// </summary>
+        private readonly Dictionary<string, string> _dataSourceTokenScopes = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// DatasourceName to boolean value indicating if access token should be set for db.
@@ -156,6 +165,16 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 bool? managedIdentityOption = oracleOptions.ManagedIdentity;
                 _dataSourceManagedIdentityOptions[dataSourceName] = managedIdentityOption;
                 _dataSourceAccessTokenUsage[dataSourceName] = ShouldManagedIdentityAccessBeAttempted(builder, managedIdentityOption);
+                _dataSourceTokenScopes[dataSourceName] = ResolveManagedIdentityScope(dataSourceName, oracleOptions.ManagedIdentityScope);
+                if (managedIdentityOption == true && oracleOptions.ManagedIdentityScope is null)
+                {
+                    QueryExecutorLogger.LogWarning(
+                        "Data source {dataSourceName} sets 'managed-identity': true without '{scopeOption}'. DAB requests the default scope {defaultScope}, which Oracle's Microsoft Entra integration usually rejects; set '{scopeOption}' to the database app registration's '<App ID URI>/session:scope:connect'.",
+                        dataSourceName,
+                        OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION,
+                        DATABASE_SCOPE,
+                        OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION);
+                }
 
                 // Session context (application context) forwarding is opt-in via "set-session-context".
                 // A DBA must first create the context namespace and the package that sets it; DAB then
@@ -165,6 +184,33 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 _dataSourceSessionContextPackages[dataSourceName] =
                     ResolveSessionContextPackage(dataSourceName, oracleOptions.SessionContextPackageOwner);
             }
+        }
+
+        /// <summary>
+        /// Returns the configured token scope, or <see cref="DATABASE_SCOPE"/> when none is set.
+        /// A set scope must be an absolute URI with a host and no whitespace (for example
+        /// <c>https://example.com/&lt;app id&gt;/session:scope:connect</c> or
+        /// <c>api://&lt;app id&gt;/.default</c>); anything else fails startup.
+        /// </summary>
+        private static string ResolveManagedIdentityScope(string dataSourceName, string? scope)
+        {
+            if (scope is null)
+            {
+                return DATABASE_SCOPE;
+            }
+
+            if (scope.Any(char.IsWhiteSpace)
+                || !Uri.TryCreate(scope, UriKind.Absolute, out Uri? uri)
+                || string.IsNullOrEmpty(uri.Host))
+            {
+                throw new DataApiBuilderException(
+                    message: $"The '{OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION}' option of data source '{dataSourceName}' must be an absolute URI " +
+                        "such as '<App ID URI>/session:scope:connect'.",
+                    statusCode: HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
+            return scope;
         }
 
         /// <summary>
@@ -745,10 +791,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // If the configuration controller provided a managed identity access token use that,
                 // else use the default saved access token if still valid.
                 // Get a new token only if the saved token is null or expired.
+                string scope = _dataSourceTokenScopes.TryGetValue(dataSourceName, out string? configuredScope) ? configuredScope : DATABASE_SCOPE;
                 string? accessToken = accessTokenFromController ??
-                    (IsDefaultAccessTokenValid() ?
-                        ((AccessToken)_defaultAccessToken!).Token :
-                        await GetAccessTokenAsync(dataSourceName, cancellationToken));
+                    (IsDefaultAccessTokenValid(scope) ?
+                        _defaultAccessTokens[scope].Token :
+                        await GetAccessTokenAsync(dataSourceName, scope, cancellationToken));
 
                 if (accessToken is not null)
                 {
@@ -831,13 +878,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Determines if the saved default azure credential's access token is valid and not expired.
+        /// Determines if the saved default azure credential's access token for the scope is valid and not expired.
         /// </summary>
         /// <returns>True if valid, false otherwise.</returns>
-        private bool IsDefaultAccessTokenValid()
+        private bool IsDefaultAccessTokenValid(string scope)
         {
-            return _defaultAccessToken is not null &&
-                ((AccessToken)_defaultAccessToken).ExpiresOn.CompareTo(DateTimeOffset.Now) > 0;
+            return _defaultAccessTokens.TryGetValue(scope, out AccessToken token) &&
+                token.ExpiresOn.CompareTo(DateTimeOffset.Now) > 0;
         }
 
         /// <summary>
@@ -848,17 +895,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// </summary>
         /// <returns>The string representation of the access token if found,
         /// null otherwise.</returns>
-        private async Task<string?> GetAccessTokenAsync(string dataSourceName, CancellationToken cancellationToken)
+        private async Task<string?> GetAccessTokenAsync(string dataSourceName, string scope, CancellationToken cancellationToken)
         {
-            bool firstAttemptAtDefaultAccessToken = _defaultAccessToken is null;
+            bool firstAttemptAtDefaultAccessToken = !_defaultAccessTokens.ContainsKey(scope);
             _dataSourceManagedIdentityOptions.TryGetValue(dataSourceName, out bool? managedIdentityOption);
             bool managedIdentityForced = managedIdentityOption == true;
 
             try
             {
-                _defaultAccessToken =
+                _defaultAccessTokens[scope] =
                     await AzureCredential.GetTokenAsync(
-                        new TokenRequestContext(new[] { DATABASE_SCOPE }),
+                        new TokenRequestContext(new[] { scope }),
                         cancellationToken);
             }
             // A cancelled request is not evidence that the credential is unavailable; do not
@@ -914,7 +961,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 }
             }
 
-            return _defaultAccessToken?.Token;
+            return _defaultAccessTokens.TryGetValue(scope, out AccessToken token) ? token.Token : null;
         }
 
         /// <summary>

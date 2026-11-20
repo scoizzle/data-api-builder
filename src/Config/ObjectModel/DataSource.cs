@@ -89,7 +89,8 @@ public record DataSource(
                 CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
                 ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION),
-                SessionContextPackageOwner: ReadTextOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION));
+                SessionContextPackageOwner: ReadTextOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION),
+                ManagedIdentityScope: ReadStringOption(OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
@@ -254,11 +255,18 @@ public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 /// (default) keeps the unqualified call, which resolves in the login's schema or through a synonym.
 /// Must be an unquoted Oracle identifier; any other value fails startup. Configuration-file only.
 /// </param>
+/// <param name="ManagedIdentityScope">
+/// Scope DAB requests when it acquires a managed identity token itself, normally the database app
+/// registration's App ID URI followed by <c>/session:scope:connect</c>. null (default) keeps
+/// <c>https://database.oracle.com/.default</c>. A set value must be an absolute URI without
+/// whitespace; any other value fails startup. Not used for a configuration-controller token.
+/// </param>
 public record OracleOptions(
     int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
     bool SetSessionContext = false,
     bool? ManagedIdentity = null,
-    string? SessionContextPackageOwner = null) : IDataSourceOptions
+    string? SessionContextPackageOwner = null,
+    string? ManagedIdentityScope = null) : IDataSourceOptions
 {
     /// <summary>Default command timeout in seconds, matching the other ADO.NET providers.</summary>
     public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
@@ -268,6 +276,9 @@ public record OracleOptions(
 
     /// <summary>Name of the option naming the schema that owns the session-context package.</summary>
     public const string SESSION_CONTEXT_PACKAGE_OWNER_OPTION = "session-context-package-owner";
+
+    /// <summary>Name of the option holding the managed identity token scope.</summary>
+    public const string MANAGED_IDENTITY_SCOPE_OPTION = "managed-identity-scope";
 }
 
 /// <summary>
