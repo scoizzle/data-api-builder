@@ -66,6 +66,20 @@ namespace Azure.DataApiBuilder.Core.Parsers
             SqlLiteralRewriter rewriter = _metadataProvider is ISqlLiteralSource literalSource
                 ? literalSource.LiteralRewriter
                 : SqlLiteralRewriter.Shared;
+
+            // A claim value is never treated as an author literal ('' -> IS NULL); the engine
+            // decides how an empty claim is compared.
+            if (rewriter.TryRenderEmptyClaimComparison(
+                    nodeIn.OperatorKind,
+                    nodeIn.Left,
+                    nodeIn.Right,
+                    out SingleValuePropertyAccessNode? claimPropertyNode,
+                    out string? claimComparisonSql))
+            {
+                predicate = $"({Visit(claimPropertyNode!)} {claimComparisonSql})";
+                return true;
+            }
+
             if (!rewriter.TryRewriteEmptyStringComparison(
                     nodeIn.OperatorKind,
                     nodeIn.Left,

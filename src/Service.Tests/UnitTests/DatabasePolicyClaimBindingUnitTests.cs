@@ -4,8 +4,11 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.Linq;
 using System.Net;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -13,6 +16,7 @@ using Azure.DataApiBuilder.Auth;
 using Azure.DataApiBuilder.Config.DatabasePrimitives;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Authorization;
+using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Parsers;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Services;
@@ -24,6 +28,7 @@ using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.OData.UriParser;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -458,6 +463,116 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.ThrowsException<NotSupportedException>(() => emptyValues.Add("@claim", "value"));
         }
 
+        /// <summary>
+        /// #62 (security): Oracle stores '' as NULL, so a comparison against an author-written ''
+        /// literal is rewritten to IS [NOT] NULL. A claim whose value is "" must not be: the policy
+        /// would then match every row whose column is NULL. Keeping the comparison against the
+        /// (NULL) value matches no row, which fails closed. The final command text produced by
+        /// the Oracle executor is checked, because it also rewrites empty-string binds.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("@item.textCol eq @claims.value", DisplayName = "eq claim")]
+        [DataRow("@item.textCol ne @claims.value", DisplayName = "ne claim")]
+        [DataRow("@claims.value eq @item.textCol", DisplayName = "claim on the left")]
+        [DataRow("not (@item.textCol eq @claims.value)", DisplayName = "negated eq claim")]
+        [DataRow("@item.intCol eq 1 or @item.textCol eq @claims.value", DisplayName = "claim inside or")]
+        public void OracleEmptyStringClaim_IsNotRewrittenToNullTest(string policy)
+        {
+            (AuthorizationResolver resolver, DefaultHttpContext context) = CreateAuthorizationContext(
+                policy,
+                new Claim("value", string.Empty, ClaimValueTypes.String));
+
+            string commandText = BuildOraclePolicyCommandText(resolver, context, out string predicate, out BaseQueryStructure structure);
+
+            StringAssert.Contains(predicate, "\"textCol\"");
+            StringAssert.Contains(predicate, policy.Contains(" ne ") ? "!= NULL" : "= NULL");
+            Assert.IsFalse(
+                structure.Parameters.Values.Any(parameter => parameter.Value is string { Length: 0 }),
+                "The empty claim must not be bound: an empty-string bind is rewritten by the executor and coerced for CHAR/DATE columns.");
+            Assert.IsFalse(predicate.Contains("IS NULL", StringComparison.OrdinalIgnoreCase), predicate);
+            Assert.IsFalse(predicate.Contains("IS NOT NULL", StringComparison.OrdinalIgnoreCase), predicate);
+            Assert.IsFalse(commandText.Contains("IS NULL", StringComparison.OrdinalIgnoreCase), commandText);
+            Assert.IsFalse(commandText.Contains("IS NOT NULL", StringComparison.OrdinalIgnoreCase), commandText);
+        }
+
+        /// <summary>
+        /// #62: an empty-string literal written by the policy author keeps the Oracle null test.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("@item.textCol eq ''", "(\"textCol\" IS NULL)", DisplayName = "eq literal")]
+        [DataRow("@item.textCol ne ''", "(\"textCol\" IS NOT NULL)", DisplayName = "ne literal")]
+        public void OracleEmptyStringLiteral_StillBecomesNullTest(string policy, string expectedPredicate)
+        {
+            (AuthorizationResolver resolver, DefaultHttpContext context) = CreateAuthorizationContext(
+                policy,
+                new Claim("value", string.Empty, ClaimValueTypes.String));
+
+            string commandText = BuildOraclePolicyCommandText(resolver, context, out string predicate, out _);
+
+            Assert.AreEqual(expectedPredicate, predicate);
+            StringAssert.Contains(commandText, expectedPredicate);
+        }
+
+        /// <summary>
+        /// A non-empty claim on Oracle is still an ordinary bound comparison.
+        /// </summary>
+        [TestMethod]
+        public void OracleNonEmptyClaim_RemainsBoundEquality()
+        {
+            (AuthorizationResolver resolver, DefaultHttpContext context) = CreateAuthorizationContext(
+                "@item.textCol eq @claims.value",
+                new Claim("value", "alice", ClaimValueTypes.String));
+
+            string commandText = BuildOraclePolicyCommandText(resolver, context, out string predicate, out BaseQueryStructure structure);
+
+            Assert.AreEqual("(\"textCol\" = @param0)", predicate);
+            AssertParameterValues(structure, "alice");
+            StringAssert.Contains(commandText, "(\"textCol\" = :param0)");
+        }
+
+        /// <summary>
+        /// Runs the policy through ProcessAuthorizationPolicies (GetDBPolicyClauseForQueryStructure and
+        /// ODataASTVisitor) with an Oracle literal rewriter, then through the real Oracle executor's
+        /// PrepareDbCommand, and returns the final command text.
+        /// </summary>
+        private static string BuildOraclePolicyCommandText(
+            AuthorizationResolver resolver,
+            DefaultHttpContext context,
+            out string predicate,
+            out BaseQueryStructure policyStructure)
+        {
+            Mock<ISqlMetadataProvider> mock = CreateMetadataProvider();
+            mock.Setup(provider => provider.GetDatabaseType()).Returns(DatabaseType.Oracle);
+            mock.Setup(provider => provider.GetQueryBuilder()).Returns(new OracleQueryBuilder());
+            ISqlMetadataProvider oracleProvider = OracleLiteralSourceMetadataProxy.Create(mock.Object);
+
+            TestSqlQueryStructure structure = new(oracleProvider, resolver);
+            AuthorizationPolicyHelpers.ProcessAuthorizationPolicies(OPERATION, structure, context, resolver, oracleProvider);
+            predicate = structure.GetDbPolicyForOperation(OPERATION)!;
+            policyStructure = structure;
+            Assert.IsFalse(string.IsNullOrEmpty(predicate), "The policy produced no predicate.");
+
+            RuntimeConfig config = new(
+                Schema: string.Empty,
+                DataSource: new(DatabaseType.Oracle, "User Id=app;Password=x;Pooling=false;Data Source=localhost:1521/svc", null),
+                Runtime: new(Rest: new(), GraphQL: new(), Mcp: new(), Host: new(null, null)),
+                Entities: new(new Dictionary<string, Entity>()));
+            RuntimeConfigProvider configProvider = TestHelper.GenerateInMemoryRuntimeConfigProvider(config);
+            OracleQueryExecutor executor = new(
+                configProvider,
+                new OracleDbExceptionParser(configProvider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object);
+            using OracleConnection connection = new(config.DataSource.ConnectionString);
+            using DbCommand command = executor.PrepareDbCommand(
+                connection,
+                $"SELECT 1 FROM DUAL WHERE {predicate}",
+                structure.Parameters,
+                httpContext: null,
+                configProvider.GetConfig().DefaultDataSourceName);
+            return command.CommandText;
+        }
+
         private static FilterClause ResolveFilterClause(
             AuthorizationResolver resolver,
             DefaultHttpContext context,
@@ -579,6 +694,38 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     gQLFilterParser: null!,
                     entityName: ENTITY_NAME)
             {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forwards <see cref="ISqlMetadataProvider"/> to a mock and adds the internal
+    /// <see cref="ISqlLiteralSource"/> with Oracle's rewriter. Moq cannot proxy the internal
+    /// interface, so the Oracle literal rules are attached here.
+    /// </summary>
+    internal class OracleLiteralSourceMetadataProxy : DispatchProxy, ISqlLiteralSource
+    {
+        private ISqlMetadataProvider _target = null!;
+
+        SqlLiteralRewriter ISqlLiteralSource.LiteralRewriter { get; } = new OracleSqlLiteralRewriter();
+
+        public static ISqlMetadataProvider Create(ISqlMetadataProvider target)
+        {
+            ISqlMetadataProvider proxy = Create<ISqlMetadataProvider, OracleLiteralSourceMetadataProxy>();
+            ((OracleLiteralSourceMetadataProxy)(object)proxy)._target = target;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            try
+            {
+                return targetMethod!.Invoke(_target, args);
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException is not null)
+            {
+                ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+                throw;
             }
         }
     }
