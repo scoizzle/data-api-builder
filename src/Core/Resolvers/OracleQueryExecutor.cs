@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Net;
@@ -52,9 +53,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         /// <summary>
         /// Access tokens obtained from DefaultAzureCredential, keyed by the requested scope so a
-        /// token issued for one data source's scope is never sent to another.
+        /// token issued for one data source's scope is never sent to another. The executor is a
+        /// singleton, so the cache is concurrent; a duplicate fetch during a cold-start burst is harmless.
         /// </summary>
-        private readonly Dictionary<string, AccessToken> _defaultAccessTokens = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, AccessToken> _defaultAccessTokens = new(StringComparer.Ordinal);
 
         /// <summary>
         /// DatasourceName to the token scope requested from DefaultAzureCredential.
@@ -793,8 +795,8 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // Get a new token only if the saved token is null or expired.
                 string scope = _dataSourceTokenScopes.TryGetValue(dataSourceName, out string? configuredScope) ? configuredScope : DATABASE_SCOPE;
                 string? accessToken = accessTokenFromController ??
-                    (IsDefaultAccessTokenValid(scope) ?
-                        _defaultAccessTokens[scope].Token :
+                    (TryGetValidDefaultAccessToken(scope, out string? cachedToken) ?
+                        cachedToken :
                         await GetAccessTokenAsync(dataSourceName, scope, cancellationToken));
 
                 if (accessToken is not null)
@@ -878,13 +880,20 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
-        /// Determines if the saved default azure credential's access token for the scope is valid and not expired.
+        /// Returns the saved default azure credential's access token for the scope when it is not expired.
         /// </summary>
         /// <returns>True if valid, false otherwise.</returns>
-        private bool IsDefaultAccessTokenValid(string scope)
+        private bool TryGetValidDefaultAccessToken(string scope, out string? token)
         {
-            return _defaultAccessTokens.TryGetValue(scope, out AccessToken token) &&
-                token.ExpiresOn.CompareTo(DateTimeOffset.Now) > 0;
+            if (_defaultAccessTokens.TryGetValue(scope, out AccessToken cached) &&
+                cached.ExpiresOn.CompareTo(DateTimeOffset.Now) > 0)
+            {
+                token = cached.Token;
+                return true;
+            }
+
+            token = null;
+            return false;
         }
 
         /// <summary>

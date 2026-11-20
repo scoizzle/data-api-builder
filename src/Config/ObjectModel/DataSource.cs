@@ -90,7 +90,7 @@ public record DataSource(
                 SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
                 ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION),
                 SessionContextPackageOwner: ReadTextOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION),
-                ManagedIdentityScope: ReadStringOption(OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION));
+                ManagedIdentityScope: ReadTextOption(OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");

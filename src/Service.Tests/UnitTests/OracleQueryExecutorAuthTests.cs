@@ -478,6 +478,65 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             CollectionAssert.AreEqual(new[] { scopeA, scopeB }, requested, "Each scope is requested once and a token is never reused for another scope.");
         }
 
+        /// <summary>
+        /// The executor is a singleton: a cold-start burst across several scopes writes the token
+        /// cache from many requests at once and must neither throw nor lose a data source's token.
+        /// </summary>
+        [TestMethod]
+        public async Task SetManagedIdentityAccessTokenAsync_ConcurrentColdStartAcrossScopes_DoesNotThrow()
+        {
+            const int sources = 16;
+            Mock<DefaultAzureCredential> credential = new();
+            credential
+                .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
+                .Returns<TokenRequestContext, CancellationToken>(async (context, _) =>
+                {
+                    await Task.Yield();
+                    return new AccessToken("token-for-" + context.Scopes[0], DateTimeOffset.UtcNow.AddHours(1));
+                });
+            Dictionary<string, DataSource> dataSources = new();
+            for (int i = 0; i < sources; i++)
+            {
+                dataSources["s" + i] = new(DatabaseType.Oracle, PASSWORDLESS, new()
+                {
+                    ["managed-identity"] = true,
+                    [OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION] = $"https://s{i}.example.com/app/session:scope:connect"
+                });
+            }
+
+            RuntimeConfig config = new(
+                Schema: string.Empty,
+                DataSource: dataSources["s0"],
+                Runtime: new(Rest: new(), GraphQL: new(), Mcp: new(), Host: new(null, null)),
+                Entities: new(new Dictionary<string, Entity>()),
+                DefaultDataSourceName: "s0",
+                DataSourceNameToDataSource: dataSources,
+                EntityNameToDataSourceName: new Dictionary<string, string>());
+            RuntimeConfigProvider provider = new(new FileSystemRuntimeConfigLoader(new MockFileSystem()) { RuntimeConfig = config });
+            OracleQueryExecutor executor = new(
+                provider,
+                new OracleDbExceptionParser(provider),
+                new Mock<ILogger<IQueryExecutor>>().Object,
+                new Mock<IHttpContextAccessor>().Object)
+            {
+                AzureCredential = credential.Object
+            };
+
+            List<Task> requests = new();
+            for (int i = 0; i < sources * 16; i++)
+            {
+                string source = "s" + (i % sources);
+                requests.Add(Task.Run(async () =>
+                {
+                    using OracleConnection conn = executor.CreateConnection(source);
+                    await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, source, CancellationToken.None);
+                    Assert.IsNotNull(GetAccessToken(conn), $"No token was applied for {source}.");
+                }));
+            }
+
+            await Task.WhenAll(requests);
+        }
+
         [DataTestMethod]
         [DataRow("", DisplayName = "empty")]
         [DataRow("   ", DisplayName = "blank")]
@@ -493,6 +552,52 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
             Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
             StringAssert.Contains(ex.Message, OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION);
+        }
+
+        /// <summary>
+        /// The config converter stores a boolean-looking string as a bool; a scope of "true" must still
+        /// fail startup instead of silently falling back to the default scope.
+        /// </summary>
+        [TestMethod]
+        public void ManagedIdentityScope_BooleanLookingValueFromConfigJson_FailsAtStartup()
+        {
+            string json = "{\"database-type\":\"oracle\",\"connection-string\":\"" + PASSWORDLESS + "\",\"options\":{\"managed-identity-scope\":\"true\"}}";
+            DataSource dataSource = JsonSerializer.Deserialize<DataSource>(json, RuntimeConfigLoader.GetSerializationOptions())!;
+
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(
+                () => CreateExecutor(PASSWORDLESS, options: dataSource.Options));
+
+            StringAssert.Contains(ex.Message, OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION);
+        }
+
+        [DataTestMethod]
+        [DataRow(true, null, true, DisplayName = "forced without scope warns")]
+        [DataRow(true, "https://example.com/app/session:scope:connect", false, DisplayName = "forced with scope is quiet")]
+        [DataRow(null, null, false, DisplayName = "inferred without scope is quiet")]
+        public void Constructor_ForcedManagedIdentityWithoutScope_LogsWarning(bool? managedIdentity, string? scope, bool expectWarning)
+        {
+            Dictionary<string, object?> options = new();
+            if (managedIdentity is not null)
+            {
+                options["managed-identity"] = managedIdentity;
+            }
+
+            if (scope is not null)
+            {
+                options[OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION] = scope;
+            }
+
+            Mock<ILogger<IQueryExecutor>> logger = new();
+            _ = CreateExecutor(PASSWORDLESS, options: options, logger: logger.Object);
+
+            logger.Verify(
+                l => l.Log(
+                    LogLevel.Warning,
+                    It.IsAny<EventId>(),
+                    It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains(OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION)),
+                    It.IsAny<Exception?>(),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+                expectWarning ? Times.Once() : Times.Never());
         }
 
         [TestMethod]
@@ -550,7 +655,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string connectionString,
             string? configToken = null,
             Dictionary<string, object?>? options = null,
-            TokenCredential? credential = null)
+            TokenCredential? credential = null,
+            ILogger<IQueryExecutor>? logger = null)
         {
             RuntimeConfig config = new(
                 Schema: string.Empty,
@@ -568,7 +674,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             OracleQueryExecutor executor = new(
                 provider,
                 new OracleDbExceptionParser(provider),
-                new Mock<ILogger<IQueryExecutor>>().Object,
+                logger ?? new Mock<ILogger<IQueryExecutor>>().Object,
                 new Mock<IHttpContextAccessor>().Object);
 
             return (executor, dataSourceName);
