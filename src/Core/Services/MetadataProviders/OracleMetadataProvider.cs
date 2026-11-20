@@ -886,6 +886,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             await LoadTriggerIdentityAsync(conn, owner, table, cancellationToken);
+            await LoadViewDeleteRejectionAsync(conn, owner, table, cancellationToken);
             return columns;
         }
 
@@ -1220,7 +1221,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// HotChocolate's ByteArray scalar). Refine those columns to typeof(byte[]) so the Oracle
         /// query builder applies its base64 conversion (UTL_ENCODE.BASE64_ENCODE) and the exposed
         /// values round-trip like varbinary on MsSql.
-        /// ProviderType values: 126 = RAW, 113 = BLOB.
+        /// ProviderType is an <see cref="OracleDbType"/> value: Raw, LongRaw or Blob.
         /// NB: the DAB base metadata path (FillSchema + DataTableReader) reports ProviderType as
         /// DBNull, so this is a safety net for paths that surface the int; the authoritative
         /// RAW/BLOB detection for DAB runs in PopulateColumnDefinitionWithHasDefaultAndDbType
@@ -1230,7 +1231,7 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             if (columnInfoFromAdapter.Table.Columns.Contains("ProviderType")
                 && columnInfoFromAdapter["ProviderType"] is int providerType
-                && (providerType == 126 || providerType == 113))
+                && providerType is (int)OracleDbType.Raw or (int)OracleDbType.LongRaw or (int)OracleDbType.Blob)
             {
                 return typeof(byte[]);
             }
@@ -1693,6 +1694,23 @@ namespace Azure.DataApiBuilder.Core.Services
             string? qualifiedName = null)
         {
             string target = string.IsNullOrWhiteSpace(qualifiedName) ? "the configured stored procedure" : qualifiedName;
+            List<string> unsupportedTypes = rows
+                .Where(row => OracleSqlType.IsUnsupportedSubprogramType(row.DataType))
+                .Select(row => row.Position == 0
+                    ? $"RETURN {row.DataType}"
+                    : $"{(string.IsNullOrEmpty(row.Name) ? $"position {row.Position}" : row.Name)} {row.InOut.Replace('/', ' ')} {row.DataType}")
+                .ToList();
+            if (unsupportedTypes.Count > 0)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Oracle subprogram {target} uses types DAB cannot bind: {string.Join(", ", unsupportedTypes)}. " +
+                             "INTERVAL YEAR TO MONTH and PL/SQL-only types (PL/SQL BOOLEAN, PLS_INTEGER, BINARY_INTEGER, " +
+                             "records and tables) are rejected at startup. Use a SQL type, or wrap the subprogram " +
+                             "in one whose arguments and result use SQL types.",
+                    statusCode: HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
             List<string> unsupported = new();
             int refCursorCount = 0;
             foreach (OracleArgumentRow row in rows)
@@ -1970,6 +1988,8 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <item><c>NUMBER(p, 0)</c> with <c>10 &lt;= p &lt;= 18</c> maps to <see cref="long"/>.</item>
         /// <item><c>NUMBER(p, 0)</c> with <c>p &gt; 18</c> maps to <see cref="decimal"/>.</item>
         /// <item><c>NUMBER(p, s)</c> with <c>s &gt; 0</c> maps to <see cref="decimal"/>.</item>
+        /// <item><c>NUMBER(p, s)</c> with <c>s &lt; 0</c> rounds to 10^-s and holds <c>p - s</c>
+        /// integer digits; the rules above apply to that digit count.</item>
         /// </list>
         /// </summary>
         /// <param name="precision">The column's DATA_PRECISION (PRECISION), or null/DBNull for an
@@ -1992,7 +2012,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 return typeof(decimal);
             }
 
-            return p switch
+            // A negative scale rounds to the left of the decimal point: NUMBER(9,-3) stores up to
+            // 12 integer digits, so the integral type is chosen from p - s.
+            int integerDigits = s < 0 ? p - s : p;
+            return integerDigits switch
             {
                 <= 9 => typeof(int),
                 <= 18 => typeof(long),

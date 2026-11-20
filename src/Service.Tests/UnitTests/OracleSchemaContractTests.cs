@@ -17,7 +17,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [TestMethod]
         public void TypeTable_UsesTimeZoneRawAndBlobSeeds()
         {
-            string schema = File.ReadAllText(FindRepoFile(Path.Combine("src", "Service.Tests", "DatabaseSchema-Oracle.sql")));
+            // A CRLF checkout (core.autocrlf on Windows) must not change the result of the
+            // multi-line assertion below.
+            string schema = File.ReadAllText(FindRepoFile(Path.Combine("src", "Service.Tests", "DatabaseSchema-Oracle.sql")))
+                .ReplaceLineEndings("\n");
 
             StringAssert.Contains(schema, "datetimeoffset_types TIMESTAMP(6) WITH TIME ZONE");
             StringAssert.Contains(schema, "bytearray_types RAW(2000)");
@@ -28,7 +31,6 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(schema, "INSERT INTO type_table(id, byte_types, short_types, int_types, long_types, string_types, nvarchar_string_types,\n        single_types, float_types, decimal_types, boolean_types,\n        date_types, datetime_types, datetime2_types, datetimeoffset_types, smalldatetime_types,\n        bytearray_types)\n    VALUES (5, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL )");
             StringAssert.Contains(schema, "WHERE books.id = get_book_by_id.id");
             StringAssert.Contains(schema, "WHERE publishers.id = get_publisher_by_id.id");
-            Assert.AreEqual("3q2+7w==", Convert.ToBase64String(Convert.FromHexString("DEADBEEF")));
         }
 
         private static string FindRepoFile(string relativePath)

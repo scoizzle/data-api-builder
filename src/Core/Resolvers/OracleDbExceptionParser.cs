@@ -38,6 +38,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // Data format codes
                 "1858",     // ORA-01858: a non-numeric character was found
                 "1861",     // ORA-01861: literal does not match format string
+                "1839",     // ORA-01839: date not valid for month specified
+                "1843",     // ORA-01843: not a valid month
+                "1847",     // ORA-01847: day of month must be between 1 and last day of month
                 "2015",     // ORA-02015: cannot use FOR UPDATE with group functions
 
                 // PL/SQL error codes
@@ -46,7 +49,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
                 // Column and table related
                 "1430",     // ORA-01430: column is not in select list
-                "1717"      // ORA-01717: invalid option for alter session
+                "1717",     // ORA-01717: invalid option for alter session
+
+                // DML through a view the request cannot modify
+                "1776",     // ORA-01776: cannot modify more than one base table through a join view
+                "1779"      // ORA-01779: cannot modify a column which maps to a non key-preserved table
                 // NOTE: ORA-01018/01019 (cursor/memory state), ORA-02003-02005 (USERENV/column
                 // specification), ORA-02443 (invalid trigger name) and ORA-01410-01412 (ROWID)
                 // are intentionally NOT mapped to 400/409: they describe server-side state or
@@ -72,30 +79,26 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 "3113",     // ORA-03113: end-of-file on communication channel
                 "3114",     // ORA-03114: not connected to ORACLE
                 "3135",     // ORA-03135: connection lost contact
-                "17002",    // ORA-17002: IO Error
-                "17010",    // ORA-17010: Socket read error
 
-                // Privilege and authentication codes
-                "1045",     // ORA-01045: user lacks CREATE SESSION privilege
+                // Session state codes
                 "1012",     // ORA-01012: not logged on
                 "24313",    // ORA-24313: user already authenticated
-                "24315",    // ORA-24315: illegal attribute type
 
                 // TNS (listener/network) codes
                 "12170",    // ORA-12170: TNS:connect timeout occurred
-                "12514",    // ORA-12514: TNS:listener does not currently know of service
                 "12516",    // ORA-12516: TNS:listener could not find instance
                 "12520",    // ORA-12520: TNS:listener could not find available handler
                 "12528",    // ORA-12528: TNS:listener: all appropriate instances are blocking
-                "12541",    // ORA-12541: TNS:no listener
-                "12545",    // ORA-12545: Connect failed because target host or object does not exist
                 "12555",    // ORA-12555: TNS:permission denied
-
-                // File and network codes
-                "17404",    // ORA-17404: File not found
 
                 // ORA-25408: can not safely replay call
                 "25408"
+
+                // NOTE: permanent errors are intentionally NOT retried: ORA-01045 (missing
+                // CREATE SESSION), ORA-12514 (unknown service), ORA-12541 (no listener),
+                // ORA-12545 (unknown host) and ORA-24315 (illegal attribute type) are
+                // configuration faults that do not clear on retry. 17002/17010/17404 are JDBC
+                // driver codes, not ORA- errors raised by ODP.NET.
             });
 
             ConflictExceptionCodes.UnionWith(new List<string>
@@ -179,10 +182,14 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // ORA-01858: a non-numeric character was found where a numeric was expected
             // ORA-01861: literal does not match format string
             // ORA-01843: not a valid month
+            // ORA-01839/01847: day not valid for the month
             // ORA-12899: value too large for column
             // ORA-01400: cannot insert NULL into column
             // ORA-01438: value larger than specified precision
-            if (IsPlSqlWrongNumberOrTypes(e) || errorCode is "1858" or "1861" or "1843" or "12899" or "1400" or "1438")
+            // ORA-01776/01779 (DML on a view column Oracle cannot modify) stay
+            // DatabaseOperationFailed, matching the other engines' non-updatable view errors.
+            if (IsPlSqlWrongNumberOrTypes(e)
+                || errorCode is "1858" or "1861" or "1843" or "1839" or "1847" or "12899" or "1400" or "1438")
             {
                 return DataApiBuilderException.SubStatusCodes.DatabaseInputError;
             }

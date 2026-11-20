@@ -929,17 +929,6 @@
               "action": "delete"
             }
           ]
-        },
-        {
-          "role": "database_policy_tester",
-          "actions": [
-            {
-              "action": "create",
-              "policy": {
-                "database": "true"
-              }
-            }
-          ]
         }
       ]
     },
