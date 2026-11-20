@@ -56,6 +56,22 @@ Data API builder supports Oracle Database 19c and later through
     silently connecting without a token; token acquisition is retried on the next request. When
     the option is omitted, token use is best effort and a missing credential is logged as a
     warning and disables token use for that data source.
+- The `managed-identity-scope` data-source option sets the scope DAB requests from
+  `DefaultAzureCredential`. Oracle Database's Microsoft Entra integration has no global resource
+  such as `https://database.windows.net/.default`: the operator registers the database as an
+  Entra app, and the token must be issued for that registration's App ID URI. Set the option to
+  `<App ID URI>/session:scope:connect` (for example
+  `https://example.com/111aa1aa-0000-0000-0000-000000000000/session:scope:connect`), as in
+  Oracle's "Configuring the Oracle Database for Microsoft Entra ID Integration".
+  - The option is optional. When it is omitted DAB keeps requesting
+    `https://database.oracle.com/.default`, which Oracle's Entra integration usually does not
+    accept, and with `managed-identity: true` it logs a startup warning naming the option.
+  - A set value must be an absolute URI with a host and no whitespace; anything else fails startup
+    with a 503 `ErrorInInitialization`.
+  - Tokens are cached per scope, so data sources with different scopes never share a token.
+  - A token supplied by the configuration controller is used as-is; the option does not apply to it.
+  - The option is configuration-file only (no CLI flag). Token acquisition for a configured scope
+    has been unit-tested with a mocked credential only, not against an Entra-integrated database.
 - Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
   (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
 
