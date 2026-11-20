@@ -221,7 +221,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 Dictionary<string, SingleValueNode> claimValueNodes = dbPolicy.ClaimValues.ToDictionary(
                     claimValue => claimValue.Key,
-                    claimValue => (SingleValueNode)new ConstantNode(claimValue.Value));
+                    // Marked as claim values so engine literal rules (Oracle's '' as NULL) apply only
+                    // to literals the policy author wrote.
+                    claimValue => (SingleValueNode)PolicyClaimConstants.Create(claimValue.Value));
 
                 // Since dbPolicy is nothing but filters to be added by virtue of database policy, we prefix it with
                 // ?$filter= so that it conforms with the format followed by other filter predicates.
