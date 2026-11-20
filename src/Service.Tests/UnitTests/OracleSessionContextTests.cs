@@ -5,9 +5,13 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.IO;
 using System.IO.Abstractions.TestingHelpers;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Security.Claims;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.DataApiBuilder.Config;
@@ -16,6 +20,7 @@ using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
 using Azure.DataApiBuilder.Core.Resolvers.Factories;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -295,6 +300,175 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(after.IsSessionContextEnabled(sourceName));
         }
 
+        [TestMethod]
+        public void BuildSessionContextBlock_ValueAtLimit_IsForwarded()
+        {
+            string atLimit = new('x', OracleQueryExecutor.SESSION_CONTEXT_MAX_VALUE_BYTES);
+
+            (_, List<(string Name, string Value)> parameters) =
+                OracleQueryExecutor.BuildSessionContextBlock([new("groups", atLimit)]);
+
+            Assert.AreEqual(atLimit, parameters[1].Value);
+        }
+
+        [DataTestMethod]
+        [DataRow(4001, 'x', DisplayName = "4001 single-byte characters")]
+        [DataRow(2001, 'é', DisplayName = "2001 two-byte characters (4002 UTF-8 bytes)")]
+        public void BuildSessionContextBlock_OversizedValue_FailsClosedWithoutEchoingTheValue(int length, char character)
+        {
+            string oversized = new(character, length);
+
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(
+                () => OracleQueryExecutor.BuildSessionContextBlock([new("roles", "authenticated"), new("groups", oversized)]));
+
+            Assert.AreEqual(HttpStatusCode.Forbidden, ex.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.UnsupportedClaimValueType, ex.SubStatusCode);
+            StringAssert.Contains(ex.Message, "groups");
+            Assert.IsFalse(ex.Message.Contains(oversized, StringComparison.Ordinal), "The claim value must not be echoed.");
+        }
+
+        [TestMethod]
+        public void ApplySessionContext_OversizedValue_DoesNotExecute()
+        {
+            RecordingOracleQueryExecutor executor = CreateRecordingExecutor(sessionContext: true);
+            using OracleConnection connection = ClosedConnection();
+
+            Assert.ThrowsException<DataApiBuilderException>(() => executor.Apply(
+                connection,
+                ClaimsContext("groups", new string('x', 4001)),
+                dataSourceName: string.Empty,
+                transaction: null));
+
+            Assert.AreEqual(0, executor.CommandTexts.Count, "No partial claim set may reach the session.");
+        }
+
+        [TestMethod]
+        public void OracleOptions_SessionContextPackageOwner_IsReadFromOptions()
+        {
+            DataSource unset = new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", new());
+            DataSource set = new(
+                DatabaseType.Oracle,
+                "User Id=x;Password=y;Data Source=localhost:1521/x",
+                new() { [OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION] = "SEC_ADMIN" });
+
+            Assert.IsNull(unset.GetTypedOptions<OracleOptions>()!.SessionContextPackageOwner);
+            Assert.AreEqual("SEC_ADMIN", set.GetTypedOptions<OracleOptions>()!.SessionContextPackageOwner);
+        }
+
+        [DataTestMethod]
+        [DataRow(null, "BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS; END;", DisplayName = "unset keeps the unqualified call")]
+        [DataRow("SEC_ADMIN", "BEGIN SEC_ADMIN.DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS; END;", DisplayName = "owner qualifies the call")]
+        [DataRow("sys$Owner#1", "BEGIN sys$Owner#1.DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS; END;", DisplayName = "unquoted identifier characters")]
+        public void ApplySessionContext_PackageOwner_QualifiesEveryCall(string? owner, string expected)
+        {
+            RecordingOracleQueryExecutor executor = CreateRecordingExecutor(sessionContext: true, packageOwner: owner);
+            using OracleConnection connection = ClosedConnection();
+
+            executor.Apply(connection, httpContext: null, dataSourceName: string.Empty, transaction: null);
+            Assert.AreEqual(expected, executor.CommandTexts[0]);
+
+            executor.Apply(connection, ClaimsContext("sub", "user-1"), dataSourceName: string.Empty, transaction: null);
+            string qualified = (owner is null ? string.Empty : owner + ".") + "DAB_SESSION_CONTEXT_PKG.SET_CLAIM(:dab_claim_key0, :dab_claim_value0);";
+            StringAssert.Contains(executor.CommandTexts[1], qualified);
+        }
+
+        [DataTestMethod]
+        [DataRow("", DisplayName = "empty")]
+        [DataRow("  ", DisplayName = "blank")]
+        [DataRow("SEC_ADMIN; DROP TABLE BOOKS", DisplayName = "statement injection")]
+        [DataRow("\"SecAdmin\"", DisplayName = "quoted identifier")]
+        [DataRow("SEC.ADMIN", DisplayName = "dotted name")]
+        [DataRow("1OWNER", DisplayName = "leading digit")]
+        [DataRow("SEC_ADMIN\n", DisplayName = "trailing newline")]
+        [DataRow("A23456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789", DisplayName = "129 characters")]
+        public void Constructor_InvalidPackageOwner_FailsAtStartup(string owner)
+        {
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(
+                () => CreateRecordingExecutor(sessionContext: true, packageOwner: owner));
+
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
+            StringAssert.Contains(ex.Message, OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION);
+        }
+
+        /// <summary>
+        /// The config converter turns option strings that parse as booleans into bools. An owner
+        /// spelled like a boolean must still be honoured (unquoted identifiers are case-insensitive),
+        /// never silently dropped back to the unqualified call.
+        /// </summary>
+        [TestMethod]
+        public void PackageOwner_ParsedFromConfigJsonAsBoolean_IsStillApplied()
+        {
+            string json = "{\"database-type\":\"oracle\",\"connection-string\":\"User Id=x;Password=y;Data Source=localhost:1521/x\",\"options\":{\"set-session-context\":true,\"session-context-package-owner\":\"TRUE\"}}";
+            DataSource source = JsonSerializer.Deserialize<DataSource>(json, RuntimeConfigLoader.GetSerializationOptions())!;
+
+            Assert.AreEqual("TRUE", source.GetTypedOptions<OracleOptions>()!.SessionContextPackageOwner, ignoreCase: true);
+        }
+
+        /// <summary>
+        /// SYS_CONTEXT returns at most 256 bytes unless the third (length) argument is given, so every
+        /// documented read of a forwarded claim must pass 4000 (#73), and the owner option must be in
+        /// the schema and the design doc (#66).
+        /// </summary>
+        [TestMethod]
+        public void SessionContextDocsScriptAndFixture_ReadClaimsWithTheFullLength()
+        {
+            string root = FindRepositoryRoot();
+            Regex twoArgumentRead = new(@"SYS_CONTEXT\('DAB_SESSION_CONTEXT',\s*'[^']*'\)", RegexOptions.IgnoreCase);
+            Regex fullLengthRead = new(@"SYS_CONTEXT\('DAB_SESSION_CONTEXT',\s*'[^']*',\s*4000\)", RegexOptions.IgnoreCase);
+            foreach (string relativePath in new[]
+            {
+                Path.Combine("docker", "oracle-session-context.sql"),
+                Path.Combine("docs", "design", "oracle-support.md"),
+                Path.Combine("src", "Service.Tests", "DatabaseSchema-Oracle.sql"),
+            })
+            {
+                string text = File.ReadAllText(Path.Combine(root, relativePath));
+                Assert.IsFalse(twoArgumentRead.IsMatch(text), $"{relativePath} reads a claim with the 256-byte default: {twoArgumentRead.Match(text).Value}");
+                Assert.IsTrue(fullLengthRead.IsMatch(text), $"{relativePath} has no full-length SYS_CONTEXT read.");
+            }
+
+            string docs = File.ReadAllText(Path.Combine(root, "docs", "design", "oracle-support.md"));
+            StringAssert.Contains(docs, "256 bytes");
+            StringAssert.Contains(docs, $"`{OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION}`");
+            StringAssert.Contains(docs, "assume any identity");
+
+            string script = File.ReadAllText(Path.Combine(root, "docker", "oracle-session-context.sql"));
+            StringAssert.Contains(script, OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION);
+            StringAssert.Contains(script, "assume any identity");
+
+            using JsonDocument schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "schemas", "dab.draft.schema.json")));
+            JsonElement owner = default;
+            foreach (JsonElement branch in schema.RootElement
+                .GetProperty("properties").GetProperty("data-source").GetProperty("allOf").EnumerateArray())
+            {
+                if (branch.TryGetProperty("then", out JsonElement then) &&
+                    then.GetProperty("properties").TryGetProperty("options", out JsonElement options) &&
+                    options.GetProperty("properties").TryGetProperty(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION, out JsonElement found))
+                {
+                    owner = found;
+                }
+            }
+
+            Assert.AreNotEqual(JsonValueKind.Undefined, owner.ValueKind, "The owner option is missing from the Oracle options schema.");
+            Assert.AreEqual("string", owner.GetProperty("type").GetString());
+            Regex schemaPattern = new(owner.GetProperty("pattern").GetString()!);
+            Assert.IsTrue(schemaPattern.IsMatch("SEC_ADMIN"));
+            Assert.IsFalse(schemaPattern.IsMatch("SEC_ADMIN; DROP TABLE BOOKS"));
+        }
+
+        private static string FindRepositoryRoot()
+        {
+            DirectoryInfo? directory = new(AppContext.BaseDirectory);
+            while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "schemas", "dab.draft.schema.json")))
+            {
+                directory = directory.Parent;
+            }
+
+            Assert.IsNotNull(directory, "Could not locate the repository root.");
+            return directory.FullName;
+        }
+
         private static RuntimeConfigProvider CreateOracleProvider(Dictionary<string, object?> options)
         {
             RuntimeConfig config = new(
@@ -311,9 +485,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             return TestHelper.GenerateInMemoryRuntimeConfigProvider(config);
         }
 
-        private static RecordingOracleQueryExecutor CreateRecordingExecutor(bool sessionContext)
+        private static RecordingOracleQueryExecutor CreateRecordingExecutor(bool sessionContext, string? packageOwner = null)
         {
-            RuntimeConfigProvider provider = CreateDirectProvider(sessionContext);
+            RuntimeConfigProvider provider = CreateDirectProvider(sessionContext, packageOwner);
             return new RecordingOracleQueryExecutor(
                 provider,
                 new OracleDbExceptionParser(provider),
@@ -331,11 +505,16 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 new Mock<IHttpContextAccessor>().Object);
         }
 
-        private static RuntimeConfigProvider CreateDirectProvider(bool sessionContext)
+        private static RuntimeConfigProvider CreateDirectProvider(bool sessionContext, string? packageOwner = null)
         {
             Dictionary<string, object?> options = sessionContext
                 ? new() { ["set-session-context"] = true }
                 : new();
+            if (packageOwner is not null)
+            {
+                options[OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION] = packageOwner;
+            }
+
             RuntimeConfig config = new(
                 Schema: "",
                 DataSource: new(DatabaseType.Oracle, "User Id=x;Password=y;Data Source=localhost:1521/x", options),

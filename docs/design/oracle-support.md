@@ -77,6 +77,21 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   `DAB_SESSION_CONTEXT` namespace (`CREATE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG;`)
   and the `DAB_SESSION_CONTEXT_PKG` package. Oracle only permits a namespace's context to be set from
   its associated package. The DAB login needs `EXECUTE` on the package.
+- **Package owner.** The package lands in the schema of whoever runs the script, and by default DAB
+  calls it unqualified, which resolves in the DAB login's schema. When a DBA other than the DAB login
+  owns it, the unqualified call fails startup and every request with `PLS-00201`. Set the
+  data-source option `session-context-package-owner` to the owning schema (for example
+  `"SEC_ADMIN"`) and DAB calls `SEC_ADMIN.DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS` / `.SET_CLAIM`, or
+  create a private synonym `DAB_USER.DAB_SESSION_CONTEXT_PKG` for the owner's package and leave the
+  option unset. The owner is written into the command text, so it must be an unquoted Oracle
+  identifier (a letter, then up to 127 letters, digits, `_`, `$` or `#`); any other value fails
+  startup with a 503 `ErrorInInitialization`. Quoted (case-sensitive) schema names are not
+  supported; use a synonym for those. The option is configuration-file only.
+- **Trust boundary.** `SET_CLAIM` writes any attribute with definer rights and does not check its
+  caller. Any session that holds `EXECUTE` on the package can set `sub` or `roles` to any value, so
+  `EXECUTE` is equivalent to "can assume any identity" for every `SYS_CONTEXT`-based policy. Grant
+  it only to the dedicated DAB login (never to `PUBLIC`), and do not share that login with other
+  applications.
 - **Claim values.** Claims come from the shared, provider-agnostic pipeline
   (`AuthorizationResolver.GetProcessedUserClaims`): a single-valued claim is forwarded as a scalar, and
   multiple claims of the same name as a JSON array string (e.g. `["group1","group2"]`). `roles` resolves
@@ -99,20 +114,31 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
 - **Injection safety.** Claim names and values are always bound parameters; claim text is never
   concatenated into SQL.
 - **Caching.** Enabling the option disables response caching for the data source, the same as MSSQL.
-- **Consumption.** Database-side policies read values with `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>')`
-  (for example in a `DBMS_RLS.ADD_POLICY` predicate function or a view mapped as an entity), and
-  multi-valued claims are expanded with `JSON_TABLE`:
+- **Consumption.** Database-side policies read values with
+  `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>', 4000)` (for example in a `DBMS_RLS.ADD_POLICY`
+  predicate function or a view mapped as an entity). Always pass the third (length) argument:
+  without it `SYS_CONTEXT` returns at most 256 bytes, so a longer claim (a JSON array of groups, for
+  example) reaches the policy truncated and is no longer valid JSON. Multi-valued claims are
+  expanded with `JSON_TABLE`:
 
 ```sql
 WHERE region IN (
   SELECT jt.value
-  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions'), '$[*]'
+  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions', 4000), '$[*]'
        COLUMNS (value VARCHAR2(4000) PATH '$')) jt)
 ```
 
 - **Limits.** `DBMS_SESSION.SET_CONTEXT` values are `VARCHAR2(4000)` (MSSQL session context allows up
   to 1 MB), and context attribute names are length-limited (30 bytes before Oracle 12.2, 128 after), so
-  a very large claims array or a URI-style claim name cannot be forwarded.
+  a very large claims array or a URI-style claim name cannot be forwarded. Such a claim **fails the
+  request closed**; it is never skipped or truncated, because dropping a claim can widen a
+  database-side policy. DAB checks values before the round trip: a value longer than 4000 UTF-8 bytes
+  returns 403 `UnsupportedClaimValueType`, names the claim (not its value), and no context command
+  runs. The check counts UTF-8 bytes, which is exact for an `AL32UTF8` database; a single-byte
+  database charset can store some values the check rejects, which errs on the side of failing
+  closed. An over-long claim name is rejected by Oracle inside the block, and the request fails with
+  the parsed database error. Either way every request from that principal fails until the claim is
+  shortened or removed from the token.
 
 DAB-config database policies (`@claims.x` in `permissions`) are a separate mechanism: they bind claim
 values in-process and use only the first value of a duplicated claim; they do not read session context.
