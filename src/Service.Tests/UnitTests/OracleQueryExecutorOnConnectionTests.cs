@@ -11,6 +11,7 @@ using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
 using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Resolvers;
+using Azure.DataApiBuilder.Service.Exceptions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -57,9 +58,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             conn.FailNextExecuteCount = 5;
             FakeDbTransaction tx = new(conn);
 
-            try
-            {
-                executor.ExecuteQueryOnConnection<object>(
+            DataApiBuilderException exception = Assert.ThrowsException<DataApiBuilderException>(
+                () => executor.ExecuteQueryOnConnection<object>(
                     conn,
                     "INSERT INTO t VALUES (1)",
                     new Dictionary<string, DbConnectionParam>(),
@@ -67,14 +67,13 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     httpContext: null,
                     args: null,
                     dataSourceName: string.Empty,
-                    transaction: tx);
-                Assert.Fail("Expected a database exception.");
-            }
-            catch (Exception)
-            {
-                Assert.AreEqual(1, conn.LastCommand.ExecuteReaderCount,
-                    "Failed child statement on a local transaction must not Polly-retry.");
-            }
+                    transaction: tx));
+
+            Assert.IsInstanceOfType<FakeDbException>(exception.InnerException);
+            Assert.AreEqual(1, conn.LastCommand.ExecuteReaderCount,
+                "Failed child statement on a local transaction must not Polly-retry.");
+            Assert.AreEqual(4, conn.LastCommand.FailCount,
+                "Only the first of the five scripted failures may be consumed.");
         }
 
         /// <summary>

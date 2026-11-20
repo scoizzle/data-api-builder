@@ -926,6 +926,35 @@ namespace Cli.Tests
         }
 
         /// <summary>
+        /// dab configure must not load and rewrite a config whose Oracle command-timeout is negative.
+        /// Command: dab configure --data-source.options.set-session-context true
+        /// </summary>
+        [TestMethod]
+        public void TestConfigureRejectsNegativeOracleCommandTimeout()
+        {
+            string oracleConfig = "{" + SCHEMA_PROPERTY + @",
+                ""data-source"": {
+                  ""database-type"": ""oracle"",
+                  ""connection-string"": """ + SAMPLE_TEST_CONN_STRING + @""",
+                  ""options"": {
+                    ""command-timeout"": -1
+                  }
+                }, " + RUNTIME_SECTION_WITH_EMPTY_ENTITIES + "}";
+            // Not SetupFileSystemWithInitialConfig: that helper asserts the config parses.
+            _fileSystem!.AddFile(TEST_RUNTIME_CONFIG_FILE, new MockFileData(oracleConfig));
+
+            ConfigureOptions options = new(
+                dataSourceOptionsSetSessionContext: true,
+                config: TEST_RUNTIME_CONFIG_FILE
+            );
+
+            bool isSuccess = TryConfigureSettings(options, _runtimeConfigLoader!, _fileSystem!);
+
+            Assert.IsFalse(isSuccess);
+            Assert.AreEqual(oracleConfig, _fileSystem!.File.ReadAllText(TEST_RUNTIME_CONFIG_FILE));
+        }
+
+        /// <summary>
         /// dab configure copies existing data-source options when the database type stays the same,
         /// and starts from an empty option set when the database type changes.
         /// </summary>

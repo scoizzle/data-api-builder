@@ -246,6 +246,29 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// A negative command-timeout is rejected when the config is read, matching the schema's
+        /// minimum of 0, instead of reaching OracleCommand.CommandTimeout at request time.
+        /// 0 (no cap) stays valid.
+        /// </summary>
+        [TestMethod]
+        public void DataSourceConverter_NegativeCommandTimeout_IsRejected()
+        {
+            System.Text.Json.JsonSerializerOptions options = new();
+            options.Converters.Add(new Azure.DataApiBuilder.Config.Converters.DataSourceConverterFactory());
+
+            System.Text.Json.JsonException exception = Assert.ThrowsException<System.Text.Json.JsonException>(
+                () => System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                    """{"database-type":"oracle","connection-string":"","options":{"command-timeout":-1}}""",
+                    options));
+            StringAssert.Contains(exception.Message, "command-timeout");
+
+            DataSource noCap = System.Text.Json.JsonSerializer.Deserialize<DataSource>(
+                """{"database-type":"oracle","connection-string":"","options":{"command-timeout":0}}""",
+                options)!;
+            Assert.AreEqual(0, noCap.GetTypedOptions<OracleOptions>()!.CommandTimeoutSeconds);
+        }
+
+        /// <summary>
         /// Cache eligibility is decided per data source: a secondary Oracle source with
         /// set-session-context enabled is not cacheable, and it does not change the answer for the
         /// default source.
