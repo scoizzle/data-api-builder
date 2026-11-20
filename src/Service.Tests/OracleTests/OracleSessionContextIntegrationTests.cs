@@ -245,6 +245,46 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
             }
         }
 
+        /// <summary>
+        /// A JSON-array claim longer than SYS_CONTEXT's 256-byte default comes back intact when the
+        /// documented three-argument form (length 4000) reads it (#73).
+        /// </summary>
+        [TestMethod]
+        public async Task LongJsonArrayClaim_ReadsBackIntactWithFullLength()
+        {
+            if (!TryOpen(out OracleConnection connection))
+            {
+                FailOrSkip("Live Oracle is not available.");
+                return;
+            }
+
+            using (connection)
+            {
+                EnsureSessionContextPackage(connection);
+                OracleQueryExecutor executor = CreateSessionContextExecutor(connection.ConnectionString);
+                List<Claim> groups = new();
+                for (int i = 0; i < 40; i++)
+                {
+                    groups.Add(new Claim("groups", "group-with-a-long-name-" + i.ToString("D2")));
+                }
+
+                DefaultHttpContext caller = new() { User = new ClaimsPrincipal(new ClaimsIdentity(groups, "TestAuth")) };
+                string expected = JsonSerializer.Serialize(groups.ConvertAll(claim => claim.Value));
+                Assert.IsTrue(Encoding.UTF8.GetByteCount(expected) > 256, "The claim must exceed the 256-byte default.");
+
+                string? forwarded = await executor.ExecuteQueryOnConnectionAsync(
+                    connection,
+                    "SELECT SYS_CONTEXT('DAB_SESSION_CONTEXT', 'groups', 4000) FROM DUAL",
+                    new Dictionary<string, DbConnectionParam>(),
+                    ReadContextAsync,
+                    dataSourceName: string.Empty,
+                    transaction: null,
+                    httpContext: caller);
+
+                Assert.AreEqual(expected, forwarded);
+            }
+        }
+
         private static async Task AssertContextlessStatementClears(bool useSyncCore)
         {
             if (!TryOpen(out OracleConnection connection))

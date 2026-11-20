@@ -68,6 +68,12 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         private Dictionary<string, bool> _dataSourceToSessionContextUsage;
 
         /// <summary>
+        /// DatasourceName to the session-context package name, qualified with the configured
+        /// <c>session-context-package-owner</c> when one is set.
+        /// </summary>
+        private readonly Dictionary<string, string> _dataSourceSessionContextPackages = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// DatasourceName to the maximum time, in seconds, one command may run (0 disables).
         /// Applied per command in <see cref="PrepareDbCommand(OracleConnection, string, IDictionary{string, DbConnectionParam}, HttpContext?, string)"/>;
         /// ODP.NET's process-wide OracleConfiguration.CommandTimeout cannot be used because it
@@ -156,7 +162,41 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 // executes a parameterized anonymous block as a separate command on the same connection
                 // before each statement (see ApplySessionContext and docs/design/oracle-support.md).
                 _dataSourceToSessionContextUsage[dataSourceName] = oracleOptions.SetSessionContext;
+                _dataSourceSessionContextPackages[dataSourceName] =
+                    ResolveSessionContextPackage(dataSourceName, oracleOptions.SessionContextPackageOwner);
             }
+        }
+
+        /// <summary>
+        /// An unquoted Oracle identifier (letter first; letters, digits, _, $ and #; at most 128
+        /// bytes). The owner is concatenated into the context block, so nothing else is accepted.
+        /// </summary>
+        private static readonly Regex _unquotedIdentifierRegex = new(
+            @"^[A-Za-z][A-Za-z0-9_$#]{0,127}$",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Returns the package name the context block calls: unqualified when no owner is configured,
+        /// otherwise <c>OWNER.DAB_SESSION_CONTEXT_PKG</c>. An owner that is not an unquoted Oracle
+        /// identifier fails startup, because it is written into the command text.
+        /// </summary>
+        private static string ResolveSessionContextPackage(string dataSourceName, string? owner)
+        {
+            if (owner is null)
+            {
+                return SESSION_CONTEXT_PACKAGE;
+            }
+
+            if (!_unquotedIdentifierRegex.IsMatch(owner))
+            {
+                throw new DataApiBuilderException(
+                    message: $"The '{OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION}' option of data source '{dataSourceName}' " +
+                        "must be an unquoted Oracle schema name: a letter followed by up to 127 letters, digits, '_', '$' or '#'.",
+                    statusCode: HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
+            return owner + "." + SESSION_CONTEXT_PACKAGE;
         }
 
         /// <summary>
@@ -335,7 +375,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             contextCommand = BuildSessionContextCommand(
                 conn,
                 AuthorizationResolver.GetProcessedUserClaims(httpContext),
-                dataSourceName);
+                string.IsNullOrEmpty(dataSourceName) ? ConfigProvider.GetConfig().DefaultDataSourceName : dataSourceName);
             if (transaction is OracleTransaction oracleTransaction)
             {
                 contextCommand.Transaction = oracleTransaction;
@@ -893,6 +933,11 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         public const string SESSION_CONTEXT_PACKAGE = "DAB_SESSION_CONTEXT_PKG";
 
         /// <summary>
+        /// Largest value, in bytes, DBMS_SESSION.SET_CONTEXT stores for one attribute.
+        /// </summary>
+        public const int SESSION_CONTEXT_MAX_VALUE_BYTES = 4000;
+
+        /// <summary>
         /// Whether claim forwarding is enabled for the data source. Data sources that are unknown to
         /// this executor (e.g. during startup metadata discovery) are treated as disabled.
         /// An empty name uses the default data source, matching the other executors.
@@ -910,25 +955,40 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Builds the PL/SQL block that clears any claims left on the session and sets the current
         /// request's claims. Exposed as internal for unit testing.
+        /// A value longer than <see cref="SESSION_CONTEXT_MAX_VALUE_BYTES"/> UTF-8 bytes fails the
+        /// request closed (403) before any command runs: dropping or truncating a claim could widen
+        /// a database-side policy, and Oracle would otherwise fail the block after a partial set.
         /// </summary>
         /// <param name="claims">Claim name/value pairs to forward.</param>
+        /// <param name="packageName">Package to call, qualified with its owner when one is configured.</param>
         /// <returns>The anonymous block text and the bind parameters it references.</returns>
+        /// <exception cref="DataApiBuilderException">A claim value is too large to forward.</exception>
         internal static (string CommandText, List<(string Name, string Value)> Parameters) BuildSessionContextBlock(
-            IEnumerable<KeyValuePair<string, string>> claims)
+            IEnumerable<KeyValuePair<string, string>> claims,
+            string packageName = SESSION_CONTEXT_PACKAGE)
         {
             StringBuilder block = new();
-            block.Append("BEGIN ").Append(SESSION_CONTEXT_PACKAGE).Append(".CLEAR_CLAIMS; ");
+            block.Append("BEGIN ").Append(packageName).Append(".CLEAR_CLAIMS; ");
 
             List<(string Name, string Value)> parameters = new();
             int index = 0;
             foreach ((string claimType, string claimValue) in claims)
             {
+                if (claimValue is not null && Encoding.UTF8.GetByteCount(claimValue) > SESSION_CONTEXT_MAX_VALUE_BYTES)
+                {
+                    // The value is never echoed: it is caller data and can be large.
+                    throw new DataApiBuilderException(
+                        message: $"The claim '{claimType}' is longer than {SESSION_CONTEXT_MAX_VALUE_BYTES} bytes and cannot be forwarded to the Oracle session context.",
+                        statusCode: HttpStatusCode.Forbidden,
+                        subStatusCode: DataApiBuilderException.SubStatusCodes.UnsupportedClaimValueType);
+                }
+
                 string keyParameter = $"dab_claim_key{index}";
                 string valueParameter = $"dab_claim_value{index}";
                 parameters.Add((keyParameter, claimType));
                 parameters.Add((valueParameter, claimValue));
 
-                block.Append(SESSION_CONTEXT_PACKAGE)
+                block.Append(packageName)
                     .Append(".SET_CLAIM(:").Append(keyParameter)
                     .Append(", :").Append(valueParameter)
                     .Append("); ");
@@ -949,7 +1009,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             Dictionary<string, string> claims,
             string dataSourceName)
         {
-            (string commandText, List<(string Name, string Value)> claimParameters) = BuildSessionContextBlock(claims);
+            (string commandText, List<(string Name, string Value)> claimParameters) = BuildSessionContextBlock(
+                claims,
+                _dataSourceSessionContextPackages.TryGetValue(dataSourceName, out string? packageName) ? packageName : SESSION_CONTEXT_PACKAGE);
 
             OracleCommand cmd = conn.CreateCommand();
             cmd.CommandType = CommandType.Text;
