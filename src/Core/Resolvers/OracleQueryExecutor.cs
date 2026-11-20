@@ -172,7 +172,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// bytes). The owner is concatenated into the context block, so nothing else is accepted.
         /// </summary>
         private static readonly Regex _unquotedIdentifierRegex = new(
-            @"^[A-Za-z][A-Za-z0-9_$#]{0,127}$",
+            @"^[A-Za-z][A-Za-z0-9_$#]{0,127}\z",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         /// <summary>

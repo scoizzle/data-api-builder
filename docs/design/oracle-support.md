@@ -134,7 +134,9 @@ WHERE region IN (
   request closed**; it is never skipped or truncated, because dropping a claim can widen a
   database-side policy. DAB checks values before the round trip: a value longer than 4000 UTF-8 bytes
   returns 403 `UnsupportedClaimValueType`, names the claim (not its value), and no context command
-  runs. An over-long claim name is rejected by Oracle inside the block, and the request fails with
+  runs. The check counts UTF-8 bytes, which is exact for an `AL32UTF8` database; a single-byte
+  database charset can store some values the check rejects, which errs on the side of failing
+  closed. An over-long claim name is rejected by Oracle inside the block, and the request fails with
   the parsed database error. Either way every request from that principal fails until the claim is
   shortened or removed from the token.
 

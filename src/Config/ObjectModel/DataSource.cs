@@ -89,7 +89,7 @@ public record DataSource(
                 CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
                 ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION),
-                SessionContextPackageOwner: ReadStringOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION));
+                SessionContextPackageOwner: ReadTextOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
@@ -103,6 +103,30 @@ public record DataSource(
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads a free-text option. The config converter stores option strings that parse as booleans
+    /// ("TRUE", "false") as bools, so those come back as their text instead of being dropped; any other
+    /// non-string value is returned as its raw text for the consumer to reject.
+    /// </summary>
+    private string? ReadTextOption(string option)
+    {
+        if (Options is null || !Options.TryGetValue(option, out object? value))
+        {
+            return null;
+        }
+
+        return value switch
+        {
+            null => null,
+            string stringValue => stringValue,
+            bool boolValue => boolValue ? "TRUE" : "FALSE",
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Null } => null,
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } element => element.GetString(),
+            System.Text.Json.JsonElement element => element.GetRawText(),
+            _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture),
+        };
     }
 
     private bool ReadBoolOption(string option)

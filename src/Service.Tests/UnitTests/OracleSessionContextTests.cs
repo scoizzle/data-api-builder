@@ -343,6 +343,7 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow("\"SecAdmin\"", DisplayName = "quoted identifier")]
         [DataRow("SEC.ADMIN", DisplayName = "dotted name")]
         [DataRow("1OWNER", DisplayName = "leading digit")]
+        [DataRow("SEC_ADMIN\n", DisplayName = "trailing newline")]
         [DataRow("A23456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789", DisplayName = "129 characters")]
         public void Constructor_InvalidPackageOwner_FailsAtStartup(string owner)
         {
@@ -352,6 +353,20 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
             Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
             StringAssert.Contains(ex.Message, OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION);
+        }
+
+        /// <summary>
+        /// The config converter turns option strings that parse as booleans into bools. An owner
+        /// spelled like a boolean must still be honoured (unquoted identifiers are case-insensitive),
+        /// never silently dropped back to the unqualified call.
+        /// </summary>
+        [TestMethod]
+        public void PackageOwner_ParsedFromConfigJsonAsBoolean_IsStillApplied()
+        {
+            string json = "{\"database-type\":\"oracle\",\"connection-string\":\"User Id=x;Password=y;Data Source=localhost:1521/x\",\"options\":{\"set-session-context\":true,\"session-context-package-owner\":\"TRUE\"}}";
+            DataSource source = JsonSerializer.Deserialize<DataSource>(json, RuntimeConfigLoader.GetSerializationOptions())!;
+
+            Assert.AreEqual("TRUE", source.GetTypedOptions<OracleOptions>()!.SessionContextPackageOwner, ignoreCase: true);
         }
 
         /// <summary>
