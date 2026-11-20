@@ -22,6 +22,19 @@ namespace Azure.DataApiBuilder.Core.Services
             RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         /// <summary>
+        /// Enabled BEFORE EACH ROW insert triggers on one table. <c>OWNER</c> in ALL_TRIGGERS is the
+        /// trigger's owner, which can differ from the table's; the table's schema is <c>TABLE_OWNER</c>.
+        /// <c>WHEN_CLAUSE</c> holds a header guard such as <c>new.id IS NULL</c>, which is not part
+        /// of <c>TRIGGER_BODY</c>.
+        /// </summary>
+        internal const string TRIGGER_IDENTITY_QUERY =
+            "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, TRIGGER_BODY, WHEN_CLAUSE FROM ALL_TRIGGERS " +
+            "WHERE TABLE_OWNER = :owner AND TABLE_NAME = :table_name AND BASE_OBJECT_TYPE = 'TABLE' " +
+            "AND TRIGGER_TYPE = 'BEFORE EACH ROW' " +
+            "AND TRIGGERING_EVENT LIKE '%INSERT%' " +
+            "AND STATUS = 'ENABLED'";
+
+        /// <summary>
         /// Reads BEFORE EACH ROW insert triggers for one table into <see cref="_triggerIdentityByTable"/>.
         /// A null <c>TRIGGER_BODY</c> (wrapped trigger) is logged and contributes no identity columns.
         /// A catalog error other than a command timeout is non-fatal. ORA-01013 fails startup.
@@ -42,17 +55,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 return;
             }
 
-            const string triggerQuery =
-                "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, TRIGGER_BODY FROM ALL_TRIGGERS " +
-                "WHERE OWNER = :owner AND TABLE_NAME = :table_name " +
-                "AND TRIGGER_TYPE = 'BEFORE EACH ROW' " +
-                "AND TRIGGERING_EVENT LIKE '%INSERT%' " +
-                "AND STATUS = 'ENABLED'";
-
             Dictionary<string, bool> identity = new(StringComparer.OrdinalIgnoreCase);
             try
             {
-                using OracleCommand command = CreateMetadataCommand(connection, triggerQuery);
+                using OracleCommand command = CreateMetadataCommand(connection, TRIGGER_IDENTITY_QUERY);
                 // TRIGGER_BODY is an Oracle LONG. ODP.NET returns an empty string unless this is set.
                 command.InitialLONGFetchSize = -1;
                 command.Parameters.Add(new OracleParameter("owner", owner));
@@ -74,9 +80,10 @@ namespace Azure.DataApiBuilder.Core.Services
 
                     string? triggeringEvent = reader.IsDBNull(1) ? null : reader.GetString(1);
                     string? triggerType = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    string? whenClause = reader.IsDBNull(4) ? null : reader.GetString(4);
                     MergeTriggerIdentity(
                         identity,
-                        ClassifyTrigger(triggerType, triggeringEvent, reader.GetString(3)));
+                        ClassifyTrigger(triggerType, triggeringEvent, reader.GetString(3), whenClause));
                 }
             }
             catch (OperationCanceledException)
@@ -183,12 +190,15 @@ namespace Azure.DataApiBuilder.Core.Services
         /// Classifies sequence assignments in one trigger. <paramref name="isReadOnly"/> is false
         /// only when the assignment sits in a THEN branch whose condition is exactly
         /// <c>:new.col IS NULL</c> or <c>(INSERTING|UPDATING) AND :new.col IS NULL</c> for that
-        /// same column. AFTER, statement, and compound triggers contribute nothing.
+        /// same column, or when the trigger header's <paramref name="whenClause"/> is exactly
+        /// <c>new.col IS NULL</c> (the trigger then only runs when the column is null).
+        /// AFTER, statement, and compound triggers contribute nothing.
         /// </summary>
         internal static IReadOnlyList<(string Name, bool IsReadOnly)> ClassifyTrigger(
             string? triggerType,
             string? triggeringEvent,
-            string? triggerBody)
+            string? triggerBody,
+            string? whenClause = null)
         {
             if (!string.IsNullOrWhiteSpace(triggerType)
                 && !string.Equals(triggerType.Trim(), "BEFORE EACH ROW", StringComparison.OrdinalIgnoreCase))
@@ -202,7 +212,38 @@ namespace Azure.DataApiBuilder.Core.Services
                 return [];
             }
 
-            return ClassifyAssignments(triggerBody);
+            List<(string Name, bool IsReadOnly)> columns = ClassifyAssignments(triggerBody);
+            string? headerGuard = string.IsNullOrWhiteSpace(whenClause) ? null : TryParseWhenClauseGuardColumn(whenClause);
+            if (headerGuard is null)
+            {
+                return columns;
+            }
+
+            // Same column comparison as the IF guard in ClassifyAssignments (ordinal ignore-case).
+            return columns
+                .Select(column => column.Name.Equals(headerGuard, StringComparison.OrdinalIgnoreCase)
+                    ? (column.Name, false)
+                    : column)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Parses a WHEN clause of the form <c>new.col IS NULL</c>. The header form has no colon
+        /// before <c>new</c>; the colon form is accepted too.
+        /// </summary>
+        private static string? TryParseWhenClauseGuardColumn(string whenClause)
+        {
+            string normalized = StripOuterParentheses(Regex.Replace(whenClause, @"\s+", " ").Trim());
+            if (normalized.Contains(" OR ", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            Match guard = Regex.Match(
+                normalized,
+                @"^:?new\s*\.\s*(?:""([^""]+)""|([A-Za-z0-9_$#]+))\s+IS\s+NULL$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return guard.Success ? FirstCapture(guard) : null;
         }
 
         /// <summary>

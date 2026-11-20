@@ -134,7 +134,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             QueryExecutorLogger.LogDebug(
                 "{correlationId} Using local OracleTransaction for mutation on data source {dataSourceName} ({oracleDataSource}); skipping ambient TransactionScope.",
-                HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
+                HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor?.HttpContext),
                 dataSourceName,
                 conn.DataSource);
             return conn.BeginTransaction(IsolationLevel.ReadCommitted);
@@ -945,7 +945,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 QueryExecutorLogger.LogWarning(
                     exception: ex,
                     message: message,
-                    HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor.HttpContext),
+                    HttpContextExtensions.GetLoggerCorrelationId(HttpContextAccessor?.HttpContext),
                     ex.Message);
 
                 // An explicit managed-identity: true must never degrade to an unauthenticated

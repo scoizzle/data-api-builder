@@ -253,6 +253,54 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 "Inferred token use is best effort and is disabled after the first failure.");
         }
 
+        /// <summary>
+        /// dab validate builds the executor with a null <see cref="IHttpContextAccessor"/>. A failed
+        /// token acquisition must still surface the managed-identity 503 (forced) or warn and
+        /// continue (inferred), not a NullReferenceException from the correlation-id lookup. #61
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(true, DisplayName = "forced managed identity")]
+        [DataRow(false, DisplayName = "inferred managed identity")]
+        public async Task SetManagedIdentityAccessTokenAsync_NullHttpContextAccessorAndCredentialUnavailable_DoesNotThrowNullReference(bool forced)
+        {
+            Mock<DefaultAzureCredential> credential = new();
+            credential
+                .Setup(c => c.GetTokenAsync(It.IsAny<TokenRequestContext>(), It.IsAny<CancellationToken>()))
+                .Returns(ValueTask.FromException<AccessToken>(new CredentialUnavailableException("no credential")));
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(
+                PASSWORDLESS,
+                options: forced ? new() { { "managed-identity", true } } : null,
+                nullHttpContextAccessor: true);
+            executor.AzureCredential = credential.Object;
+            using OracleConnection conn = executor.CreateConnection(dataSourceName);
+
+            if (forced)
+            {
+                DataApiBuilderException ex = await Assert.ThrowsExceptionAsync<DataApiBuilderException>(
+                    () => executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None));
+                Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
+                StringAssert.Contains(ex.Message, "managed-identity");
+            }
+            else
+            {
+                await executor.SetManagedIdentityAccessTokenIfAnyAsync(conn, dataSourceName, CancellationToken.None);
+            }
+
+            Assert.IsNull(GetAccessToken(conn));
+        }
+
+        [TestMethod]
+        public void BeginLocalReadCommittedTransaction_NullHttpContextAccessor_DoesNotThrowNullReference()
+        {
+            (OracleQueryExecutor executor, string dataSourceName) = CreateExecutor(PASSWORDLESS, nullHttpContextAccessor: true);
+            using OracleConnection conn = executor.CreateConnection(dataSourceName);
+
+            // The connection is never opened, so ODP.NET rejects BeginTransaction; the debug log
+            // that runs first must not dereference the null accessor.
+            Assert.ThrowsException<InvalidOperationException>(
+                () => executor.BeginLocalReadCommittedTransaction(conn, dataSourceName));
+        }
+
         [DataTestMethod]
         [DataRow("User Id=app;Data Source=localhost:1521/svc", null, true, DisplayName = "empty password infers token")]
         [DataRow("User Id=app;Password=x;Data Source=localhost:1521/svc", null, false, DisplayName = "explicit password")]
@@ -365,6 +413,69 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.AreEqual(expected, dataSource.GetTypedOptions<OracleOptions>()!.ManagedIdentity);
         }
+
+        /// <summary>
+        /// The schema allows an @env/@akv reference for managed-identity. A load without variable
+        /// replacement (dab configure, dab add, ...) must keep the reference as written instead of
+        /// rejecting it as an invalid boolean, and must write it back unchanged. #67
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("@env('DAB_ORACLE_MI')")]
+        [DataRow("@akv('dab-oracle-mi')")]
+        public void OracleOptions_ManagedIdentity_UnresolvedReferenceLoadsAndRoundTripsWithoutReplacement(string reference)
+        {
+            string json = OracleConfigJsonWithManagedIdentity("\"" + reference + "\"");
+
+            bool parsed = RuntimeConfigLoader.TryParseConfig(
+                json,
+                out RuntimeConfig? config,
+                out string? parseError,
+                replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: false, doReplaceAkvVar: false));
+
+            Assert.IsTrue(parsed, $"Config load failed: {parseError}");
+            Assert.AreEqual(reference, config!.DataSource.Options![OracleOptions.MANAGED_IDENTITY_OPTION]);
+            StringAssert.Contains(config.ToJson(), "\"managed-identity\": \"" + reference + "\"");
+        }
+
+        [DataTestMethod]
+        [DataRow("true", true)]
+        [DataRow("0", false)]
+        public void OracleOptions_ManagedIdentity_EnvReferenceResolvesWithReplacement(string envValue, bool expected)
+        {
+            const string variable = "DAB_ORACLE_MI_67";
+            Environment.SetEnvironmentVariable(variable, envValue);
+            try
+            {
+                string json = OracleConfigJsonWithManagedIdentity("\"@env('" + variable + "')\"");
+
+                Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(
+                    json,
+                    out RuntimeConfig? config,
+                    replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: true)));
+                Assert.AreEqual(expected, config!.DataSource.GetTypedOptions<OracleOptions>()!.ManagedIdentity);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, null);
+            }
+        }
+
+        [TestMethod]
+        public void OracleOptions_ManagedIdentity_InvalidLiteralRejectedWithoutReplacement()
+        {
+            string json = OracleConfigJsonWithManagedIdentity("\"maybe\"");
+
+            Assert.IsFalse(RuntimeConfigLoader.TryParseConfig(
+                json,
+                out _,
+                replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: false, doReplaceAkvVar: false)));
+        }
+
+        private static string OracleConfigJsonWithManagedIdentity(string managedIdentityJson) =>
+            "{\"$schema\":\"dab.draft.schema.json\"," +
+            "\"data-source\":{\"database-type\":\"oracle\",\"connection-string\":\"User Id=app;Data Source=localhost:1521/svc\"," +
+            "\"options\":{\"managed-identity\":" + managedIdentityJson + "}}," +
+            "\"entities\":{}}";
 
         /// <summary>
         /// The schema's option description and the documented behavior must stay in step with the
@@ -656,7 +767,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string? configToken = null,
             Dictionary<string, object?>? options = null,
             TokenCredential? credential = null,
-            ILogger<IQueryExecutor>? logger = null)
+            ILogger<IQueryExecutor>? logger = null,
+            bool nullHttpContextAccessor = false)
         {
             RuntimeConfig config = new(
                 Schema: string.Empty,
@@ -675,7 +787,8 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 provider,
                 new OracleDbExceptionParser(provider),
                 logger ?? new Mock<ILogger<IQueryExecutor>>().Object,
-                new Mock<IHttpContextAccessor>().Object);
+                // RuntimeConfigValidator (dab validate) builds the executor without an accessor.
+                nullHttpContextAccessor ? null! : new Mock<IHttpContextAccessor>().Object);
 
             return (executor, dataSourceName);
         }

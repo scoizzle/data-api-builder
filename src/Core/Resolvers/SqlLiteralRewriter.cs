@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using Azure.DataApiBuilder.Core.Parsers;
 using Microsoft.OData.UriParser;
 
 namespace Azure.DataApiBuilder.Core.Resolvers
@@ -25,6 +26,23 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         {
             propertyNode = null;
             isNullPredicate = false;
+            return false;
+        }
+
+        /// <summary>
+        /// Renders a property-vs-claim comparison whose claim value is the empty string when the
+        /// engine stores '' as NULL. <paramref name="comparisonSql"/> follows the column, e.g.
+        /// <c>= NULL</c>. The default renders nothing and the comparison is bound as usual.
+        /// </summary>
+        public virtual bool TryRenderEmptyClaimComparison(
+            BinaryOperatorKind operatorKind,
+            SingleValueNode left,
+            SingleValueNode right,
+            out SingleValuePropertyAccessNode? propertyNode,
+            out string? comparisonSql)
+        {
+            propertyNode = null;
+            comparisonSql = null;
             return false;
         }
 
@@ -60,6 +78,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
     /// </summary>
     internal sealed class OracleSqlLiteralRewriter : SqlLiteralRewriter
     {
+        /// <summary>
+        /// An author-written '' literal becomes IS [NOT] NULL. A claim constant is excluded:
+        /// see <see cref="TryRenderEmptyClaimComparison"/>.
+        /// </summary>
         public override bool TryRewriteEmptyStringComparison(
             BinaryOperatorKind operatorKind,
             SingleValueNode left,
@@ -67,8 +89,54 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             out SingleValuePropertyAccessNode? propertyNode,
             out bool isNullPredicate)
         {
-            propertyNode = null;
             isNullPredicate = false;
+            if (!TryGetEmptyStringComparison(operatorKind, left, right, out propertyNode, out ConstantNode? constant)
+                || PolicyClaimConstants.IsClaim(constant!))
+            {
+                propertyNode = null;
+                return false;
+            }
+
+            isNullPredicate = operatorKind is BinaryOperatorKind.Equal;
+            return true;
+        }
+
+        /// <summary>
+        /// A claim whose value is "" is compared as Oracle stores it, i.e. with NULL, so the
+        /// comparison is UNKNOWN for every row (also under NOT) and the policy matches nothing.
+        /// Rewriting it to IS NULL, as for an author literal, would let a caller with an empty
+        /// claim reach every row whose column is NULL (#62). The comparison is rendered without a
+        /// bind so the executor's empty-string bind rewrite cannot turn it into IS NULL either,
+        /// and no CHAR/DATE bind coercion runs on the empty value.
+        /// </summary>
+        public override bool TryRenderEmptyClaimComparison(
+            BinaryOperatorKind operatorKind,
+            SingleValueNode left,
+            SingleValueNode right,
+            out SingleValuePropertyAccessNode? propertyNode,
+            out string? comparisonSql)
+        {
+            comparisonSql = null;
+            if (!TryGetEmptyStringComparison(operatorKind, left, right, out propertyNode, out ConstantNode? constant)
+                || !PolicyClaimConstants.IsClaim(constant!))
+            {
+                propertyNode = null;
+                return false;
+            }
+
+            comparisonSql = operatorKind is BinaryOperatorKind.Equal ? "= NULL" : "!= NULL";
+            return true;
+        }
+
+        private static bool TryGetEmptyStringComparison(
+            BinaryOperatorKind operatorKind,
+            SingleValueNode left,
+            SingleValueNode right,
+            out SingleValuePropertyAccessNode? propertyNode,
+            out ConstantNode? constantNode)
+        {
+            propertyNode = null;
+            constantNode = null;
 
             if (operatorKind is not (BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual))
             {
@@ -95,7 +163,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             }
 
             propertyNode = property;
-            isNullPredicate = operatorKind is BinaryOperatorKind.Equal;
+            constantNode = constant;
             return true;
         }
 
