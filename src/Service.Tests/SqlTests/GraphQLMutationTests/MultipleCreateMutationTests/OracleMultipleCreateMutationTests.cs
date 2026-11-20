@@ -394,6 +394,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle fixtures expose users/user_profiles but not User_NonAutogenRelationshipColumn GraphQL types. #27")]
         public async Task MultipleCreateMutationWithOneToOneRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -401,6 +402,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_mm / publisher_mm config-defined relationships. #27")]
         public async Task MultipleCreateMutationWithManyToOneRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -408,6 +410,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_mm / reviews_mm config-defined relationships. #27")]
         public async Task MultipleCreateMutationWithOneToManyRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -415,6 +418,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_author_link_mm as a GraphQL linking entity. #27")]
         public async Task MultipleCreateMutationWithManyToManyRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -422,6 +426,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map *_mm entities used by config-defined multiple-create relationships. #27")]
         public async Task MultipleCreateMutationWithAllRelationshipTypesDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -429,6 +434,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map *_mm entities used by config-defined multiple-create relationships. #27")]
         public async Task ManyTypeMultipleCreateMutationOperationRelationshipsDefinedInConfig()
         {
             Assert.Inconclusive(

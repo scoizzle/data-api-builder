@@ -172,20 +172,19 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
         private static OracleParameter Apply(object value, DbType? dbType = null)
         {
-            OracleParameter parameter = new();
             DbConnectionParam entry = new(value, dbType);
 
-            // Mirrors OracleQueryExecutor.PrepareDbCommand: the conversion runs before Value is
-            // assigned because ODP.NET rejects some CLR types (e.g. Edm.Date) from the setter.
-            CreateExecutor().PopulateDbTypeForParameter(
-                new KeyValuePair<string, DbConnectionParam>("@param0", entry),
-                parameter);
-            if (parameter.Value is null)
-            {
-                parameter.Value = value;
-            }
-
-            return parameter;
+            // The production bind path: PrepareDbCommand runs PopulateDbTypeForParameter and then
+            // assigns Value itself, so value assertions read what ODP.NET would receive.
+            using OracleConnection connection = new("User Id=x;Password=y;Data Source=localhost:1521/x");
+            DbCommand command = CreateExecutor().PrepareDbCommand(
+                connection,
+                "SELECT @param0 FROM DUAL",
+                new Dictionary<string, DbConnectionParam> { ["@param0"] = entry },
+                httpContext: null,
+                dataSourceName: string.Empty);
+            Assert.AreEqual(1, command.Parameters.Count);
+            return (OracleParameter)command.Parameters[0];
         }
 
         private static OracleQueryExecutor CreateExecutor()

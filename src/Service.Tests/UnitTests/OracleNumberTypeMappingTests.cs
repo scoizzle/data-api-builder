@@ -10,6 +10,7 @@ using Azure.DataApiBuilder.Core.Models;
 using Azure.DataApiBuilder.Core.Services;
 using Azure.DataApiBuilder.Core.Services.OpenAPI;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Oracle.ManagedDataAccess.Client;
 
 namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 {
@@ -32,6 +33,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow(18, 2, typeof(decimal), DisplayName = "NUMBER(18,2) -> decimal")]
         [DataRow(9, null, typeof(int), DisplayName = "NUMBER(9) without scale -> int")]
         [DataRow(10, null, typeof(long), DisplayName = "NUMBER(10) without scale -> long")]
+        [DataRow(7, -2, typeof(int), DisplayName = "NUMBER(7,-2) holds 9 integer digits -> int")]
+        [DataRow(9, -3, typeof(long), DisplayName = "NUMBER(9,-3) holds 12 integer digits -> long")]
+        [DataRow(16, -2, typeof(long), DisplayName = "NUMBER(16,-2) holds 18 integer digits -> long")]
+        [DataRow(18, -2, typeof(decimal), DisplayName = "NUMBER(18,-2) holds 20 integer digits -> decimal")]
         public void MapNumberColumnType_MapsPrecisionAndScaleToExpectedType(object precision, object scale, Type expected)
         {
             // Act
@@ -124,6 +129,34 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(JsonDataType.Integer, TypeHelper.GetJsonDataTypeFromSystemType(typeof(int)));
             Assert.AreEqual(JsonDataType.Integer, TypeHelper.GetJsonDataTypeFromSystemType(typeof(long)));
             Assert.AreEqual(JsonDataType.Number, TypeHelper.GetJsonDataTypeFromSystemType(typeof(decimal)));
+        }
+
+        /// <summary>
+        /// The schema-table ProviderType is an <see cref="OracleDbType"/> value. Only RAW, LONG RAW
+        /// and BLOB are byte columns; VARCHAR2 (126) and INT64 (113) keep the driver type.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(OracleDbType.Raw, true)]
+        [DataRow(OracleDbType.LongRaw, true)]
+        [DataRow(OracleDbType.Blob, true)]
+        [DataRow(OracleDbType.Varchar2, false)]
+        [DataRow(OracleDbType.Int64, false)]
+        public void GetSystemTypeFromSchemaTable_OnlyByteProviderTypesBecomeByteArray(OracleDbType providerType, bool isBytes)
+        {
+            OracleMetadataProvider provider = (OracleMetadataProvider)RuntimeHelpers.GetUninitializedObject(
+                typeof(OracleMetadataProvider));
+            DataTable table = new();
+            table.Columns.Add("ProviderType", typeof(int));
+            DataRow row = table.NewRow();
+            row["ProviderType"] = (int)providerType;
+            table.Rows.Add(row);
+
+            MethodInfo method = typeof(OracleMetadataProvider).GetMethod(
+                "GetSystemTypeFromSchemaTable",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            Type actual = (Type)method.Invoke(provider, new object[] { row, typeof(string) })!;
+
+            Assert.AreEqual(isBytes ? typeof(byte[]) : typeof(string), actual);
         }
 
         private static ColumnDefinition PopulateNumberColumn(
