@@ -186,6 +186,10 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
         [DataRow("{ title: { contains: \"%_\" } }", "%\\%\\_%")]
         [DataRow("{ title: { endsWith: \"%_CONN\" } }", "%\\%\\_CONN")]
         [DataRow("{ title: { startsWith: \"CONN%\" } }", "CONN\\%%")]
+        // Oracle's ESCAPE only accepts %, _ or the escape character after it, so brackets are
+        // matched literally without escaping (ORA-01424 otherwise). #63
+        [DataRow("{ title: { startsWith: \"[\" } }", "[%")]
+        [DataRow("{ title: { endsWith: \"]\" } }", "%]")]
         public new async Task TestStringFiltersWithSpecialCharacters(string dynamicFilter, string dbFilterInput)
         {
             string oracleQuery = $@"

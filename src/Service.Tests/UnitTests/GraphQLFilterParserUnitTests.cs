@@ -196,6 +196,35 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.AreEqual(expectedOperation, result.Op);
         }
 
+        /// <summary>
+        /// #63: Oracle's LIKE ... ESCAPE '\' only allows %, _ or the escape character after the
+        /// escape character, so "\[" raises ORA-01424. Brackets are not LIKE wildcards on Oracle and
+        /// are left as is; the other engines keep escaping them.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("contains", true, @"%a\[b\]\%\_\\%", DisplayName = "contains escapes brackets by default")]
+        [DataRow("contains", false, @"%a[b]\%\_\\%", DisplayName = "contains without bracket escaping")]
+        [DataRow("notContains", false, @"%a[b]\%\_\\%", DisplayName = "notContains without bracket escaping")]
+        [DataRow("startsWith", false, @"a[b]\%\_\\%", DisplayName = "startsWith without bracket escaping")]
+        [DataRow("endsWith", false, @"%a[b]\%\_\\", DisplayName = "endsWith without bracket escaping")]
+        public void FieldFilterParser_Parse_LikeEscapingOfBrackets(string operation, bool escapeLikeBrackets, string expectedParameter)
+        {
+            string? bound = null;
+            FieldFilterParser.Parse(
+                CreateMiddlewareContext(),
+                CreateFilterArgumentSchema(),
+                new Column("dbo", "books", "title"),
+                new List<ObjectFieldNode> { new(operation, new StringValueNode(@"a[b]%_\")) },
+                (literal, columnName, lengthOverride) =>
+                {
+                    bound = (string)literal;
+                    return "@param1";
+                },
+                escapeLikeBrackets: escapeLikeBrackets);
+
+            Assert.AreEqual(expectedParameter, bound);
+        }
+
         [TestMethod]
         public void FieldFilterParser_Parse_NullValueIsIgnored()
         {
