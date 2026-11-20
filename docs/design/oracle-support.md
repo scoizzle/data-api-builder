@@ -122,8 +122,14 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   transaction. When that transaction is an `OracleTransaction`, the context command is enlisted in it
   too. The async request path passes the request-abort token to the context command. The synchronous
   query path has no token.
-- **Health check.** The data-source health query is `SELECT 1 FROM DUAL` on a raw pooled connection
-  opened by `HttpUtilities.ExecuteDbQueryAsync`, not by the query executor. That statement does not read
+- **Health check.** The data-source health query is `SELECT 1 FROM DUAL`. `HttpUtilities.ExecuteDbQueryAsync`
+  opens it on a connection from the Oracle query executor (`CreateConnection` plus
+  `SetManagedIdentityAccessTokenIfAnyAsync`), so the probe uses the same prepared connection string
+  (hosted TCPS / `SSL_SERVER_DN_MATCH` check, bounded statement cache) and managed identity token as
+  requests. A forced token that cannot be obtained reports the data source Unhealthy instead of
+  connecting without it. The measured response time includes token acquisition on the first probe
+  and after the cached token expires, so a slow credential can exceed the data-source threshold
+  while the database itself is healthy. The probe does not run the session-context block and does not read
   `SYS_CONTEXT`, so it cannot observe or return a previous caller's claims. It also does not clear the
   namespace; the next executor checkout does. Enabling `set-session-context` does not require the DBA
   package to exist at health-check time.
