@@ -1693,6 +1693,23 @@ namespace Azure.DataApiBuilder.Core.Services
             string? qualifiedName = null)
         {
             string target = string.IsNullOrWhiteSpace(qualifiedName) ? "the configured stored procedure" : qualifiedName;
+            List<string> unsupportedTypes = rows
+                .Where(row => OracleSqlType.IsUnsupportedSubprogramType(row.DataType))
+                .Select(row => row.Position == 0
+                    ? $"RETURN {row.DataType}"
+                    : $"{(string.IsNullOrEmpty(row.Name) ? $"position {row.Position}" : row.Name)} {row.InOut.Replace('/', ' ')} {row.DataType}")
+                .ToList();
+            if (unsupportedTypes.Count > 0)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Oracle subprogram {target} uses types DAB cannot bind: {string.Join(", ", unsupportedTypes)}. " +
+                             "INTERVAL YEAR TO MONTH and PL/SQL-only types (PL/SQL BOOLEAN, PLS_INTEGER, BINARY_INTEGER, " +
+                             "records and tables) are rejected at startup. Use a SQL type, or wrap the subprogram " +
+                             "in one whose arguments and result use SQL types.",
+                    statusCode: HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
             List<string> unsupported = new();
             int refCursorCount = 0;
             foreach (OracleArgumentRow row in rows)

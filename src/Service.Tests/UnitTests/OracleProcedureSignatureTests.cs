@@ -75,6 +75,52 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(ex.Message, "REF CURSOR OUT parameter");
         }
 
+        /// <summary>
+        /// INTERVAL YEAR TO MONTH has no CLR equivalent (it is not a TimeSpan), and PL/SQL-only
+        /// types cannot be bound from SQL. Both fail at startup, for arguments and RETURN values (#60).
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("INTERVAL YEAR(2) TO MONTH", "IN", 1, "p_age IN INTERVAL YEAR(2) TO MONTH")]
+        [DataRow("PL/SQL BOOLEAN", "IN", 1, "p_age IN PL/SQL BOOLEAN")]
+        [DataRow("PL/SQL PLS INTEGER", "IN", 1, "p_age IN PL/SQL PLS INTEGER")]
+        [DataRow("PL/SQL BINARY INTEGER", "IN", 1, "p_age IN PL/SQL BINARY INTEGER")]
+        [DataRow("BINARY_INTEGER", "IN", 1, "p_age IN BINARY_INTEGER")]
+        [DataRow("PLS_INTEGER", "IN", 1, "p_age IN PLS_INTEGER")]
+        [DataRow("PL/SQL RECORD", "IN", 1, "p_age IN PL/SQL RECORD")]
+        [DataRow("INTERVAL YEAR(2) TO MONTH", "OUT", 0, "RETURN INTERVAL YEAR(2) TO MONTH")]
+        public void UnsupportedArgumentTypes_AreRejectedAtStartup(string dataType, string direction, int position, string expectedItem)
+        {
+            DataApiBuilderException ex = Assert.ThrowsException<DataApiBuilderException>(() =>
+                OracleMetadataProvider.EnsureSupportedOracleSignature(
+                    new[]
+                    {
+                        Row(position == 0 ? null : "p_age", dataType, direction, position),
+                        Row("p_cur", "REF CURSOR", "OUT", 2),
+                    },
+                    "SYSTEM.GET_AGE"));
+
+            Assert.AreEqual(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
+            Assert.AreEqual(DataApiBuilderException.SubStatusCodes.ErrorInInitialization, ex.SubStatusCode);
+            StringAssert.Contains(ex.Message, "SYSTEM.GET_AGE");
+            StringAssert.Contains(ex.Message, expectedItem);
+            StringAssert.Contains(ex.Message, "rejected at startup");
+        }
+
+        [DataTestMethod]
+        [DataRow("INTERVAL DAY(2) TO SECOND(6)")]
+        [DataRow("BOOLEAN")]
+        [DataRow("TIMESTAMP(6) WITH TIME ZONE")]
+        public void SupportedSqlTypes_AreNotRejected(string dataType)
+        {
+            OracleMetadataProvider.EnsureSupportedOracleSignature(
+                new[]
+                {
+                    Row("p_value", dataType, "IN", 1),
+                    Row("p_cur", "REF CURSOR", "OUT", 2),
+                },
+                "SYSTEM.GET_VALUE");
+        }
+
         [TestMethod]
         public void MultipleRefCursors_AreRejected()
         {
