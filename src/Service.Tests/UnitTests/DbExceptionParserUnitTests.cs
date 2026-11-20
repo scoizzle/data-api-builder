@@ -110,6 +110,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [DataRow("1031", System.Net.HttpStatusCode.Forbidden, DisplayName = "ORA-01031 insufficient privileges maps to 403")]
         [DataRow("1400", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01400 still maps to 400")]
         [DataRow("1", System.Net.HttpStatusCode.Conflict, DisplayName = "ORA-00001 unique constraint maps to 409")]
+        [DataRow("1843", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01843 not a valid month maps to 400")]
+        [DataRow("1839", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01839 date not valid for month maps to 400")]
+        [DataRow("1847", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01847 day of month out of range maps to 400")]
+        [DataRow("1779", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01779 non key-preserved view column maps to 400")]
+        [DataRow("1776", System.Net.HttpStatusCode.BadRequest, DisplayName = "ORA-01776 more than one base table through a join view maps to 400")]
         public void OracleErrorCodesMapToExpectedHttpStatus(string errorCode, System.Net.HttpStatusCode expected)
         {
             RuntimeConfig mockConfig = new(
@@ -152,6 +157,61 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                     ? DataApiBuilderException.SubStatusCodes.DatabaseInputError
                     : DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed,
                 parser.GetResultSubStatusCodeForException(exception));
+        }
+
+        /// <summary>
+        /// Status and substatus agree for client-input errors raised by Oracle: a bad date literal
+        /// is a 400 with DatabaseInputError. A write to a view column Oracle cannot modify is a 400
+        /// with DatabaseOperationFailed, the contract PutOneInViewBadRequest and
+        /// PatchOneViewBadRequestTest pin for the other engines.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(1843, DataApiBuilderException.SubStatusCodes.DatabaseInputError, DisplayName = "ORA-01843 not a valid month")]
+        [DataRow(1839, DataApiBuilderException.SubStatusCodes.DatabaseInputError, DisplayName = "ORA-01839 date not valid for month specified")]
+        [DataRow(1847, DataApiBuilderException.SubStatusCodes.DatabaseInputError, DisplayName = "ORA-01847 day of month must be between 1 and last day of month")]
+        [DataRow(1779, DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed, DisplayName = "ORA-01779 cannot modify a column which maps to a non key-preserved table")]
+        [DataRow(1776, DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed, DisplayName = "ORA-01776 cannot modify more than one base table through a join view")]
+        public void OracleClientErrors_MapToBadRequestWithMatchingSubStatus(int number, DataApiBuilderException.SubStatusCodes expectedSubStatus)
+        {
+            OracleDbExceptionParser parser = CreateOracleParser();
+            DbException exception = CreateOracleException(number, $"ORA-{number:D5}: client error");
+
+            Assert.AreEqual(System.Net.HttpStatusCode.BadRequest, parser.GetHttpStatusCodeForException(exception));
+            Assert.AreEqual(expectedSubStatus, parser.GetResultSubStatusCodeForException(exception));
+            Assert.IsFalse(parser.IsTransientException(exception));
+        }
+
+        /// <summary>
+        /// Configuration and privilege errors do not clear on retry: a wrong service name, a
+        /// missing listener or a missing CREATE SESSION grant must fail at once, not after backoff.
+        /// 17002/17010/17404 are JDBC-range codes ODP.NET does not raise as ORA- errors.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(1045, DisplayName = "ORA-01045 user lacks CREATE SESSION privilege")]
+        [DataRow(12514, DisplayName = "ORA-12514 listener does not know of service")]
+        [DataRow(12541, DisplayName = "ORA-12541 no listener")]
+        [DataRow(12545, DisplayName = "ORA-12545 target host or object does not exist")]
+        [DataRow(24315, DisplayName = "ORA-24315 illegal attribute type")]
+        [DataRow(17002, DisplayName = "JDBC-range 17002")]
+        [DataRow(17010, DisplayName = "JDBC-range 17010")]
+        [DataRow(17404, DisplayName = "JDBC-range 17404")]
+        public void OraclePermanentErrors_AreNotTransient(int number)
+        {
+            Assert.IsFalse(CreateOracleParser().IsTransientException(CreateOracleException(number, $"ORA-{number:D5}: permanent")));
+        }
+
+        /// <summary>
+        /// Errors that do clear on retry stay transient.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow(54, DisplayName = "ORA-00054 resource busy")]
+        [DataRow(60, DisplayName = "ORA-00060 deadlock")]
+        [DataRow(3113, DisplayName = "ORA-03113 end-of-file on communication channel")]
+        [DataRow(12170, DisplayName = "ORA-12170 connect timeout")]
+        [DataRow(12516, DisplayName = "ORA-12516 listener could not find instance")]
+        public void OracleRetryableErrors_StayTransient(int number)
+        {
+            Assert.IsTrue(CreateOracleParser().IsTransientException(CreateOracleException(number, $"ORA-{number:D5}: retryable")));
         }
 
         private static OracleDbExceptionParser CreateOracleParser()
