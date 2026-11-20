@@ -75,6 +75,45 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             StringAssert.Contains(query, "LEFT OUTER JOIN LATERAL");
         }
 
+        /// <summary>
+        /// The LATERAL fallback builds the child as a nested structure. The child's read policy
+        /// must stay inside that subquery, or the relationship returns rows the caller cannot read.
+        /// </summary>
+        [TestMethod]
+        public void Build_LateralFallbackWithChildReadPolicy_AppliesPolicyInsideLateral()
+        {
+            (SqlQueryStructure parent, SqlQueryStructure child) = CreateParentWithListChild(PredicateOperation.GreaterThan);
+            child.DbPolicyPredicatesForOperations[EntityActionOperation.Read] = "(\"id\" = @policy0)";
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            string lateral = LateralBody(query, "TABLE1_SUBQ");
+            StringAssert.Contains(lateral, "(\"TABLE1\".\"id\" = @policy0)", query);
+            StringAssert.Contains(lateral, "FROM \"DBO\".\"CHILDREN\" \"TABLE1\"", query);
+        }
+
+        /// <summary>
+        /// A nested-relationship filter on a paged root becomes a DISTINCT key CTE. That CTE
+        /// replaces the EXISTS probe, so it must carry the related entity's read policy;
+        /// otherwise a caller can filter parents by child rows the policy hides.
+        /// </summary>
+        [TestMethod]
+        public void Build_NestedFilterKeySetCte_AppliesRelatedEntityReadPolicy()
+        {
+            (SqlQueryStructure parent, _) = CreateParentWithListChild(PredicateOperation.Equal);
+            SqlQueryStructure exists = CreateCorrelatedExistsStructure(readPolicy: "(\"OWNER\" = @policy0)");
+            parent.Predicates.Add(new Predicate(null, PredicateOperation.EXISTS, new PredicateOperand(exists)));
+
+            string query = new OracleQueryBuilder().Build(parent);
+
+            string keySet = CteBody(query, "dab_filter_cte_0");
+            StringAssert.Contains(keySet, "SELECT DISTINCT \"TABLE9\".\"PARENT_ID\" AS \"k0\" FROM \"DBO\".\"NOTES\" \"TABLE9\"", query);
+            StringAssert.Contains(keySet, "(\"TABLE9\".\"OWNER\" = @policy0)", query);
+            StringAssert.Contains(query, "INNER JOIN \"dab_filter_cte_0\" ON (\"dab_filter_cte_0\".\"k0\" = \"TABLE0\".\"ID\")", query);
+            // The policy is enforced only through the key set: the EXISTS probe is replaced.
+            Assert.AreEqual(1, Regex.Matches(query, "@policy0").Count, query);
+        }
+
         [TestMethod]
         public void Build_ToOneRelationshipWithPrimaryKeyCorrelation_IsFlattened()
         {
@@ -237,6 +276,39 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(query.Contains("dab_restrict_", StringComparison.Ordinal), query);
         }
 
+        /// <summary>
+        /// With max-page-size -1 a nested list can ask for Int32.MaxValue rows; hasNextPage adds
+        /// one, so Limit() is 2147483648. The hoisted rows CTE must emit that bound, not overflow.
+        /// </summary>
+        [TestMethod]
+        public void Build_HoistedRowsCteWithLimitAboveInt32_EmitsRankBound()
+        {
+            SqlQueryStructure root = CreateChainedList(levels: 3, rootOrdered: true);
+            SetLimit(root.JoinQueries["table1_subq"], (uint)int.MaxValue + 1);
+
+            string query = new OracleQueryBuilder().Build(root);
+
+            StringAssert.Contains(query, "FROM \"table1_rows_cte\" WHERE \"rn\" <= 2147483648) \"dab_restrict_0\"", query);
+        }
+
+        /// <summary>
+        /// A stored policy that already names <c>"ALIAS"."COLUMN"</c> is emitted unchanged, and a
+        /// bare column next to it is still qualified.
+        /// </summary>
+        [TestMethod]
+        public void Build_ReadPolicyWithQualifiedAndBareColumns_QualifiesOnlyTheBareColumn()
+        {
+            SqlQueryStructure root = CreateChainedList(levels: 1, rootOrdered: true);
+            root.DbPolicyPredicatesForOperations[EntityActionOperation.Read] =
+                "(\"TABLE0\".\"ID\" = @policy0 AND \"ID\" <> @policy1)";
+
+            string query = new OracleQueryBuilder().Build(root);
+
+            StringAssert.Contains(query, "(\"TABLE0\".\"ID\" = @policy0 AND \"TABLE0\".\"ID\" <> @policy1)", query);
+            Assert.IsFalse(query.Contains("\".\"TABLE0\"", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("\"TABLE0\".\".\"", StringComparison.Ordinal), query);
+        }
+
         [TestMethod]
         public void Build_NoPageCte_ThreeLevelSqlIsUnchanged()
         {
@@ -307,6 +379,9 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             string rows = CteBody(query, "table1_rows_cte");
             Assert.IsFalse(rows.Contains("ROW_NUMBER()", StringComparison.Ordinal), rows);
             Assert.IsFalse(rows.Contains("\"rn\"", StringComparison.Ordinal), rows);
+            // The hoisted rows CTE feeds the descendant restriction, so the child's read policy
+            // must filter it; otherwise the grandchild join sees rows the caller cannot read.
+            StringAssert.Contains(rows, "(\"TABLE1\".\"ID\" = @param0)", rows);
             StringAssert.Contains(
                 query,
                 "INNER JOIN (SELECT DISTINCT \"ID\" FROM \"table1_rows_cte\") \"dab_restrict_0\" ON (\"dab_restrict_0\".\"ID\" = \"TABLE2\".\"parent_id\")",
@@ -529,6 +604,57 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.Fail(query);
             return string.Empty;
+        }
+
+        /// <summary>
+        /// Returns the subquery text of <c>LEFT OUTER JOIN LATERAL (...) "alias"</c>.
+        /// </summary>
+        private static string LateralBody(string query, string alias)
+        {
+            const string marker = "LEFT OUTER JOIN LATERAL (";
+            int start = query.IndexOf(marker, StringComparison.Ordinal);
+            int end = query.IndexOf($") \"{alias}\" ON (1=1)", StringComparison.Ordinal);
+            Assert.IsTrue(start >= 0 && end > start, query);
+            return query.Substring(start + marker.Length, end - start - marker.Length);
+        }
+
+        /// <summary>
+        /// EXISTS body for a nested-relationship filter: NOTES rows correlated to the parent by
+        /// PARENT_ID, with an optional read policy over the NOTES columns.
+        /// </summary>
+        private static SqlQueryStructure CreateCorrelatedExistsStructure(string readPolicy)
+        {
+            SourceDefinition source = new();
+            source.Columns.Add("PARENT_ID", new ColumnDefinition { SystemType = typeof(int) });
+            source.Columns.Add("OWNER", new ColumnDefinition { SystemType = typeof(string) });
+            DatabaseTable table = new("DBO", "NOTES") { TableDefinition = source };
+            Mock<ISqlMetadataProvider> metadata = new();
+            metadata.Setup(provider => provider.GetSourceDefinition("Note")).Returns(source);
+
+            SqlQueryStructure exists = CreateStructure(isList: false);
+            SetField(exists, "EntityName", "Note");
+            SetField(exists, "MetadataProvider", metadata.Object);
+            SetField(exists, "DatabaseObject", table);
+            SetField(exists, "SourceAlias", "table9");
+            SetBaseProperty(exists, "Columns", new List<LabelledColumn>());
+            SetField(exists, "Predicates", new List<Predicate>
+            {
+                new(
+                    new PredicateOperand(new Column(string.Empty, string.Empty, "PARENT_ID", "table9")),
+                    PredicateOperation.Equal,
+                    new PredicateOperand(new Column(string.Empty, string.Empty, "ID", "table0")))
+            });
+            SetField(exists, "DbPolicyPredicatesForOperations", new Dictionary<EntityActionOperation, string?>
+            {
+                [EntityActionOperation.Read] = readPolicy
+            });
+            SetField(exists, "Joins", new List<SqlJoinStructure>());
+            SetField(exists, "FilterPredicates", string.Empty);
+            SetField(exists, "OrderByColumns", new List<OrderByColumn>());
+            SetField(exists, "PaginationMetadata", new PaginationMetadata(exists));
+            SetField(exists, "GroupByMetadata", new GroupByMetadata());
+            SetField(exists, "Counter", new IncrementingInteger());
+            return exists;
         }
 
         private static string ReadGolden(string name)

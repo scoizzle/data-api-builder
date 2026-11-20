@@ -56,8 +56,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         // A quoted identifier with no alias dot on either side. Already-qualified
         // "ALIAS"."COLUMN" pairs are skipped so emission does not double-prefix them.
+        // The identifier must not start or end next to a quote or word character, so a match
+        // cannot begin at the closing quote of one identifier (e.g. the "." between "A" and "B").
         private static readonly Regex UnqualifiedQuotedIdentifier = new(
-            "(?<!\\.)\"(?:[^\"]|\"\")*\"(?!\\s*\\.)",
+            "(?<![\"\\w])(?<!\\.\\s*)\"(?:[^\"]|\"\")*\"(?![\"\\w])(?!\\s*\\.)",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         // The parameter name is atomic. A greedy [\w\d]+ with only a "not already ESCAPE"
@@ -386,7 +388,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             public bool HasRank { get; init; }
 
             /// <summary>Per-parent top-N. Used only when <see cref="HasRank"/> is true.</summary>
-            public int RankLimit { get; init; }
+            public uint RankLimit { get; init; }
 
             /// <summary><c>dab_page</c> for the root page, so depth-1 SQL stays byte-identical. Null allocates <c>dab_restrict_N</c>.</summary>
             public string? FixedJoinAlias { get; init; }
@@ -1091,7 +1093,10 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             // CTE references dab_page_cte (or another rows CTE), which is the ORA-32036 inlining
             // case, so MATERIALIZE is required. Unrestricted queries and depth-1 children keep
             // the inline subquery, byte for byte. Associative children never reach here.
-            string rowLimit = (child.Limit() ?? 1).ToString(CultureInfo.InvariantCulture);
+            // Limit() can exceed Int32.MaxValue (max-page-size -1 plus the hasNextPage row), so the
+            // rank bound stays a uint instead of being parsed back from this text.
+            uint rankLimit = child.Limit() ?? 1;
+            string rowLimit = rankLimit.ToString(CultureInfo.InvariantCulture);
             string rankedFrom;
             if (pageJoin is not null && child.JoinQueries.Count > 0)
             {
@@ -1105,7 +1110,7 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                     FromClause = QuoteIdentifier(rowsCteName),
                     AliasByParentExpression = BuildRowsCteKeyAliases(child),
                     HasRank = !skipRanking,
-                    RankLimit = int.Parse(rowLimit, CultureInfo.InvariantCulture),
+                    RankLimit = rankLimit,
                     FixedJoinAlias = null
                 };
                 AddRelationshipJoins(child, context, descendantRestriction, allowFlatten: true, ref rankedFrom);
@@ -1515,8 +1520,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         internal static string BuildRawBase64Expression(string columnSql)
         {
+            // BASE64_ENCODE wraps every 64 characters; strip the breaks as the chunked path does.
             return $"CASE WHEN {columnSql} IS NULL THEN NULL " +
-                   $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnSql})) END";
+                   $"ELSE REPLACE(REPLACE(UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnSql})), CHR(10), ''), CHR(13), '') END";
         }
 
         internal static string BuildBlobBase64Expression(string columnSql)
@@ -1712,6 +1718,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlDeleteStructure structure)
         {
+            // Oracle runs a DELETE through a join view against the key-preserved base table and
+            // reports success. The other engines reject it, so DAB does too (#74).
+            if (structure.DatabaseObject is DatabaseView view
+                && OracleObjectFacts.View(view).DeleteRejection is string rejection)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Cannot delete from view {view.FullName} because {rejection}.",
+                    statusCode: System.Net.HttpStatusCode.BadRequest,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed);
+            }
+
             string predicates = JoinPredicateStrings(
                        structure.GetDbPolicyForOperation(EntityActionOperation.Delete),
                        Build(structure.Predicates));
@@ -2167,8 +2184,13 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <summary>
         /// Collapses insert column/value pairs that share a physical name (ignore-case).
         /// Later values replace earlier ones so an explicit FK is kept over a derived one.
+        /// Ignore-case is deliberate: relationship fields can arrive in config case
+        /// ("publisher_id") next to the catalog spelling ("PUBLISHER_ID"), and an ordinal
+        /// comparison would emit the column twice (ORA-00957). Two quoted columns that differ only
+        /// by case cannot reach this method: <see cref="SourceDefinition.Columns"/> is itself
+        /// case-insensitive, so DAB cannot model such a table on any engine (#65).
         /// </summary>
-        private static (List<string> Columns, List<string> Values) DedupeInsertColumns(
+        internal static (List<string> Columns, List<string> Values) DedupeInsertColumns(
             IReadOnlyList<string> columns,
             IReadOnlyList<string> values)
         {

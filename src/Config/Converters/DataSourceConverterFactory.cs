@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Azure.DataApiBuilder.Config.ObjectModel;
 
 namespace Azure.DataApiBuilder.Config.Converters;
@@ -33,6 +34,12 @@ internal class DataSourceConverterFactory : JsonConverterFactory
 
     private class DataSourceConverter : JsonConverter<DataSource>
     {
+        // A whole-value @env('...') / @akv('...') reference that variable replacement did not resolve.
+        private static readonly Regex _unresolvedVariableReference = new(
+            $"^(?:{DeserializationVariableReplacementSettings.OUTER_ENV_PATTERN}|{DeserializationVariableReplacementSettings.OUTER_AKV_PATTERN})$",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(1));
+
         // Settings for variable replacement during deserialization.
         private readonly DeserializationVariableReplacementSettings? _replacementSettings;
 
@@ -113,7 +120,12 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                             if (string.Equals(optionsSubproperty, OracleOptions.MANAGED_IDENTITY_OPTION, StringComparison.Ordinal))
                                             {
                                                 // Accepts true/false/"1"/"0" and rejects anything else at config load.
-                                                optionsSubpropertyValue = DataSource.ParseBoolOptionString(optionsSubproperty, stringValue);
+                                                // A reference left unresolved because replacement is off (CLI
+                                                // edits) is kept as written; GetTypedOptions parses the
+                                                // resolved value when the config is loaded with replacement.
+                                                optionsSubpropertyValue = _unresolvedVariableReference.IsMatch(stringValue)
+                                                    ? stringValue
+                                                    : DataSource.ParseBoolOptionString(optionsSubproperty, stringValue);
                                             }
                                             else if (bool.TryParse(stringValue, out bool boolValue))
                                             {
@@ -137,6 +149,13 @@ internal class DataSourceConverterFactory : JsonConverterFactory
                                             if (!reader.TryGetInt32(out int numberValue))
                                             {
                                                 throw new JsonException($"Unexpected numeric value for options {optionsSubproperty} while deserializing DataSource options.");
+                                            }
+
+                                            // The schema's minimum is 0 (no cap); a negative timeout would
+                                            // otherwise reach OracleCommand.CommandTimeout at request time.
+                                            if (numberValue < 0 && string.Equals(optionsSubproperty, "command-timeout", StringComparison.Ordinal))
+                                            {
+                                                throw new JsonException($"Option {optionsSubproperty} must be 0 or greater; found {numberValue}.");
                                             }
 
                                             optionsSubpropertyValue = numberValue;

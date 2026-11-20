@@ -123,9 +123,18 @@ namespace Azure.DataApiBuilder.Core.Services
         }
 
         /// <summary>
-        /// Gets the default schema name for Oracle (the connected user's schema).
-        /// Prefer User ID from the connection string; if it is missing (wallet / IAM),
-        /// query <c>SELECT USER FROM DUAL</c>. Never fall back to SYSTEM.
+        /// Session query for the schema Oracle resolves unqualified names against. It differs from
+        /// the login user after <c>ALTER SESSION SET CURRENT_SCHEMA</c> (e.g. in a logon trigger),
+        /// and for <c>User Id=/</c> or token connections it is the mapped database user.
+        /// </summary>
+        internal const string CURRENT_SCHEMA_QUERY = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL";
+
+        /// <summary>
+        /// Gets the default schema name for Oracle: the session's <c>CURRENT_SCHEMA</c>, which is
+        /// what unqualified SQL in that session resolves against. The connection-string User ID
+        /// is the fallback when the session query fails; when there is no usable User ID
+        /// (missing, <c>/</c> for wallet / external / token authentication) the query must succeed.
+        /// Never falls back to SYSTEM.
         /// </summary>
         public override string GetDefaultSchemaName()
         {
@@ -134,20 +143,42 @@ namespace Azure.DataApiBuilder.Core.Services
                 return _defaultSchemaName;
             }
 
-            if (TryGetSchemaFromConnectionString(ConnectionString, out string schemaFromUserId))
-            {
-                _defaultSchemaName = schemaFromUserId;
-                return _defaultSchemaName;
-            }
-
-            _defaultSchemaName = ResolveSchemaFromSessionUser();
+            bool hasUser = TryGetSchemaFromConnectionString(ConnectionString, out string schemaFromUserId);
+            string? currentSchema = ResolveSessionCurrentSchema(required: !hasUser);
+            _defaultSchemaName = SelectDefaultSchema(currentSchema, hasUser ? schemaFromUserId : null);
             return _defaultSchemaName;
         }
 
         /// <summary>
+        /// The session <c>CURRENT_SCHEMA</c> wins over the connection-string User ID when both are
+        /// known; the User ID is used only when the session query produced nothing.
+        /// </summary>
+        internal static string SelectDefaultSchema(string? sessionCurrentSchema, string? connectionStringSchema)
+        {
+            if (!string.IsNullOrWhiteSpace(sessionCurrentSchema))
+            {
+                // SYS_CONTEXT returns the catalog spelling. A quoted schema is already mixed
+                // case; folding it would look up the wrong schema.
+                return sessionCurrentSchema;
+            }
+
+            if (!string.IsNullOrWhiteSpace(connectionStringSchema))
+            {
+                return connectionStringSchema;
+            }
+
+            throw new DataApiBuilderException(
+                "Unable to determine the Oracle default schema: the connection string has no usable User ID and the session CURRENT_SCHEMA was empty.",
+                HttpStatusCode.ServiceUnavailable,
+                DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+        }
+
+        /// <summary>
         /// Extracts the Oracle schema from a connection-string User ID.
-        /// Returns false when User ID is missing or the string cannot be parsed so callers
-        /// can query SESSION USER instead of assuming SYSTEM.
+        /// Returns false when User ID is missing, is <c>/</c> (wallet, external or token
+        /// authentication: the database decides the user), or the string cannot be parsed, so
+        /// callers query the session instead of assuming SYSTEM. For the proxy form
+        /// <c>proxy[target]</c> the session runs as the target user.
         /// </summary>
         public static bool TryGetSchemaFromConnectionString(string connectionString, out string schema)
         {
@@ -155,20 +186,25 @@ namespace Azure.DataApiBuilder.Core.Services
             try
             {
                 OracleConnectionStringBuilder builder = new(connectionString);
-                if (string.IsNullOrWhiteSpace(builder.UserID))
+                if (string.IsNullOrWhiteSpace(builder.UserID) || builder.UserID.Trim() == "/")
                 {
                     return false;
                 }
 
                 if (OracleSourceNames.TryReadRawUserId(connectionString, out string rawUserId))
                 {
-                    schema = OracleSourceNames.CanonicalizeUserToken(rawUserId);
+                    if (rawUserId.Trim() == "/")
+                    {
+                        return false;
+                    }
+
+                    schema = OracleSourceNames.CanonicalizeUserToken(GetProxyTargetOrSelf(rawUserId));
                 }
                 else
                 {
                     // The builder already accepted a user. Fold it. A quoted user is handled
                     // above, where the raw token still has its quotes.
-                    schema = builder.UserID.ToUpperInvariant();
+                    schema = GetProxyTargetOrSelf(builder.UserID).ToUpperInvariant();
                 }
 
                 return !string.IsNullOrEmpty(schema);
@@ -179,49 +215,76 @@ namespace Azure.DataApiBuilder.Core.Services
             }
         }
 
-        private string ResolveSchemaFromSessionUser()
+        /// <summary>
+        /// For ODP.NET proxy authentication written as <c>proxy[target]</c> (the target may be
+        /// double-quoted), returns the <c>target</c> token; otherwise returns the input unchanged.
+        /// A quoted user is returned as is: brackets inside the quotes are part of the name.
+        /// </summary>
+        private static string GetProxyTargetOrSelf(string rawUserId)
+        {
+            string trimmed = rawUserId.Trim();
+            int open = trimmed.IndexOf('[');
+            if (!trimmed.StartsWith('"') && open > 0 && open < trimmed.Length - 2 && trimmed[^1] == ']')
+            {
+                return trimmed[(open + 1)..^1];
+            }
+
+            return trimmed;
+        }
+
+        /// <summary>
+        /// Reads the session <c>CURRENT_SCHEMA</c>. When <paramref name="required"/> is false (the
+        /// connection string names a user to fall back to), a failure other than a timeout is
+        /// logged and null is returned.
+        /// </summary>
+        private string? ResolveSessionCurrentSchema(bool required)
         {
             try
             {
+                if (_discoveryConnection is { State: ConnectionState.Open } shared)
+                {
+                    return ReadCurrentSchema(shared);
+                }
+
                 using OracleConnection connection = new(ConnectionString);
 
                 // Password-less (wallet/managed-identity) connection strings require the access
-                // token before opening. This hook is synchronous, so block on the async token
-                // acquisition. This hook is synchronous, so block on the async token call.
+                // token before opening. This hook is synchronous, so block on the async token call.
                 QueryExecutor.SetManagedIdentityAccessTokenIfAnyAsync(connection, _dataSourceName).GetAwaiter().GetResult();
 
                 connection.Open();
-                using OracleCommand command = CreateMetadataCommand(connection, "SELECT USER FROM DUAL");
-                object? result = command.ExecuteScalar();
-                string? user = result?.ToString();
-                if (!string.IsNullOrWhiteSpace(user))
-                {
-                    // SELECT USER returns the catalog spelling. A quoted user is already
-                    // mixed case; folding it would look up the wrong schema.
-                    return user;
-                }
+                return ReadCurrentSchema(connection);
             }
             catch (OracleException ex) when (ex.Number == 1013)
             {
-                throw MetadataTimeoutException("resolving the Oracle session user", ex);
+                throw MetadataTimeoutException("resolving the Oracle session CURRENT_SCHEMA", ex);
             }
             catch (OperationCanceledException)
             {
                 throw;
             }
+            catch (Exception ex) when (!required)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not read the Oracle session CURRENT_SCHEMA for data source {dataSourceName}; using the connection-string User ID as the default schema.",
+                    _dataSourceName);
+                return null;
+            }
             catch (Exception ex)
             {
                 throw new DataApiBuilderException(
-                    "Unable to determine the Oracle default schema: the connection string has no User ID and SELECT USER FROM DUAL failed.",
+                    "Unable to determine the Oracle default schema: the connection string has no usable User ID and reading the session CURRENT_SCHEMA failed.",
                     HttpStatusCode.ServiceUnavailable,
                     DataApiBuilderException.SubStatusCodes.ErrorInInitialization,
                     innerException: ex);
             }
+        }
 
-            throw new DataApiBuilderException(
-                "Unable to determine the Oracle default schema: the connection string has no User ID and SESSION USER was empty.",
-                HttpStatusCode.ServiceUnavailable,
-                DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+        private string? ReadCurrentSchema(OracleConnection connection)
+        {
+            using OracleCommand command = CreateMetadataCommand(connection, CURRENT_SCHEMA_QUERY);
+            return command.ExecuteScalar()?.ToString();
         }
 
         /// <summary>
@@ -886,6 +949,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             await LoadTriggerIdentityAsync(conn, owner, table, cancellationToken);
+            await LoadViewDeleteRejectionAsync(conn, owner, table, cancellationToken);
             return columns;
         }
 
@@ -1220,7 +1284,7 @@ namespace Azure.DataApiBuilder.Core.Services
         /// HotChocolate's ByteArray scalar). Refine those columns to typeof(byte[]) so the Oracle
         /// query builder applies its base64 conversion (UTL_ENCODE.BASE64_ENCODE) and the exposed
         /// values round-trip like varbinary on MsSql.
-        /// ProviderType values: 126 = RAW, 113 = BLOB.
+        /// ProviderType is an <see cref="OracleDbType"/> value: Raw, LongRaw or Blob.
         /// NB: the DAB base metadata path (FillSchema + DataTableReader) reports ProviderType as
         /// DBNull, so this is a safety net for paths that surface the int; the authoritative
         /// RAW/BLOB detection for DAB runs in PopulateColumnDefinitionWithHasDefaultAndDbType
@@ -1230,7 +1294,7 @@ namespace Azure.DataApiBuilder.Core.Services
         {
             if (columnInfoFromAdapter.Table.Columns.Contains("ProviderType")
                 && columnInfoFromAdapter["ProviderType"] is int providerType
-                && (providerType == 126 || providerType == 113))
+                && providerType is (int)OracleDbType.Raw or (int)OracleDbType.LongRaw or (int)OracleDbType.Blob)
             {
                 return typeof(byte[]);
             }
@@ -1693,6 +1757,23 @@ namespace Azure.DataApiBuilder.Core.Services
             string? qualifiedName = null)
         {
             string target = string.IsNullOrWhiteSpace(qualifiedName) ? "the configured stored procedure" : qualifiedName;
+            List<string> unsupportedTypes = rows
+                .Where(row => OracleSqlType.IsUnsupportedSubprogramType(row.DataType))
+                .Select(row => row.Position == 0
+                    ? $"RETURN {row.DataType}"
+                    : $"{(string.IsNullOrEmpty(row.Name) ? $"position {row.Position}" : row.Name)} {row.InOut.Replace('/', ' ')} {row.DataType}")
+                .ToList();
+            if (unsupportedTypes.Count > 0)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Oracle subprogram {target} uses types DAB cannot bind: {string.Join(", ", unsupportedTypes)}. " +
+                             "INTERVAL YEAR TO MONTH and PL/SQL-only types (PL/SQL BOOLEAN, PLS_INTEGER, BINARY_INTEGER, " +
+                             "records and tables) are rejected at startup. Use a SQL type, or wrap the subprogram " +
+                             "in one whose arguments and result use SQL types.",
+                    statusCode: HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            }
+
             List<string> unsupported = new();
             int refCursorCount = 0;
             foreach (OracleArgumentRow row in rows)
@@ -1970,6 +2051,8 @@ namespace Azure.DataApiBuilder.Core.Services
         /// <item><c>NUMBER(p, 0)</c> with <c>10 &lt;= p &lt;= 18</c> maps to <see cref="long"/>.</item>
         /// <item><c>NUMBER(p, 0)</c> with <c>p &gt; 18</c> maps to <see cref="decimal"/>.</item>
         /// <item><c>NUMBER(p, s)</c> with <c>s &gt; 0</c> maps to <see cref="decimal"/>.</item>
+        /// <item><c>NUMBER(p, s)</c> with <c>s &lt; 0</c> rounds to 10^-s and holds <c>p - s</c>
+        /// integer digits; the rules above apply to that digit count.</item>
         /// </list>
         /// </summary>
         /// <param name="precision">The column's DATA_PRECISION (PRECISION), or null/DBNull for an
@@ -1992,7 +2075,10 @@ namespace Azure.DataApiBuilder.Core.Services
                 return typeof(decimal);
             }
 
-            return p switch
+            // A negative scale rounds to the left of the decimal point: NUMBER(9,-3) stores up to
+            // 12 integer digits, so the integral type is chosen from p - s.
+            int integerDigits = s < 0 ? p - s : p;
+            return integerDigits switch
             {
                 <= 9 => typeof(int),
                 <= 18 => typeof(long),

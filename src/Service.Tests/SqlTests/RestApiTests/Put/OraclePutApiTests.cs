@@ -403,7 +403,8 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Put
         public async Task PutOneInViewBadRequest()
         {
             // PUT update trying to modify an underlying column of the composite (join) view.
-            // Oracle rejects DML on the non key-preserved table with ORA-01779, surfaced as 500.
+            // Oracle rejects DML through the join view (ORA-01779 or ORA-01776; the body writes
+            // columns of both base tables). Either is a 400, like the other engines (#56).
             string requestBody = @"
             {
                 ""name"": ""new publisher"",
@@ -419,7 +420,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Put
                 requestBody: requestBody,
                 exceptionExpected: true,
                 expectedErrorMessage: "ORA-",
-                expectedStatusCode: HttpStatusCode.InternalServerError,
+                expectedStatusCode: HttpStatusCode.BadRequest,
                 expectedSubStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed.ToString(),
                 isExpectedErrorMsgSubstr: true
             );

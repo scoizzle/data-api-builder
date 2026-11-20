@@ -171,6 +171,15 @@
                   "managed-identity": {
                     "$ref": "#/$defs/boolean-or-string",
                     "description": "Force (true) or disable (false) Microsoft Entra managed identity token authentication; accepts true, false, \"1\" or \"0\". When omitted, a token is used only if the connection string has no password and no wallet (WALLET_LOCATION, MY_WALLET_DIRECTORY) or external-authentication (User Id=/) settings. When true, failure to obtain a token fails requests with a 503. Configuration file only (no CLI option)."
+                  },
+                  "managed-identity-scope": {
+                    "type": "string",
+                    "description": "Scope DAB requests when it acquires a Microsoft Entra managed identity token itself, normally the database app registration's App ID URI followed by /session:scope:connect. Must be an absolute URI. When omitted, DAB requests https://database.oracle.com/.default, which Oracle's Entra integration usually rejects. Ignored for a token supplied by the configuration controller. Configuration file only (no CLI option)."
+                  },
+                  "session-context-package-owner": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_$#]{0,127}$",
+                    "description": "Schema that owns DAB_SESSION_CONTEXT_PKG when it is not the DAB login's schema; DAB then calls OWNER.DAB_SESSION_CONTEXT_PKG. Must be an unquoted Oracle identifier. When omitted, the package is called unqualified (the login's own schema or a synonym). Configuration file only (no CLI option)."
                   }
                 }
               }

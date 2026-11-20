@@ -56,6 +56,22 @@ Data API builder supports Oracle Database 19c and later through
     silently connecting without a token; token acquisition is retried on the next request. When
     the option is omitted, token use is best effort and a missing credential is logged as a
     warning and disables token use for that data source.
+- The `managed-identity-scope` data-source option sets the scope DAB requests from
+  `DefaultAzureCredential`. Oracle Database's Microsoft Entra integration has no global resource
+  such as `https://database.windows.net/.default`: the operator registers the database as an
+  Entra app, and the token must be issued for that registration's App ID URI. Set the option to
+  `<App ID URI>/session:scope:connect` (for example
+  `https://example.com/111aa1aa-0000-0000-0000-000000000000/session:scope:connect`), as in
+  Oracle's "Configuring the Oracle Database for Microsoft Entra ID Integration".
+  - The option is optional. When it is omitted DAB keeps requesting
+    `https://database.oracle.com/.default`, which Oracle's Entra integration usually does not
+    accept, and with `managed-identity: true` it logs a startup warning naming the option.
+  - A set value must be an absolute URI with a host and no whitespace; anything else fails startup
+    with a 503 `ErrorInInitialization`.
+  - Tokens are cached per scope, so data sources with different scopes never share a token.
+  - A token supplied by the configuration controller is used as-is; the option does not apply to it.
+  - The option is configuration-file only (no CLI flag). Token acquisition for a configured scope
+    has been unit-tested with a mocked credential only, not against an Entra-integrated database.
 - Stored-procedure metadata discovery binds schema/package/subprogram names as parameters
   (`@param0`/`@param1`/`@param2`) instead of interpolating them into the `ALL_ARGUMENTS` query.
 
@@ -77,6 +93,21 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   `DAB_SESSION_CONTEXT` namespace (`CREATE CONTEXT DAB_SESSION_CONTEXT USING DAB_SESSION_CONTEXT_PKG;`)
   and the `DAB_SESSION_CONTEXT_PKG` package. Oracle only permits a namespace's context to be set from
   its associated package. The DAB login needs `EXECUTE` on the package.
+- **Package owner.** The package lands in the schema of whoever runs the script, and by default DAB
+  calls it unqualified, which resolves in the DAB login's schema. When a DBA other than the DAB login
+  owns it, the unqualified call fails startup and every request with `PLS-00201`. Set the
+  data-source option `session-context-package-owner` to the owning schema (for example
+  `"SEC_ADMIN"`) and DAB calls `SEC_ADMIN.DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS` / `.SET_CLAIM`, or
+  create a private synonym `DAB_USER.DAB_SESSION_CONTEXT_PKG` for the owner's package and leave the
+  option unset. The owner is written into the command text, so it must be an unquoted Oracle
+  identifier (a letter, then up to 127 letters, digits, `_`, `$` or `#`); any other value fails
+  startup with a 503 `ErrorInInitialization`. Quoted (case-sensitive) schema names are not
+  supported; use a synonym for those. The option is configuration-file only.
+- **Trust boundary.** `SET_CLAIM` writes any attribute with definer rights and does not check its
+  caller. Any session that holds `EXECUTE` on the package can set `sub` or `roles` to any value, so
+  `EXECUTE` is equivalent to "can assume any identity" for every `SYS_CONTEXT`-based policy. Grant
+  it only to the dedicated DAB login (never to `PUBLIC`), and do not share that login with other
+  applications.
 - **Claim values.** Claims come from the shared, provider-agnostic pipeline
   (`AuthorizationResolver.GetProcessedUserClaims`): a single-valued claim is forwarded as a scalar, and
   multiple claims of the same name as a JSON array string (e.g. `["group1","group2"]`). `roles` resolves
@@ -91,28 +122,45 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   transaction. When that transaction is an `OracleTransaction`, the context command is enlisted in it
   too. The async request path passes the request-abort token to the context command. The synchronous
   query path has no token.
-- **Health check.** The data-source health query is `SELECT 1 FROM DUAL` on a raw pooled connection
-  opened by `HttpUtilities.ExecuteDbQueryAsync`, not by the query executor. That statement does not read
+- **Health check.** The data-source health query is `SELECT 1 FROM DUAL`. `HttpUtilities.ExecuteDbQueryAsync`
+  opens it on a connection from the Oracle query executor (`CreateConnection` plus
+  `SetManagedIdentityAccessTokenIfAnyAsync`), so the probe uses the same prepared connection string
+  (hosted TCPS / `SSL_SERVER_DN_MATCH` check, bounded statement cache) and managed identity token as
+  requests. A forced token that cannot be obtained reports the data source Unhealthy instead of
+  connecting without it. The measured response time includes token acquisition on the first probe
+  and after the cached token expires, so a slow credential can exceed the data-source threshold
+  while the database itself is healthy. The probe does not run the session-context block and does not read
   `SYS_CONTEXT`, so it cannot observe or return a previous caller's claims. It also does not clear the
   namespace; the next executor checkout does. Enabling `set-session-context` does not require the DBA
   package to exist at health-check time.
 - **Injection safety.** Claim names and values are always bound parameters; claim text is never
   concatenated into SQL.
 - **Caching.** Enabling the option disables response caching for the data source, the same as MSSQL.
-- **Consumption.** Database-side policies read values with `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>')`
-  (for example in a `DBMS_RLS.ADD_POLICY` predicate function or a view mapped as an entity), and
-  multi-valued claims are expanded with `JSON_TABLE`:
+- **Consumption.** Database-side policies read values with
+  `SYS_CONTEXT('DAB_SESSION_CONTEXT', '<claim>', 4000)` (for example in a `DBMS_RLS.ADD_POLICY`
+  predicate function or a view mapped as an entity). Always pass the third (length) argument:
+  without it `SYS_CONTEXT` returns at most 256 bytes, so a longer claim (a JSON array of groups, for
+  example) reaches the policy truncated and is no longer valid JSON. Multi-valued claims are
+  expanded with `JSON_TABLE`:
 
 ```sql
 WHERE region IN (
   SELECT jt.value
-  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions'), '$[*]'
+  FROM JSON_TABLE(SYS_CONTEXT('DAB_SESSION_CONTEXT', 'regions', 4000), '$[*]'
        COLUMNS (value VARCHAR2(4000) PATH '$')) jt)
 ```
 
 - **Limits.** `DBMS_SESSION.SET_CONTEXT` values are `VARCHAR2(4000)` (MSSQL session context allows up
   to 1 MB), and context attribute names are length-limited (30 bytes before Oracle 12.2, 128 after), so
-  a very large claims array or a URI-style claim name cannot be forwarded.
+  a very large claims array or a URI-style claim name cannot be forwarded. Such a claim **fails the
+  request closed**; it is never skipped or truncated, because dropping a claim can widen a
+  database-side policy. DAB checks values before the round trip: a value longer than 4000 UTF-8 bytes
+  returns 403 `UnsupportedClaimValueType`, names the claim (not its value), and no context command
+  runs. The check counts UTF-8 bytes, which is exact for an `AL32UTF8` database; a single-byte
+  database charset can store some values the check rejects, which errs on the side of failing
+  closed. An over-long claim name is rejected by Oracle inside the block, and the request fails with
+  the parsed database error. Either way every request from that principal fails until the claim is
+  shortened or removed from the token.
 
 DAB-config database policies (`@claims.x` in `permissions`) are a separate mechanism: they bind claim
 values in-process and use only the first value of a duplicated claim; they do not read session context.
@@ -188,7 +236,7 @@ Oracle folds unquoted identifiers to uppercase in the catalog. DAB quotes every 
 - Backing names on `SourceDefinition` (columns, primary key, FK column lists) are the catalog spelling: `ID`, `BOOK_ID`, or the exact spelling of a quoted identifier.
 - Exposed names are the name **as provided to the engine**: the entity config mapping / field alias verbatim when one is configured, otherwise the catalog spelling of the column. Unmapped unquoted columns therefore surface as `ID` / `BOOK_ID`, and quoted columns keep their exact catalog spelling (e.g. `"ID Number"`). There is no lowercase fallback.
 - Generated SQL quotes backing names as-is. Schema, table, package, and procedure names go through `QuoteRelation` / `QuoteCatalogObject`, which emit the stored catalog spelling. DAB-generated aliases go through `QuoteTableAlias` and stay uppercase.
-- Quoted identifiers are supported. In config, wrap a part in double quotes (`"Hr"."Customers"`, or `"Sch.ema"."Tab.le"` when the name contains a dot). `""` inside quotes is one quote character. An unquoted part is folded to uppercase once, at parse, and that spelling is what catalog lookups and SQL use. `[brackets]` remain only a way to escape `.` or `]` in an unquoted name; the text inside still folds, and a token starts with either `"` or `[` (they do not nest). `User Id=hr` resolves to schema `HR`. `User Id="Hr"` keeps `Hr`. `SELECT USER` is already the catalog spelling and is used as returned.
+- Quoted identifiers are supported. In config, wrap a part in double quotes (`"Hr"."Customers"`, or `"Sch.ema"."Tab.le"` when the name contains a dot). `""` inside quotes is one quote character. An unquoted part is folded to uppercase once, at parse, and that spelling is what catalog lookups and SQL use. `[brackets]` remain only a way to escape `.` or `]` in an unquoted name; the text inside still folds, and a token starts with either `"` or `[` (they do not nest). Unqualified sources resolve in the session's `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`, which is what unqualified SQL in that session uses (it differs from the login user after `ALTER SESSION SET CURRENT_SCHEMA`, e.g. in a logon trigger). It is read once at startup, is already the catalog spelling, and wins over the connection-string User ID. The User ID is only the fallback when that query fails: `User Id=hr` resolves to schema `HR`, `User Id="Hr"` keeps `Hr`, and the proxy form `User Id=px[app]` uses the target `APP`. `User Id=/` (wallet, external or token authentication) names no schema, so the session query must succeed.
 - A quoted object that is missing fails startup with `Could not resolve Oracle object "Hr"."Customers"`, naming that spelling. Two columns that differ only by case (`"DATA"` and `"data"`) fail startup, because the column map is case-insensitive. Two relations that differ only by case are also rejected: `DatabaseObject` equality ignores case, so a quoted table and its uppercase twin would otherwise be treated as one object. GraphQL still cannot expose a name that fails its identifier rules (for example a space); those columns stay REST-only.
 - Autoentity sources are built from the catalog spelling. A mixed-case or otherwise quoted name is emitted with quotes (`HR."Customers"`) so the next parse does not fold it. An ordinary uppercase name stays bare (`SYSTEM.BOOKS`). Linking sources keep the authored string and go through the same parser.
 - The Oracle test config supplies explicit lowercase mappings for the columns the shared API suite expects (e.g. `publisher_id`, `categoryid`) so the shared contract is preserved; entities injected by the test harness (`magazine`, `bar_magazine`) get the same mappings in `TestHelper.AddMissingEntitiesToConfig`.
@@ -318,12 +366,24 @@ These items from the Oracle review are documented here and are not treated as op
 
 ## Driver package
 
-`Oracle.ManagedDataAccess.Core` 23.7.0 is a central package version in `src/Directory.Packages.props` and a package reference on `Azure.DataApiBuilder.Core`. It is not vendored. Restore uses the repository `Nuget.config` unchanged, the same feed as every other dependency.
+`Oracle.ManagedDataAccess.Core` 23.26.401 is a central package version in `src/Directory.Packages.props` and a package reference on `Azure.DataApiBuilder.Core`. It is not vendored. Restore uses the repository `Nuget.config` unchanged, the same feed as every other dependency.
 
 ## Mutation errors
 
 A local Oracle mutation rolls back when the work throws. If that rollback also throws, the rollback error is logged and the original mutation error is what the caller sees. A commit failure propagates and is not followed by a rollback.
 
+## Deleting through a view
+
+Oracle accepts a `DELETE` through a join view and removes the row of the key-preserved base table. MSSQL and PostgreSQL reject the same request, so DAB rejects it on Oracle too: a REST or GraphQL delete on a view entity whose view reads more than one table returns HTTP 400 `DatabaseOperationFailed` ("Cannot delete from view … because it reads N tables."). At metadata load DAB counts the distinct tables the view reads in `ALL_DEPENDENCIES`, following nested views and synonyms.
+
+- A view with an enabled `INSTEAD OF DELETE` trigger stays deletable; the trigger defines the delete.
+- A table referenced only in a subquery or through a function call is counted, so such a view is treated as multi-table.
+- A self-join reads one distinct table and stays deletable.
+- When the dependencies cannot be read, or no table is visible (missing privileges), deletes through the view are rejected and a warning is logged.
+- `PUT`/`PATCH` through a join view are unchanged: Oracle raises ORA-01779/ORA-01776 for a column it cannot modify, mapped to 400.
+
 ## Upgrade notes
+
+- **Oracle only: DELETE through a multi-table view entity returns 400.** It used to return 204 after deleting the key-preserved base row. See [Deleting through a view](#deleting-through-a-view).
 
 - **Oracle only: an insert with no supplied columns plus a create policy is denied (403).** `POST` with `{}` against an Oracle entity whose role has a create database policy returns HTTP 403 `DatabasePolicyFailure`. MSSQL, PostgreSQL, MySQL, and DWSQL responses are unchanged.

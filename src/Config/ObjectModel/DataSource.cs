@@ -88,7 +88,9 @@ public record DataSource(
             return (TOptionType)(object)new OracleOptions(
                 CommandTimeoutSeconds: ReadIntOption("command-timeout") ?? OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 SetSessionContext: ReadBoolOption(namingPolicy.ConvertName(nameof(MsSqlOptions.SetSessionContext))),
-                ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION));
+                ManagedIdentity: ReadNullableBoolOption(OracleOptions.MANAGED_IDENTITY_OPTION),
+                SessionContextPackageOwner: ReadTextOption(OracleOptions.SESSION_CONTEXT_PACKAGE_OWNER_OPTION),
+                ManagedIdentityScope: ReadTextOption(OracleOptions.MANAGED_IDENTITY_SCOPE_OPTION));
         }
 
         throw new NotSupportedException($"The type {typeof(TOptionType).FullName} is not a supported strongly typed options object");
@@ -102,6 +104,30 @@ public record DataSource(
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads a free-text option. The config converter stores option strings that parse as booleans
+    /// ("TRUE", "false") as bools, so those come back as their text instead of being dropped; any other
+    /// non-string value is returned as its raw text for the consumer to reject.
+    /// </summary>
+    private string? ReadTextOption(string option)
+    {
+        if (Options is null || !Options.TryGetValue(option, out object? value))
+        {
+            return null;
+        }
+
+        return value switch
+        {
+            null => null,
+            string stringValue => stringValue,
+            bool boolValue => boolValue ? "TRUE" : "FALSE",
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Null } => null,
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } element => element.GetString(),
+            System.Text.Json.JsonElement element => element.GetRawText(),
+            _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture),
+        };
     }
 
     private bool ReadBoolOption(string option)
@@ -224,16 +250,35 @@ public record MsSqlOptions(bool SetSessionContext = true) : IDataSourceOptions;
 /// fails requests with a 503 instead of silently connecting without one) and false disables it,
 /// regardless of the connection string. Accepts true/false or "1"/"0"; configuration-file only.
 /// </param>
+/// <param name="SessionContextPackageOwner">
+/// Schema that owns <c>DAB_SESSION_CONTEXT_PKG</c> when it is not the DAB login's schema. null
+/// (default) keeps the unqualified call, which resolves in the login's schema or through a synonym.
+/// Must be an unquoted Oracle identifier; any other value fails startup. Configuration-file only.
+/// </param>
+/// <param name="ManagedIdentityScope">
+/// Scope DAB requests when it acquires a managed identity token itself, normally the database app
+/// registration's App ID URI followed by <c>/session:scope:connect</c>. null (default) keeps
+/// <c>https://database.oracle.com/.default</c>. A set value must be an absolute URI without
+/// whitespace; any other value fails startup. Not used for a configuration-controller token.
+/// </param>
 public record OracleOptions(
     int CommandTimeoutSeconds = OracleOptions.DEFAULT_COMMAND_TIMEOUT_SECONDS,
     bool SetSessionContext = false,
-    bool? ManagedIdentity = null) : IDataSourceOptions
+    bool? ManagedIdentity = null,
+    string? SessionContextPackageOwner = null,
+    string? ManagedIdentityScope = null) : IDataSourceOptions
 {
     /// <summary>Default command timeout in seconds, matching the other ADO.NET providers.</summary>
     public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
 
     /// <summary>Name of the tri-state managed identity option in the data-source options object.</summary>
     public const string MANAGED_IDENTITY_OPTION = "managed-identity";
+
+    /// <summary>Name of the option naming the schema that owns the session-context package.</summary>
+    public const string SESSION_CONTEXT_PACKAGE_OWNER_OPTION = "session-context-package-owner";
+
+    /// <summary>Name of the option holding the managed identity token scope.</summary>
+    public const string MANAGED_IDENTITY_SCOPE_OPTION = "managed-identity-scope";
 }
 
 /// <summary>

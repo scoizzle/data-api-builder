@@ -2970,9 +2970,9 @@ END DAB_SESSION_CONTEXT_PKG;]';
    begin
       execute immediate q'[CREATE OR REPLACE VIEW DAB_SESSION_CLAIMS AS
         SELECT 1 AS "id",
-               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'roles') AS "roles",
-               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'groups') AS "claim_groups",
-               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'sub') AS "sub"
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'roles', 4000) AS "roles",
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'groups', 4000) AS "claim_groups",
+               SYS_CONTEXT('DAB_SESSION_CONTEXT', 'sub', 4000) AS "sub"
         FROM DUAL]';
    exception
       when others then

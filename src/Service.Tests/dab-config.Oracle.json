@@ -2,8 +2,10 @@
   "$schema": "https://github.com/Azure/data-api-builder/releases/download/vmajor.minor.patch/dab.draft.schema.json",
   "data-source": {
     "database-type": "oracle",
-    "connection-string": "Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=test)));User Id=system;Password=awesome;",
-    "options": {}
+    "connection-string": "Data Source=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=test)));User Id=system;Password=REPLACEME;",
+    "options": {
+      "set-session-context": false
+    }
   },
   "runtime": {
     "rest": {
@@ -23,8 +25,7 @@
     },
     "mcp": {
       "enabled": true,
-      "path": "/mcp",
-      "dml-tools": true
+      "path": "/mcp"
     },
     "host": {
       "cors": {
@@ -37,14 +38,35 @@
         "provider": "AppService"
       },
       "mode": "development"
+    },
+    "telemetry": {
+      "open-telemetry": {
+        "enabled": true,
+        "endpoint": "@env('OTEL_EXPORTER_OTLP_ENDPOINT')",
+        "headers": "@env('OTEL_EXPORTER_OTLP_HEADERS')",
+        "service-name": "@env('OTEL_SERVICE_NAME')"
+      }
     }
   },
+  "autoentities": {},
   "entities": {
     "Publisher": {
       "source": {
         "object": "publishers",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -85,6 +107,15 @@
           "role": "policy_tester_01",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -94,15 +125,6 @@
               },
               "policy": {
                 "database": "@item.id eq 1940"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -117,6 +139,15 @@
           "role": "policy_tester_02",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -126,15 +157,6 @@
               },
               "policy": {
                 "database": "@item.id ne 1940"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -149,6 +171,15 @@
           "role": "policy_tester_03",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -158,15 +189,6 @@
               },
               "policy": {
                 "database": "@item.id ne 1940"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -181,6 +203,15 @@
           "role": "policy_tester_04",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -190,15 +221,6 @@
               },
               "policy": {
                 "database": "@item.id eq 1940"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -213,6 +235,15 @@
           "role": "policy_tester_06",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -222,15 +253,6 @@
               },
               "policy": {
                 "database": "@item.id eq 1940"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -245,9 +267,9 @@
           "role": "database_policy_tester",
           "actions": [
             {
-              "action": "create",
+              "action": "read",
               "policy": {
-                "database": "@item.name ne 'New publisher'"
+                "database": "@item.id ne 1234 or @item.id gt 1940"
               }
             },
             {
@@ -257,9 +279,9 @@
               }
             },
             {
-              "action": "read",
+              "action": "create",
               "policy": {
-                "database": "@item.id ne 1234 or @item.id gt 1940"
+                "database": "@item.name ne 'New publisher'"
               }
             }
           ]
@@ -268,6 +290,12 @@
           "role": "role_multiple_create_policy_tester",
           "actions": [
             {
+              "action": "create",
+              "policy": {
+                "database": "@item.name ne 'Test'"
+              }
+            },
+            {
               "action": "read"
             },
             {
@@ -275,12 +303,6 @@
             },
             {
               "action": "delete"
-            },
-            {
-              "action": "create",
-              "policy": {
-                "database": "@item.name ne 'Test'"
-              }
             }
           ]
         }
@@ -294,10 +316,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name"
       }
     },
     "Publisher_MM": {
@@ -305,6 +323,18 @@
         "object": "publishers_mm",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -346,10 +376,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name"
       }
     },
     "Stock": {
@@ -357,13 +383,33 @@
         "object": "stocks",
         "type": "table"
       },
-      "mappings": {
-        "categoryName": "categoryName",
-        "piecesAvailable": "piecesAvailable",
-        "piecesRequired": "piecesRequired",
-        "categoryid": "categoryid",
-        "pieceid": "pieceid"
-      },
+      "fields": [
+        {
+          "name": "categoryName",
+          "alias": "categoryName",
+          "primary-key": false
+        },
+        {
+          "name": "piecesAvailable",
+          "alias": "piecesAvailable",
+          "primary-key": false
+        },
+        {
+          "name": "piecesRequired",
+          "alias": "piecesRequired",
+          "primary-key": false
+        },
+        {
+          "name": "categoryid",
+          "alias": "categoryid",
+          "primary-key": false
+        },
+        {
+          "name": "pieceid",
+          "alias": "pieceid",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -452,7 +498,10 @@
           "role": "database_policy_tester",
           "actions": [
             {
-              "action": "read"
+              "action": "update",
+              "policy": {
+                "database": "@item.pieceid ne 1"
+              }
             },
             {
               "action": "create",
@@ -461,10 +510,7 @@
               }
             },
             {
-              "action": "update",
-              "policy": {
-                "database": "@item.pieceid ne 1"
-              }
+              "action": "read"
             }
           ]
         },
@@ -546,6 +592,23 @@
         "object": "books",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -595,6 +658,15 @@
           "role": "policy_tester_01",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -604,15 +676,6 @@
               },
               "policy": {
                 "database": "@item.title eq 'Policy-Test-01'"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -627,6 +690,15 @@
           "role": "policy_tester_02",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -636,15 +708,6 @@
               },
               "policy": {
                 "database": "@item.title ne 'Policy-Test-01'"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -659,6 +722,15 @@
           "role": "policy_tester_03",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -668,15 +740,6 @@
               },
               "policy": {
                 "database": "@item.title eq 'Policy-Test-01'"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -691,6 +754,15 @@
           "role": "policy_tester_04",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -700,15 +772,6 @@
               },
               "policy": {
                 "database": "@item.title ne 'Policy-Test-01'"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -723,6 +786,15 @@
           "role": "policy_tester_05",
           "actions": [
             {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
+            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -732,15 +804,6 @@
               },
               "policy": {
                 "database": "@item.id ne 9"
-              }
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
               }
             },
             {
@@ -754,6 +817,15 @@
         {
           "role": "policy_tester_06",
           "actions": [
+            {
+              "action": "update",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
+              }
+            },
             {
               "action": "read",
               "fields": {
@@ -771,15 +843,6 @@
             },
             {
               "action": "delete"
-            },
-            {
-              "action": "update",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
-              }
             }
           ]
         },
@@ -787,7 +850,7 @@
           "role": "policy_tester_07",
           "actions": [
             {
-              "action": "delete",
+              "action": "update",
               "fields": {
                 "exclude": [],
                 "include": [
@@ -808,7 +871,7 @@
               }
             },
             {
-              "action": "update",
+              "action": "delete",
               "fields": {
                 "exclude": [],
                 "include": [
@@ -828,12 +891,15 @@
           "role": "policy_tester_08",
           "actions": [
             {
-              "action": "read",
+              "action": "update",
               "fields": {
                 "exclude": [],
                 "include": [
                   "*"
                 ]
+              },
+              "policy": {
+                "database": "@item.id eq 9"
               }
             },
             {
@@ -849,15 +915,12 @@
               }
             },
             {
-              "action": "update",
+              "action": "read",
               "fields": {
                 "exclude": [],
                 "include": [
                   "*"
                 ]
-              },
-              "policy": {
-                "database": "@item.id eq 9"
               }
             },
             {
@@ -947,10 +1010,10 @@
           "role": "role_multiple_create_policy_tester",
           "actions": [
             {
-              "action": "update"
-            },
-            {
-              "action": "delete"
+              "action": "read",
+              "policy": {
+                "database": "@item.publisher_id ne 1234"
+              }
             },
             {
               "action": "create",
@@ -959,19 +1022,41 @@
               }
             },
             {
-              "action": "read",
-              "policy": {
-                "database": "@item.publisher_id ne 1234"
+              "action": "update"
+            },
+            {
+              "action": "delete"
+            }
+          ]
+        },
+        {
+          "role": "test_role_with_excluded_fields_on_mutation",
+          "actions": [
+            {
+              "action": "create",
+              "fields": {
+                "exclude": [
+                  "publisher_id"
+                ]
               }
+            },
+            {
+              "action": "update",
+              "fields": {
+                "exclude": [
+                  "publisher_id"
+                ]
+              }
+            },
+            {
+              "action": "read"
+            },
+            {
+              "action": "delete"
             }
           ]
         }
       ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      },
       "relationships": {
         "publishers": {
           "cardinality": "one",
@@ -1021,6 +1106,18 @@
         "object": "default_books",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1060,17 +1157,30 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "title": "title"
-      }
+      ]
     },
     "Book_MM": {
       "source": {
         "object": "books_mm",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1141,11 +1251,6 @@
             "author_id"
           ]
         }
-      },
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
       }
     },
     "BookWebsitePlacement": {
@@ -1153,6 +1258,23 @@
         "object": "book_website_placements",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "book_id",
+          "alias": "book_id",
+          "primary-key": false
+        },
+        {
+          "name": "price",
+          "alias": "price",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1205,11 +1327,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "book_id": "book_id",
-        "price": "price"
       }
     },
     "Author": {
@@ -1217,6 +1334,23 @@
         "object": "authors",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "birthdate",
+          "alias": "birthdate",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1264,11 +1398,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name",
-        "birthdate": "birthdate"
       }
     },
     "Author_MM": {
@@ -1276,6 +1405,23 @@
         "object": "authors_mm",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "birthdate",
+          "alias": "birthdate",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1322,11 +1468,6 @@
             "book_id"
           ]
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name",
-        "birthdate": "birthdate"
       }
     },
     "Revenue": {
@@ -1334,6 +1475,28 @@
         "object": "revenues",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "category",
+          "alias": "category",
+          "primary-key": false
+        },
+        {
+          "name": "revenue",
+          "alias": "revenue",
+          "primary-key": false
+        },
+        {
+          "name": "accessible_role",
+          "alias": "accessible_role",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1364,19 +1527,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "category": "category",
-        "revenue": "revenue",
-        "accessible_role": "accessible_role"
-      }
+      ]
     },
     "Review": {
       "source": {
         "object": "reviews",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "book_id",
+          "alias": "book_id",
+          "primary-key": false
+        },
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "content",
+          "alias": "content",
+          "primary-key": false
+        },
+        {
+          "name": "websiteuser_id",
+          "alias": "websiteuser_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1423,10 +1602,10 @@
           "role": "role_multiple_create_policy_tester",
           "actions": [
             {
-              "action": "update"
-            },
-            {
-              "action": "delete"
+              "action": "read",
+              "policy": {
+                "database": "@item.websiteuser_id ne 1"
+              }
             },
             {
               "action": "create",
@@ -1435,10 +1614,10 @@
               }
             },
             {
-              "action": "read",
-              "policy": {
-                "database": "@item.websiteuser_id ne 1"
-              }
+              "action": "update"
+            },
+            {
+              "action": "delete"
             }
           ]
         }
@@ -1464,12 +1643,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "book_id": "book_id",
-        "id": "id",
-        "content": "content",
-        "websiteuser_id": "websiteuser_id"
       }
     },
     "Review_MM": {
@@ -1477,6 +1650,28 @@
         "object": "reviews_mm",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "book_id",
+          "alias": "book_id",
+          "primary-key": false
+        },
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "content",
+          "alias": "content",
+          "primary-key": false
+        },
+        {
+          "name": "websiteuser_id",
+          "alias": "websiteuser_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1530,12 +1725,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "book_id": "book_id",
-        "id": "id",
-        "content": "content",
-        "websiteuser_id": "websiteuser_id"
       }
     },
     "Comic": {
@@ -1543,13 +1732,33 @@
         "object": "comics",
         "type": "table"
       },
-      "mappings": {
-        "categoryName": "categoryName",
-        "id": "id",
-        "title": "title",
-        "volume": "volume",
-        "series_id": "series_id"
-      },
+      "fields": [
+        {
+          "name": "categoryName",
+          "alias": "categoryName",
+          "primary-key": false
+        },
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "volume",
+          "alias": "volume",
+          "primary-key": false
+        },
+        {
+          "name": "series_id",
+          "alias": "series_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1652,6 +1861,7 @@
         "object": "brokers",
         "type": "table"
       },
+      "fields": [],
       "graphql": {
         "enabled": false,
         "type": {
@@ -1695,6 +1905,18 @@
         "object": "website_users",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1739,6 +1961,33 @@
               "action": "update"
             }
           ]
+        },
+        {
+          "role": "test_role_with_excluded_fields_on_mutation",
+          "actions": [
+            {
+              "action": "create",
+              "fields": {
+                "exclude": [
+                  "username"
+                ]
+              }
+            },
+            {
+              "action": "update",
+              "fields": {
+                "exclude": [
+                  "username"
+                ]
+              }
+            },
+            {
+              "action": "read"
+            },
+            {
+              "action": "delete"
+            }
+          ]
         }
       ],
       "relationships": {
@@ -1754,10 +2003,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "username": "username"
       }
     },
     "WebsiteUser_MM": {
@@ -1765,6 +2010,18 @@
         "object": "website_users_mm",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1806,10 +2063,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "username": "username"
       }
     },
     "SupportedType": {
@@ -1817,6 +2070,98 @@
         "object": "type_table",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "typeid",
+          "primary-key": false
+        },
+        {
+          "name": "byte_types",
+          "alias": "byte_types",
+          "primary-key": false
+        },
+        {
+          "name": "short_types",
+          "alias": "short_types",
+          "primary-key": false
+        },
+        {
+          "name": "int_types",
+          "alias": "int_types",
+          "primary-key": false
+        },
+        {
+          "name": "long_types",
+          "alias": "long_types",
+          "primary-key": false
+        },
+        {
+          "name": "string_types",
+          "alias": "string_types",
+          "primary-key": false
+        },
+        {
+          "name": "nvarchar_string_types",
+          "alias": "nvarchar_string_types",
+          "primary-key": false
+        },
+        {
+          "name": "single_types",
+          "alias": "single_types",
+          "primary-key": false
+        },
+        {
+          "name": "float_types",
+          "alias": "float_types",
+          "primary-key": false
+        },
+        {
+          "name": "decimal_types",
+          "alias": "decimal_types",
+          "primary-key": false
+        },
+        {
+          "name": "boolean_types",
+          "alias": "boolean_types",
+          "primary-key": false
+        },
+        {
+          "name": "date_types",
+          "alias": "date_types",
+          "primary-key": false
+        },
+        {
+          "name": "datetime_types",
+          "alias": "datetime_types",
+          "primary-key": false
+        },
+        {
+          "name": "datetime2_types",
+          "alias": "datetime2_types",
+          "primary-key": false
+        },
+        {
+          "name": "datetimeoffset_types",
+          "alias": "datetimeoffset_types",
+          "primary-key": false
+        },
+        {
+          "name": "smalldatetime_types",
+          "alias": "smalldatetime_types",
+          "primary-key": false
+        },
+        {
+          "name": "bytearray_types",
+          "alias": "bytearray_types",
+          "primary-key": false
+        },
+        {
+          "name": "uuid_types",
+          "alias": "uuid_types",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1862,36 +2207,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "typeid",
-        "byte_types": "byte_types",
-        "short_types": "short_types",
-        "int_types": "int_types",
-        "long_types": "long_types",
-        "string_types": "string_types",
-        "nvarchar_string_types": "nvarchar_string_types",
-        "single_types": "single_types",
-        "float_types": "float_types",
-        "decimal_types": "decimal_types",
-        "boolean_types": "boolean_types",
-        "date_types": "date_types",
-        "datetime_types": "datetime_types",
-        "datetime2_types": "datetime2_types",
-        "datetimeoffset_types": "datetimeoffset_types",
-        "smalldatetime_types": "smalldatetime_types",
-        "bytearray_types": "bytearray_types",
-        "uuid_types": "uuid_types"
-      }
+      ]
     },
     "BlobType": {
       "source": {
         "object": "blob_type_table",
-        "type": "table",
-        "key-fields": [
-          "id"
-        ]
+        "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": true
+        },
+        {
+          "name": "payload",
+          "alias": "payload",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -1919,17 +2253,40 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "payload": "payload"
-      }
+      ]
     },
     "stocks_price": {
       "source": {
         "object": "stocks_price",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "categoryid",
+          "alias": "categoryid",
+          "primary-key": false
+        },
+        {
+          "name": "pieceid",
+          "alias": "pieceid",
+          "primary-key": false
+        },
+        {
+          "name": "instant",
+          "alias": "instant",
+          "primary-key": false
+        },
+        {
+          "name": "price",
+          "alias": "price",
+          "primary-key": false
+        },
+        {
+          "name": "is_wholesale_price",
+          "alias": "is_wholesale_price",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2014,13 +2371,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "categoryid": "categoryid",
-        "pieceid": "pieceid",
-        "instant": "instant",
-        "price": "price",
-        "is_wholesale_price": "is_wholesale_price"
       }
     },
     "Tree": {
@@ -2028,6 +2378,28 @@
         "object": "trees",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "species",
+          "alias": "Scientific Name",
+          "primary-key": false
+        },
+        {
+          "name": "region",
+          "alias": "United State's Region",
+          "primary-key": false
+        },
+        {
+          "name": "treeid",
+          "alias": "treeid",
+          "primary-key": false
+        },
+        {
+          "name": "height",
+          "alias": "height",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": false,
         "type": {
@@ -2073,19 +2445,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "species": "Scientific Name",
-        "region": "United State's Region",
-        "treeid": "treeid",
-        "height": "height"
-      }
+      ]
     },
     "Shrub": {
       "source": {
         "object": "trees",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "species",
+          "alias": "fancyName",
+          "primary-key": false
+        },
+        {
+          "name": "treeid",
+          "alias": "treeid",
+          "primary-key": false
+        },
+        {
+          "name": "region",
+          "alias": "region",
+          "primary-key": false
+        },
+        {
+          "name": "height",
+          "alias": "height",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2133,12 +2521,6 @@
           ]
         }
       ],
-      "mappings": {
-        "species": "fancyName",
-        "treeid": "treeid",
-        "region": "region",
-        "height": "height"
-      },
       "relationships": {
         "fungus": {
           "cardinality": "one",
@@ -2159,6 +2541,28 @@
         "object": "fungi",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "spores",
+          "alias": "hazards",
+          "primary-key": false
+        },
+        {
+          "name": "speciesid",
+          "alias": "speciesid",
+          "primary-key": false
+        },
+        {
+          "name": "region",
+          "alias": "region",
+          "primary-key": false
+        },
+        {
+          "name": "habitat",
+          "alias": "habitat",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2222,12 +2626,6 @@
           ]
         }
       ],
-      "mappings": {
-        "spores": "hazards",
-        "speciesid": "speciesid",
-        "region": "region",
-        "habitat": "habitat"
-      },
       "relationships": {
         "Shrub": {
           "cardinality": "one",
@@ -2246,11 +2644,25 @@
     "books_view_all": {
       "source": {
         "object": "books_view_all",
-        "type": "view",
-        "key-fields": [
-          "id"
-        ]
+        "type": "view"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": true
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2287,21 +2699,19 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      }
+      ]
     },
     "session_claims": {
       "source": {
         "object": "DAB_SESSION_CLAIMS",
-        "type": "view",
-        "key-fields": [
-          "id"
-        ]
+        "type": "view"
       },
+      "fields": [
+        {
+          "name": "id",
+          "primary-key": true
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2334,11 +2744,25 @@
     "books_view_with_mapping": {
       "source": {
         "object": "books_view_with_mapping",
-        "type": "view",
-        "key-fields": [
-          "id"
-        ]
+        "type": "view"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "book_id",
+          "primary-key": true
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2358,28 +2782,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "book_id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      }
+      ]
     },
     "stocks_view_selected": {
       "source": {
         "object": "stocks_view_selected",
-        "type": "view",
-        "key-fields": [
-          "categoryid",
-          "pieceid"
-        ]
+        "type": "view"
       },
-      "mappings": {
-        "categoryName": "categoryName",
-        "piecesAvailable": "piecesAvailable",
-        "categoryid": "categoryid",
-        "pieceid": "pieceid"
-      },
+      "fields": [
+        {
+          "name": "categoryid",
+          "alias": "categoryid",
+          "primary-key": true
+        },
+        {
+          "name": "pieceid",
+          "alias": "pieceid",
+          "primary-key": true
+        },
+        {
+          "name": "categoryName",
+          "alias": "categoryName",
+          "primary-key": false
+        },
+        {
+          "name": "piecesAvailable",
+          "alias": "piecesAvailable",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2421,12 +2852,30 @@
     "books_publishers_view_composite": {
       "source": {
         "object": "books_publishers_view_composite",
-        "type": "view",
-        "key-fields": [
-          "id",
-          "pub_id"
-        ]
+        "type": "view"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": true
+        },
+        {
+          "name": "pub_id",
+          "alias": "pub_id",
+          "primary-key": true
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2463,23 +2912,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "name": "name",
-        "id": "id",
-        "title": "title",
-        "pub_id": "pub_id"
-      }
+      ]
     },
     "books_publishers_view_composite_insertable": {
       "source": {
         "object": "books_publishers_view_composite_insertable",
-        "type": "view",
-        "key-fields": [
-          "id",
-          "publisher_id"
-        ]
+        "type": "view"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": true
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": true
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2499,19 +2960,20 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "name": "name",
-        "publisher_id": "publisher_id"
-      }
+      ]
     },
     "Empty": {
       "source": {
         "object": "empty_table",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2548,17 +3010,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id"
-      }
+      ]
     },
     "Notebook": {
       "source": {
         "object": "notebooks",
-        "type": "table",
-        "object-description": "Table containing notebook information"
+        "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "notebookname",
+          "alias": "notebookname",
+          "primary-key": false
+        },
+        {
+          "name": "color",
+          "alias": "color",
+          "primary-key": false
+        },
+        {
+          "name": "ownername",
+          "alias": "ownername",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2574,15 +3054,6 @@
           "role": "anonymous",
           "actions": [
             {
-              "action": "create"
-            },
-            {
-              "action": "update"
-            },
-            {
-              "action": "delete"
-            },
-            {
               "action": "read",
               "fields": {
                 "exclude": [],
@@ -2593,22 +3064,47 @@
               "policy": {
                 "database": "@item ne 1"
               }
+            },
+            {
+              "action": "create"
+            },
+            {
+              "action": "update"
+            },
+            {
+              "action": "delete"
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "notebookname": "notebookname",
-        "color": "color",
-        "ownername": "ownername"
-      }
+      ]
     },
     "Journal": {
       "source": {
         "object": "journals",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "journalname",
+          "alias": "journalname",
+          "primary-key": false
+        },
+        {
+          "name": "color",
+          "alias": "color",
+          "primary-key": false
+        },
+        {
+          "name": "ownername",
+          "alias": "ownername",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2624,15 +3120,6 @@
           "role": "policy_tester_noupdate",
           "actions": [
             {
-              "action": "read",
-              "fields": {
-                "exclude": [],
-                "include": [
-                  "*"
-                ]
-              }
-            },
-            {
               "action": "update",
               "fields": {
                 "exclude": [],
@@ -2642,6 +3129,15 @@
               },
               "policy": {
                 "database": "@item.id ne 1"
+              }
+            },
+            {
+              "action": "read",
+              "fields": {
+                "exclude": [],
+                "include": [
+                  "*"
+                ]
               }
             },
             {
@@ -2656,7 +3152,7 @@
           "role": "policy_tester_update_noread",
           "actions": [
             {
-              "action": "delete",
+              "action": "update",
               "fields": {
                 "exclude": [],
                 "include": [
@@ -2676,7 +3172,7 @@
               }
             },
             {
-              "action": "update",
+              "action": "delete",
               "fields": {
                 "exclude": [],
                 "include": [
@@ -2700,19 +3196,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "journalname": "journalname",
-        "color": "color",
-        "ownername": "ownername"
-      }
+      ]
     },
     "ArtOfWar": {
       "source": {
         "object": "aow",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "DetailAssessmentAndPlanning",
+          "alias": "始計",
+          "primary-key": false
+        },
+        {
+          "name": "WagingWar",
+          "alias": "作戰",
+          "primary-key": false
+        },
+        {
+          "name": "StrategicAttack",
+          "alias": "謀攻",
+          "primary-key": false
+        },
+        {
+          "name": "NoteNum",
+          "alias": "┬─┬ノ( º _ ºノ)",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": false,
         "type": {
@@ -2740,19 +3252,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "DetailAssessmentAndPlanning": "始計",
-        "WagingWar": "作戰",
-        "StrategicAttack": "謀攻",
-        "NoteNum": "┬─┬ノ( º _ ºノ)"
-      }
+      ]
     },
     "series": {
       "source": {
         "object": "series",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2825,10 +3343,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name"
       }
     },
     "Sales": {
@@ -2836,6 +3350,33 @@
         "object": "sales",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "item_name",
+          "alias": "item_name",
+          "primary-key": false
+        },
+        {
+          "name": "subtotal",
+          "alias": "subtotal",
+          "primary-key": false
+        },
+        {
+          "name": "tax",
+          "alias": "tax",
+          "primary-key": false
+        },
+        {
+          "name": "total",
+          "alias": "total",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2863,20 +3404,30 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "item_name": "item_name",
-        "subtotal": "subtotal",
-        "tax": "tax",
-        "total": "total"
-      }
+      ]
     },
     "User_NonAutogenRelationshipColumn": {
       "source": {
         "object": "users",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "email",
+          "alias": "email",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2910,11 +3461,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "userid": "userid",
-        "username": "username",
-        "email": "email"
       }
     },
     "UserProfile": {
@@ -2922,6 +3468,28 @@
         "object": "user_profiles",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "profileid",
+          "alias": "profileid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "profilepictureurl",
+          "alias": "profilepictureurl",
+          "primary-key": false
+        },
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2941,19 +3509,30 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "profileid": "profileid",
-        "username": "username",
-        "profilepictureurl": "profilepictureurl",
-        "userid": "userid"
-      }
+      ]
     },
     "User_AutogenRelationshipColumn": {
       "source": {
         "object": "users",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "email",
+          "alias": "email",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -2987,11 +3566,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "userid": "userid",
-        "username": "username",
-        "email": "email"
       }
     },
     "User_AutogenToNonAutogenRelationshipColumn": {
@@ -2999,6 +3573,23 @@
         "object": "users",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "email",
+          "alias": "email",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3034,11 +3625,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "userid": "userid",
-        "username": "username",
-        "email": "email"
       }
     },
     "User_RepeatedReferencingColumnToOneEntity": {
@@ -3046,6 +3632,23 @@
         "object": "users",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "email",
+          "alias": "email",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3081,11 +3684,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "userid": "userid",
-        "username": "username",
-        "email": "email"
       }
     },
     "UserProfile_RepeatedReferencingColumnToTwoEntities": {
@@ -3093,6 +3691,28 @@
         "object": "user_profiles",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "profileid",
+          "alias": "profileid",
+          "primary-key": false
+        },
+        {
+          "name": "username",
+          "alias": "username",
+          "primary-key": false
+        },
+        {
+          "name": "profilepictureurl",
+          "alias": "profilepictureurl",
+          "primary-key": false
+        },
+        {
+          "name": "userid",
+          "alias": "userid",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3138,12 +3758,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "profileid": "profileid",
-        "username": "username",
-        "profilepictureurl": "profilepictureurl",
-        "userid": "userid"
       }
     },
     "GetBooks": {
@@ -3151,6 +3765,7 @@
         "object": "get_books",
         "type": "stored-procedure"
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "query",
@@ -3195,6 +3810,7 @@
           }
         ]
       },
+      "fields": [],
       "graphql": {
         "enabled": false,
         "operation": "mutation",
@@ -3233,6 +3849,7 @@
         "object": "get_publisher_by_id",
         "type": "stored-procedure"
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "query",
@@ -3270,11 +3887,20 @@
       "source": {
         "object": "insert_book",
         "type": "stored-procedure",
-        "parameters": {
-          "title": "randomX",
-          "publisher_id": 1234
-        }
+        "parameters": [
+          {
+            "name": "title",
+            "required": false,
+            "default": "randomX"
+          },
+          {
+            "name": "publisher_id",
+            "required": false,
+            "default": "1234"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3313,6 +3939,7 @@
         "object": "count_books",
         "type": "stored-procedure"
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3351,6 +3978,7 @@
         "object": "delete_last_inserted_book",
         "type": "stored-procedure"
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3388,11 +4016,20 @@
       "source": {
         "object": "update_book_title",
         "type": "stored-procedure",
-        "parameters": {
-          "id": 1,
-          "title": "Testing Tonight"
-        }
+        "parameters": [
+          {
+            "name": "id",
+            "required": false,
+            "default": "1"
+          },
+          {
+            "name": "title",
+            "required": false,
+            "default": "Testing Tonight"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3430,10 +4067,15 @@
       "source": {
         "object": "get_authors_history_by_first_name",
         "type": "stored-procedure",
-        "parameters": {
-          "firstName": "Aaron"
-        }
+        "parameters": [
+          {
+            "name": "firstName",
+            "required": false,
+            "default": "Aaron"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3471,11 +4113,20 @@
       "source": {
         "object": "insert_and_display_all_books_for_given_publisher",
         "type": "stored-procedure",
-        "parameters": {
-          "title": "MyTitle",
-          "publisher_name": "MyPublisher"
-        }
+        "parameters": [
+          {
+            "name": "title",
+            "required": false,
+            "default": "MyTitle"
+          },
+          {
+            "name": "publisher_name",
+            "required": false,
+            "default": "MyPublisher"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": true,
         "operation": "mutation",
@@ -3514,6 +4165,23 @@
         "object": "GQLmappings",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "__column1",
+          "alias": "column1",
+          "primary-key": false
+        },
+        {
+          "name": "__column2",
+          "alias": "column2",
+          "primary-key": false
+        },
+        {
+          "name": "column3",
+          "alias": "column3",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3541,18 +4209,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "__column1": "column1",
-        "__column2": "column2",
-        "column3": "column3"
-      }
+      ]
     },
     "Bookmarks": {
       "source": {
         "object": "bookmarks",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "bkname",
+          "alias": "bkname",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3580,17 +4255,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "bkname": "bkname"
-      }
+      ]
     },
     "MappedBookmarks": {
       "source": {
         "object": "mappedbookmarks",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "bkid",
+          "primary-key": false
+        },
+        {
+          "name": "bkname",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3618,17 +4301,40 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "bkid",
-        "bkname": "name"
-      }
+      ]
     },
     "FteData": {
       "source": {
         "object": "fte_data",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "u_id",
+          "alias": "u_id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "position",
+          "alias": "position",
+          "primary-key": false
+        },
+        {
+          "name": "salary",
+          "alias": "salary",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3648,20 +4354,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "u_id": "u_id",
-        "name": "name",
-        "position": "position",
-        "salary": "salary"
-      }
+      ]
     },
     "InternData": {
       "source": {
         "object": "intern_data",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "months",
+          "alias": "months",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "salary",
+          "alias": "salary",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3681,19 +4402,40 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "months": "months",
-        "name": "name",
-        "salary": "salary"
-      }
+      ]
     },
     "BooksSold": {
       "source": {
         "object": "books_sold",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "book_name",
+          "alias": "book_name",
+          "primary-key": false
+        },
+        {
+          "name": "row_version",
+          "alias": "row_version",
+          "primary-key": false
+        },
+        {
+          "name": "copies_sold",
+          "alias": "copies_sold",
+          "primary-key": false
+        },
+        {
+          "name": "last_sold_on",
+          "alias": "last_sold_on",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3713,20 +4455,65 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "book_name": "book_name",
-        "row_version": "row_version",
-        "copies_sold": "copies_sold",
-        "last_sold_on": "last_sold_on"
-      }
+      ]
     },
     "DefaultBuiltInFunction": {
       "source": {
         "object": "default_with_function_table",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "user_value",
+          "alias": "user_value",
+          "primary-key": false
+        },
+        {
+          "name": "current_date",
+          "alias": "current_date",
+          "primary-key": false
+        },
+        {
+          "name": "current_timestamp",
+          "alias": "current_timestamp",
+          "primary-key": false
+        },
+        {
+          "name": "random_number",
+          "alias": "random_number",
+          "primary-key": false
+        },
+        {
+          "name": "next_date",
+          "alias": "next_date",
+          "primary-key": false
+        },
+        {
+          "name": "default_string_with_parenthesis",
+          "alias": "default_string_with_parenthesis",
+          "primary-key": false
+        },
+        {
+          "name": "default_function_string_with_parenthesis",
+          "alias": "default_function_string_with_parenthesis",
+          "primary-key": false
+        },
+        {
+          "name": "default_integer",
+          "alias": "default_integer",
+          "primary-key": false
+        },
+        {
+          "name": "default_date_string",
+          "alias": "default_date_string",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3761,25 +4548,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "user_value": "user_value",
-        "current_date": "current_date",
-        "current_timestamp": "current_timestamp",
-        "random_number": "random_number",
-        "next_date": "next_date",
-        "default_string_with_parenthesis": "default_string_with_parenthesis",
-        "default_function_string_with_parenthesis": "default_function_string_with_parenthesis",
-        "default_integer": "default_integer",
-        "default_date_string": "default_date_string"
-      }
+      ]
     },
     "PublisherNF": {
       "source": {
         "object": "publishers",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3855,10 +4642,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name"
       }
     },
     "BookNF": {
@@ -3866,6 +4649,23 @@
         "object": "books",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -3940,11 +4740,6 @@
           ]
         }
       ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      },
       "relationships": {
         "publishers": {
           "cardinality": "one",
@@ -3994,6 +4789,23 @@
         "object": "authors",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        },
+        {
+          "name": "birthdate",
+          "alias": "birthdate",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4075,11 +4887,6 @@
           "linking.source.fields": [],
           "linking.target.fields": []
         }
-      },
-      "mappings": {
-        "id": "id",
-        "name": "name",
-        "birthdate": "birthdate"
       }
     },
     "dbo_DimAccount": {
@@ -4087,10 +4894,18 @@
         "object": "DimAccount",
         "type": "table"
       },
-      "mappings": {
-        "AccountKey": "AccountKey",
-        "ParentAccountKey": "ParentAccountKey"
-      },
+      "fields": [
+        {
+          "name": "AccountKey",
+          "alias": "AccountKey",
+          "primary-key": false
+        },
+        {
+          "name": "ParentAccountKey",
+          "alias": "ParentAccountKey",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4141,11 +4956,25 @@
     "DateOnlyTable": {
       "source": {
         "object": "date_only_table",
-        "type": "table",
-        "key-fields": [
-          "event_date"
-        ]
+        "type": "table"
       },
+      "fields": [
+        {
+          "name": "event_date",
+          "alias": "event_date",
+          "primary-key": true
+        },
+        {
+          "name": "event_time",
+          "alias": "event_time",
+          "primary-key": false
+        },
+        {
+          "name": "event_timestamp",
+          "alias": "event_timestamp",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4165,12 +4994,7 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "event_date": "event_date",
-        "event_time": "event_time",
-        "event_timestamp": "event_timestamp"
-      }
+      ]
     },
     "GetBooksAuth": {
       "source": {
@@ -4207,6 +5031,23 @@
         "object": "books_syn",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4226,18 +5067,30 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      }
+      ]
     },
     "BookViaNestedSynonym": {
       "source": {
         "object": "books_syn_nested",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "title",
+          "alias": "title",
+          "primary-key": false
+        },
+        {
+          "name": "publisher_id",
+          "alias": "publisher_id",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4257,18 +5110,25 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "title": "title",
-        "publisher_id": "publisher_id"
-      }
+      ]
     },
     "PublisherViaPublicSynonym": {
       "source": {
         "object": "dab_pub_publishers",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4288,17 +5148,35 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "id": "id",
-        "name": "name"
-      }
+      ]
     },
     "NumberShape": {
       "source": {
         "object": "number_shapes",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "small_id",
+          "alias": "small_id",
+          "primary-key": false
+        },
+        {
+          "name": "big_id",
+          "alias": "big_id",
+          "primary-key": false
+        },
+        {
+          "name": "free_num",
+          "alias": "free_num",
+          "primary-key": false
+        },
+        {
+          "name": "money",
+          "alias": "money",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4326,24 +5204,24 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "small_id": "small_id",
-        "big_id": "big_id",
-        "free_num": "free_num",
-        "money": "money"
-      }
+      ]
     },
     "TouchItemOne": {
       "source": {
         "object": "SYSTEM.dab_overload_pkg.touch_item#1",
         "type": "stored-procedure",
-        "parameters": {
-          "p_id": 1
-        }
+        "parameters": [
+          {
+            "name": "p_id",
+            "required": false,
+            "default": "1"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": false,
+        "operation": "mutation",
         "type": {
           "singular": "TouchItemOne",
           "plural": "TouchItemOnes"
@@ -4378,13 +5256,23 @@
       "source": {
         "object": "SYSTEM.dab_overload_pkg.touch_item#2",
         "type": "stored-procedure",
-        "parameters": {
-          "p_id": 1,
-          "p_flag": "U"
-        }
+        "parameters": [
+          {
+            "name": "p_id",
+            "required": false,
+            "default": "1"
+          },
+          {
+            "name": "p_flag",
+            "required": false,
+            "default": "U"
+          }
+        ]
       },
+      "fields": [],
       "graphql": {
         "enabled": false,
+        "operation": "mutation",
         "type": {
           "singular": "TouchItemTwo",
           "plural": "TouchItemTwos"
@@ -4420,6 +5308,18 @@
         "object": "\"Customers\"",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "Id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "Name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": true,
         "type": {
@@ -4439,22 +5339,30 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "Id": "id",
-        "Name": "name"
-      }
+      ]
     },
     "QuotedCustomerViaSynonym": {
       "source": {
         "object": "\"CustomersSyn\"",
         "type": "table"
       },
+      "fields": [
+        {
+          "name": "Id",
+          "alias": "id",
+          "primary-key": false
+        },
+        {
+          "name": "Name",
+          "alias": "name",
+          "primary-key": false
+        }
+      ],
       "graphql": {
         "enabled": false,
         "type": {
           "singular": "QuotedCustomerViaSynonym",
-          "plural": "quotedCustomersViaSynonym"
+          "plural": "QuotedCustomerViaSynonyms"
         }
       },
       "rest": {
@@ -4469,11 +5377,7 @@
             }
           ]
         }
-      ],
-      "mappings": {
-        "Id": "id",
-        "Name": "name"
-      }
+      ]
     }
   }
 }

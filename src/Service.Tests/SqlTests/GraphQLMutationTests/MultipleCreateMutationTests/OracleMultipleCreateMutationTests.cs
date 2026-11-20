@@ -126,11 +126,31 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
             await MultipleCreateMutationWithManyToManyRelationship(expectedResponse, linkingTableDbValidationQuery, expectedResponseFromLinkingTable);
         }
 
+        /// <summary>
+        /// Parameterless wrapper, as in MsSqlMultipleCreateMutationTests: the base method takes the
+        /// expected response, and an argument-taking [TestMethod] without [DataRow] fails with an
+        /// MSTest parameter-count error once the ignore is removed (#77).
+        /// </summary>
         [TestMethod]
         [Ignore("Oracle type mapping: is_wholesale_price is Short but GraphQL expects boolean. #27")]
-        public override async Task MultipleCreateMutationWithOneToOneRelationship(string expectedResponse)
+        public async Task MultipleCreateMutationWithOneToOneRelationship()
         {
-            await base.MultipleCreateMutationWithOneToOneRelationship(expectedResponse);
+            string expectedResponse = @"{
+                                            ""categoryid"": 101,
+                                            ""pieceid"": 101,
+                                            ""categoryName"": ""SciFi"",
+                                            ""piecesAvailable"": 100,
+                                            ""piecesRequired"": 50,
+                                            ""stocks_price"": {
+                                                ""categoryid"": 101,
+                                                ""pieceid"": 101,
+                                                ""instant"": ""2024-04-02"",
+                                                ""price"": 75,
+                                                ""is_wholesale_price"": true
+                                            }
+                                        }";
+
+            await MultipleCreateMutationWithOneToOneRelationship(expectedResponse);
         }
 
         [TestMethod]
@@ -374,6 +394,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle fixtures expose users/user_profiles but not User_NonAutogenRelationshipColumn GraphQL types. #27")]
         public async Task MultipleCreateMutationWithOneToOneRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -381,6 +402,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_mm / publisher_mm config-defined relationships. #27")]
         public async Task MultipleCreateMutationWithManyToOneRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -388,6 +410,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_mm / reviews_mm config-defined relationships. #27")]
         public async Task MultipleCreateMutationWithOneToManyRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -395,6 +418,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map book_author_link_mm as a GraphQL linking entity. #27")]
         public async Task MultipleCreateMutationWithManyToManyRelationshipDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -402,6 +426,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map *_mm entities used by config-defined multiple-create relationships. #27")]
         public async Task MultipleCreateMutationWithAllRelationshipTypesDefinedInConfigFile()
         {
             Assert.Inconclusive(
@@ -409,6 +434,7 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.GraphQLMutationTests.Multi
         }
 
         [TestMethod]
+        [Ignore("Oracle test config does not map *_mm entities used by config-defined multiple-create relationships. #27")]
         public async Task ManyTypeMultipleCreateMutationOperationRelationshipsDefinedInConfig()
         {
             Assert.Inconclusive(
