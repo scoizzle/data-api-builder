@@ -237,6 +237,39 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(query.Contains("dab_restrict_", StringComparison.Ordinal), query);
         }
 
+        /// <summary>
+        /// With max-page-size -1 a nested list can ask for Int32.MaxValue rows; hasNextPage adds
+        /// one, so Limit() is 2147483648. The hoisted rows CTE must emit that bound, not overflow.
+        /// </summary>
+        [TestMethod]
+        public void Build_HoistedRowsCteWithLimitAboveInt32_EmitsRankBound()
+        {
+            SqlQueryStructure root = CreateChainedList(levels: 3, rootOrdered: true);
+            SetLimit(root.JoinQueries["table1_subq"], (uint)int.MaxValue + 1);
+
+            string query = new OracleQueryBuilder().Build(root);
+
+            StringAssert.Contains(query, "FROM \"table1_rows_cte\" WHERE \"rn\" <= 2147483648) \"dab_restrict_0\"", query);
+        }
+
+        /// <summary>
+        /// A stored policy that already names <c>"ALIAS"."COLUMN"</c> is emitted unchanged, and a
+        /// bare column next to it is still qualified.
+        /// </summary>
+        [TestMethod]
+        public void Build_ReadPolicyWithQualifiedAndBareColumns_QualifiesOnlyTheBareColumn()
+        {
+            SqlQueryStructure root = CreateChainedList(levels: 1, rootOrdered: true);
+            root.DbPolicyPredicatesForOperations[EntityActionOperation.Read] =
+                "(\"TABLE0\".\"ID\" = @policy0 AND \"ID\" <> @policy1)";
+
+            string query = new OracleQueryBuilder().Build(root);
+
+            StringAssert.Contains(query, "(\"TABLE0\".\"ID\" = @policy0 AND \"TABLE0\".\"ID\" <> @policy1)", query);
+            Assert.IsFalse(query.Contains("\".\"TABLE0\"", StringComparison.Ordinal), query);
+            Assert.IsFalse(query.Contains("\"TABLE0\".\".\"", StringComparison.Ordinal), query);
+        }
+
         [TestMethod]
         public void Build_NoPageCte_ThreeLevelSqlIsUnchanged()
         {
