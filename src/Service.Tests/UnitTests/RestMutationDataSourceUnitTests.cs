@@ -99,11 +99,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
-        /// Two SQL Server sources keep the historical route: the default source. Routing every
-        /// engine to the entity source is a separate change.
+        /// Two SQL Server sources: the write goes to the entity's source, as it does for every
+        /// engine, and the default source's metadata provider is not requested.
         /// </summary>
         [TestMethod]
-        public async Task RestMutation_TwoMsSqlSources_StaysOnDefaultDataSource()
+        public async Task RestMutation_TwoMsSqlSources_UsesEntityDataSource()
         {
             CapturedRoute route = new();
             SqlMutationEngine engine = CreateEngine(
@@ -114,16 +114,18 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             await AssertSentinelAsync(engine, CreateContext(EntityActionOperation.Insert, primaryKeyInUrl: false));
 
-            Assert.AreEqual(DefaultSource, route.DataSourceName);
+            Assert.AreEqual(EntitySource, route.DataSourceName);
             Assert.AreEqual(DatabaseType.MSSQL, route.ExecutorDatabaseType);
-            Assert.IsTrue(route.MetadataProviders.Contains(DefaultSource));
+            Assert.IsTrue(route.MetadataProviders.Contains(EntitySource));
+            Assert.IsFalse(route.MetadataProviders.Contains(DefaultSource), "The default metadata provider must not be used.");
         }
 
         /// <summary>
-        /// A non-Oracle entity stays on the default source even when that source is a different engine.
+        /// A SQL Server entity under an Oracle default source is written through its own source
+        /// and its own engine's transaction executor.
         /// </summary>
         [TestMethod]
-        public async Task RestMutation_NonOracleEntity_StaysOnDefaultDataSource()
+        public async Task RestMutation_NonOracleEntityOnOracleDefault_UsesEntityDataSource()
         {
             CapturedRoute route = new();
             SqlMutationEngine engine = CreateEngine(
@@ -134,8 +136,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             await AssertSentinelAsync(engine, CreateContext(EntityActionOperation.Insert, primaryKeyInUrl: false));
 
-            Assert.AreEqual(DefaultSource, route.DataSourceName);
-            Assert.AreEqual(DatabaseType.Oracle, route.ExecutorDatabaseType);
+            Assert.AreEqual(EntitySource, route.DataSourceName);
+            Assert.AreEqual(DatabaseType.MSSQL, route.ExecutorDatabaseType);
+            Assert.IsTrue(route.MetadataProviders.Contains(EntitySource));
+            Assert.IsFalse(route.MetadataProviders.Contains(DefaultSource), "The default metadata provider must not be used.");
         }
 
         /// <summary>
