@@ -1515,8 +1515,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
 
         internal static string BuildRawBase64Expression(string columnSql)
         {
+            // BASE64_ENCODE wraps every 64 characters; strip the breaks as the chunked path does.
             return $"CASE WHEN {columnSql} IS NULL THEN NULL " +
-                   $"ELSE UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnSql})) END";
+                   $"ELSE REPLACE(REPLACE(UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE({columnSql})), CHR(10), ''), CHR(13), '') END";
         }
 
         internal static string BuildBlobBase64Expression(string columnSql)

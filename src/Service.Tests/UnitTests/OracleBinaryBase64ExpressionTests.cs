@@ -25,6 +25,22 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsFalse(sql.Contains("DBMS_LOB", StringComparison.Ordinal), sql);
         }
 
+        /// <summary>
+        /// UTL_ENCODE.BASE64_ENCODE wraps its output every 64 characters, so a RAW value longer
+        /// than 48 bytes would read back with embedded CR/LF. The RAW path must strip the line
+        /// breaks the same way the chunked BLOB / LONG RAW path does. #64
+        /// </summary>
+        [TestMethod]
+        public void Raw_StripsBase64LineBreaks()
+        {
+            string sql = OracleQueryBuilder.BuildBinaryColumnExpression("\"T\".\"RAWCOL\"", isBlob: false, physicalType: "RAW");
+
+            Assert.AreEqual(
+                "CASE WHEN \"T\".\"RAWCOL\" IS NULL THEN NULL " +
+                "ELSE REPLACE(REPLACE(UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(\"T\".\"RAWCOL\")), CHR(10), ''), CHR(13), '') END",
+                sql);
+        }
+
         [TestMethod]
         public void Blob_ChunksIntoClobUnderTheVarcharCap()
         {
