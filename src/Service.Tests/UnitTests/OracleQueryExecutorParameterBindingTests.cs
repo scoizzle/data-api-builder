@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.Text;
 using Azure.DataApiBuilder.Config.ObjectModel;
 using Azure.DataApiBuilder.Core.Configurations;
@@ -146,18 +147,20 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             OracleStringBindFacts.Kind kind = OracleStringBindFacts.Kind.None,
             int? length = null)
         {
-            OracleParameter parameter = new();
             DbConnectionParam entry = new(value, length: length);
             OracleStringBindFacts.Set(entry, kind);
-            CreateExecutor().PopulateDbTypeForParameter(
-                new KeyValuePair<string, DbConnectionParam>("@param0", entry),
-                parameter);
-            if (parameter.Value is null)
-            {
-                parameter.Value = value;
-            }
 
-            return parameter;
+            // The production bind path: PrepareDbCommand runs PopulateDbTypeForParameter and then
+            // assigns Value itself, so value assertions read what ODP.NET would receive.
+            using OracleConnection connection = new("User Id=x;Password=y;Data Source=localhost:1521/x");
+            DbCommand command = CreateExecutor().PrepareDbCommand(
+                connection,
+                "SELECT @param0 FROM DUAL",
+                new Dictionary<string, DbConnectionParam> { ["@param0"] = entry },
+                httpContext: null,
+                dataSourceName: string.Empty);
+            Assert.AreEqual(1, command.Parameters.Count);
+            return (OracleParameter)command.Parameters[0];
         }
 
         private static OracleQueryExecutor CreateExecutor()

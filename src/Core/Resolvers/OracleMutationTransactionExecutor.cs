@@ -54,10 +54,9 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 {
                     // Commit stays outside the work catch. A failed commit is not followed by
                     // rollback, and a rollback failure must not replace the original error.
-                    await OracleMutationCompletion.CompleteAsync(
+                    await CompleteInTransactionAsync(
+                        transaction,
                         () => work(session),
-                        transaction.Rollback,
-                        transaction.Commit,
                         _queryExecutor.LogPreservedRollbackFailure);
                 }
             }
@@ -65,6 +64,22 @@ namespace Azure.DataApiBuilder.Core.Resolvers
             {
                 throw _exceptionParser.Parse(dbException);
             }
+        }
+
+        /// <summary>
+        /// Runs <paramref name="work"/> and completes <paramref name="transaction"/>: rollback on
+        /// failure, commit on success (see <see cref="OracleMutationCompletion"/>).
+        /// </summary>
+        internal static Task CompleteInTransactionAsync(
+            DbTransaction transaction,
+            Func<Task> work,
+            Action<Exception, Exception>? logRollbackFailure)
+        {
+            return OracleMutationCompletion.CompleteAsync(
+                work,
+                transaction.Rollback,
+                transaction.Commit,
+                logRollbackFailure);
         }
 
         internal sealed class OracleLocalMutationSession : IMutationWorkSession
