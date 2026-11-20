@@ -127,7 +127,9 @@ BEGIN DAB_SESSION_CONTEXT_PKG.CLEAR_CLAIMS;
   `SetManagedIdentityAccessTokenIfAnyAsync`), so the probe uses the same prepared connection string
   (hosted TCPS / `SSL_SERVER_DN_MATCH` check, bounded statement cache) and managed identity token as
   requests. A forced token that cannot be obtained reports the data source Unhealthy instead of
-  connecting without it. The probe does not run the session-context block and does not read
+  connecting without it. The measured response time includes token acquisition on the first probe
+  and after the cached token expires, so a slow credential can exceed the data-source threshold
+  while the database itself is healthy. The probe does not run the session-context block and does not read
   `SYS_CONTEXT`, so it cannot observe or return a previous caller's claims. It also does not clear the
   namespace; the next executor checkout does. Enabling `set-session-context` does not require the DBA
   package to exist at health-check time.
