@@ -149,6 +149,8 @@ jobs:
       fi
     displayName: Raise and assert open_cursors
 
+  # Regenerates src/Service.Tests/dab-config.Oracle.json from config-generators/oracle-commands.txt,
+  # as the other engines' pipelines do.
   - task: DotNetCoreCLI@2
     displayName: Build
     inputs:
@@ -156,7 +158,16 @@ jobs:
       projects: |
         **/*.csproj
         !**/*Tests*.csproj
-      arguments: '--configuration $(buildConfiguration)'
+      arguments: '-p:generateConfigFileForDbType=oracle --configuration $(buildConfiguration)'
+
+  # The committed config must be what oracle-commands.txt generates; otherwise a hand edit to one of
+  # them is silently lost (or untested) in CI.
+  - bash: |
+      if ! git diff --exit-code -- src/Service.Tests/dab-config.Oracle.json; then
+        echo "##vso[task.logissue type=error]src/Service.Tests/dab-config.Oracle.json differs from the output of config-generators/oracle-commands.txt. Edit the commands file and regenerate with: bash config-generators/config-generator.sh oracle"
+        exit 1
+      fi
+    displayName: Check dab-config.Oracle.json matches oracle-commands.txt
 
   - task: DotNetCoreCLI@2
     displayName: Build Test Projects
