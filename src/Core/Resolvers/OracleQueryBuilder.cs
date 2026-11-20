@@ -1712,6 +1712,17 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         /// <inheritdoc />
         public string Build(SqlDeleteStructure structure)
         {
+            // Oracle runs a DELETE through a join view against the key-preserved base table and
+            // reports success. The other engines reject it, so DAB does too (#74).
+            if (structure.DatabaseObject is DatabaseView view
+                && OracleObjectFacts.View(view).DeleteRejection is string rejection)
+            {
+                throw new DataApiBuilderException(
+                    message: $"Cannot delete from view {view.FullName} because {rejection}.",
+                    statusCode: System.Net.HttpStatusCode.BadRequest,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.DatabaseOperationFailed);
+            }
+
             string predicates = JoinPredicateStrings(
                        structure.GetDbPolicyForOperation(EntityActionOperation.Delete),
                        Build(structure.Predicates));

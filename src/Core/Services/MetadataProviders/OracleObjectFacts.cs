@@ -15,6 +15,7 @@ namespace Azure.DataApiBuilder.Core.Services
         private static readonly ConditionalWeakTable<DatabaseStoredProcedure, ProcedureFacts> Procedures = new();
         private static readonly ConditionalWeakTable<ColumnDefinition, LobFacts> Columns = new();
         private static readonly ConditionalWeakTable<ParameterDefinition, ArgumentFacts> Arguments = new();
+        private static readonly ConditionalWeakTable<DatabaseView, ViewFacts> Views = new();
 
         public static ProcedureFacts Procedure(DatabaseStoredProcedure procedure)
         {
@@ -29,6 +30,11 @@ namespace Azure.DataApiBuilder.Core.Services
         public static ArgumentFacts Argument(ParameterDefinition parameter)
         {
             return Arguments.GetOrCreateValue(parameter);
+        }
+
+        public static ViewFacts View(DatabaseView view)
+        {
+            return Views.GetOrCreateValue(view);
         }
 
         internal sealed class ProcedureFacts
@@ -75,6 +81,19 @@ namespace Azure.DataApiBuilder.Core.Services
         internal sealed class ArgumentFacts
         {
             public string? CatalogName { get; set; }
+        }
+
+        /// <summary>
+        /// Delete eligibility of a view entity, set at metadata load (#74).
+        /// </summary>
+        internal sealed class ViewFacts
+        {
+            /// <summary>
+            /// Why a DELETE through this view is rejected, or null when it is allowed. Oracle
+            /// accepts a DELETE through a join view and removes the key-preserved base row; DAB
+            /// rejects it with 400, like the engines whose database refuses the statement.
+            /// </summary>
+            public string? DeleteRejection { get; set; }
         }
     }
 }

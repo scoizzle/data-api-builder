@@ -324,6 +324,18 @@ These items from the Oracle review are documented here and are not treated as op
 
 A local Oracle mutation rolls back when the work throws. If that rollback also throws, the rollback error is logged and the original mutation error is what the caller sees. A commit failure propagates and is not followed by a rollback.
 
+## Deleting through a view
+
+Oracle accepts a `DELETE` through a join view and removes the row of the key-preserved base table. MSSQL and PostgreSQL reject the same request, so DAB rejects it on Oracle too: a REST or GraphQL delete on a view entity whose view reads more than one table returns HTTP 400 `DatabaseOperationFailed` ("Cannot delete from view … because it reads N tables."). At metadata load DAB counts the distinct tables the view reads in `ALL_DEPENDENCIES`, following nested views and synonyms.
+
+- A view with an enabled `INSTEAD OF DELETE` trigger stays deletable; the trigger defines the delete.
+- A table referenced only in a subquery or through a function call is counted, so such a view is treated as multi-table.
+- A self-join reads one distinct table and stays deletable.
+- When the dependencies cannot be read, or no table is visible (missing privileges), deletes through the view are rejected and a warning is logged.
+- `PUT`/`PATCH` through a join view are unchanged: Oracle raises ORA-01779/ORA-01776 for a column it cannot modify, mapped to 400.
+
 ## Upgrade notes
+
+- **Oracle only: DELETE through a multi-table view entity returns 400.** It used to return 204 after deleting the key-preserved base row. See [Deleting through a view](#deleting-through-a-view).
 
 - **Oracle only: an insert with no supplied columns plus a create policy is denied (403).** `POST` with `{}` against an Oracle entity whose role has a create database policy returns HTTP 403 `DatabasePolicyFailure`. MSSQL, PostgreSQL, MySQL, and DWSQL responses are unchanged.
