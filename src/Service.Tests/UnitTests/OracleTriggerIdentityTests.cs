@@ -218,6 +218,73 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
             Assert.IsTrue(merged["id"]);
         }
 
+        /// <summary>
+        /// #58: Oracle stores a header guard <c>WHEN (new.id IS NULL)</c> in ALL_TRIGGERS.WHEN_CLAUSE,
+        /// not in TRIGGER_BODY, so the body alone looks like an unguarded assignment.
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("new.id IS NULL", DisplayName = "stored form without parentheses")]
+        [DataRow("(new.id IS NULL)", DisplayName = "parenthesized")]
+        [DataRow("NEW.ID is null", DisplayName = "case-insensitive")]
+        [DataRow(":new.id IS NULL", DisplayName = "colon form")]
+        public void WhenClauseNullGuardIsGeneratedByDefault(string whenClause)
+        {
+            IReadOnlyList<(string Name, bool IsReadOnly)> columns = OracleMetadataProvider.ClassifyTrigger(
+                "BEFORE EACH ROW",
+                "INSERT",
+                "BEGIN :new.id := emp_seq.NEXTVAL; END;",
+                whenClause);
+
+            Assert.AreEqual(1, columns.Count);
+            Assert.AreEqual("id", columns[0].Name);
+            Assert.IsFalse(columns[0].IsReadOnly);
+        }
+
+        [TestMethod]
+        public void QuotedWhenClauseGuardIsGeneratedByDefault()
+        {
+            (string name, bool isReadOnly) = OracleMetadataProvider.ClassifyTrigger(
+                "BEFORE EACH ROW",
+                "INSERT",
+                ":new.\"Id\" := emp_seq.NEXTVAL;",
+                "new.\"Id\" IS NULL").Single();
+
+            Assert.AreEqual("Id", name);
+            Assert.IsFalse(isReadOnly);
+        }
+
+        [DataTestMethod]
+        [DataRow(null, DisplayName = "no WHEN clause")]
+        [DataRow("new.other IS NULL", DisplayName = "guard on another column")]
+        [DataRow("new.id IS NULL OR new.flag = 1", DisplayName = "OR condition")]
+        [DataRow("new.id = 0", DisplayName = "not a null test")]
+        [DataRow("new.id IS NOT NULL", DisplayName = "IS NOT NULL")]
+        public void WhenClauseThatIsNotANullGuardForTheColumnStaysReadOnly(string? whenClause)
+        {
+            IReadOnlyList<(string Name, bool IsReadOnly)> columns = OracleMetadataProvider.ClassifyTrigger(
+                "BEFORE EACH ROW",
+                "INSERT",
+                ":new.id := emp_seq.NEXTVAL;",
+                whenClause);
+
+            Assert.AreEqual(1, columns.Count);
+            Assert.IsTrue(columns[0].IsReadOnly);
+        }
+
+        /// <summary>
+        /// #57: ALL_TRIGGERS.OWNER is the trigger's owner; the table's schema is TABLE_OWNER.
+        /// #58: the query must also read WHEN_CLAUSE.
+        /// </summary>
+        [TestMethod]
+        public void TriggerQueryFiltersOnTableOwnerAndReadsWhenClause()
+        {
+            string query = OracleMetadataProvider.TRIGGER_IDENTITY_QUERY;
+
+            StringAssert.Contains(query, "WHERE TABLE_OWNER = :owner AND TABLE_NAME = :table_name AND BASE_OBJECT_TYPE = 'TABLE'");
+            Assert.IsFalse(System.Text.RegularExpressions.Regex.IsMatch(query, @"(?<!TABLE_)OWNER\s*="), query);
+            StringAssert.Contains(query, "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, TRIGGER_BODY, WHEN_CLAUSE FROM ALL_TRIGGERS");
+        }
+
         private static (string Name, bool IsReadOnly) One(string? triggerType, string? triggeringEvent, string body)
         {
             IReadOnlyList<(string Name, bool IsReadOnly)> columns =
