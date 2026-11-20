@@ -564,15 +564,15 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             using (reader)
-            if (await reader.ReadAsync(cancellationToken))
-            {
-                synonym = new OracleCatalogNameResolver.SynonymRow(
-                    Owner: reader.GetString(0),
-                    SynonymName: reader.GetString(1),
-                    TableOwner: reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                    TableName: reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                    DbLink: reader.IsDBNull(4) ? null : reader.GetString(4));
-            }
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    synonym = new OracleCatalogNameResolver.SynonymRow(
+                        Owner: reader.GetString(0),
+                        SynonymName: reader.GetString(1),
+                        TableOwner: reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                        TableName: reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        DbLink: reader.IsDBNull(4) ? null : reader.GetString(4));
+                }
 
             cache[key] = synonym;
             return synonym;
@@ -1388,23 +1388,23 @@ namespace Azure.DataApiBuilder.Core.Services
                 }
             }
             else if (!await OracleSubprogramExistsAsync(conn, schemaFilter, dbSp, objectFilter, cancellationToken))
-                {
-                    // No ALL_ARGUMENTS rows: either a parameterless subprogram (valid) or a
-                    // non-existent object (error). Distinguish via ALL_PROCEDURES.
-                    var notFoundException = new DataApiBuilderException(
-                        message: $"No stored procedure definition found for the given database object {schemaFilter}.{objectFilter}",
-                        statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
-                        subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
+            {
+                // No ALL_ARGUMENTS rows: either a parameterless subprogram (valid) or a
+                // non-existent object (error). Distinguish via ALL_PROCEDURES.
+                var notFoundException = new DataApiBuilderException(
+                    message: $"No stored procedure definition found for the given database object {schemaFilter}.{objectFilter}",
+                    statusCode: System.Net.HttpStatusCode.ServiceUnavailable,
+                    subStatusCode: DataApiBuilderException.SubStatusCodes.ErrorInInitialization);
 
-                    if (_isValidateOnly)
-                    {
-                        SqlMetadataExceptions.Add(notFoundException);
-                        return;
-                    }
-                    else
-                    {
-                        throw notFoundException;
-                    }
+                if (_isValidateOnly)
+                {
+                    SqlMetadataExceptions.Add(notFoundException);
+                    return;
+                }
+                else
+                {
+                    throw notFoundException;
+                }
             }
 
             OracleObjectFacts.Procedure(dbSp).IsFunction = isFunction;

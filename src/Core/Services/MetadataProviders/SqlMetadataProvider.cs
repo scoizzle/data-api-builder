@@ -37,7 +37,7 @@ namespace Azure.DataApiBuilder.Core.Services
         where CommandT : DbCommand, new()
     {
         private ODataParser _oDataParser = new();
-        
+
         /// <summary>
         /// Literal adjustments for this engine. The default leaves values and predicates unchanged.
         /// </summary>
@@ -1994,14 +1994,14 @@ namespace Azure.DataApiBuilder.Core.Services
                         }
                     }
 
-                   if (entity.Fields is not null)
-                   {
-                       FieldMetadata? fieldMeta = entity.Fields.FirstOrDefault(f => f.Name.Equals(databaseColumnName, StringComparison.OrdinalIgnoreCase));
-                       if (fieldMeta != null && !string.IsNullOrWhiteSpace(fieldMeta.Alias))
-                       {
-                           databaseColumnName = fieldMeta.Alias;
-                       }
-                   }
+                    if (entity.Fields is not null)
+                    {
+                        FieldMetadata? fieldMeta = entity.Fields.FirstOrDefault(f => f.Name.Equals(databaseColumnName, StringComparison.OrdinalIgnoreCase));
+                        if (fieldMeta != null && !string.IsNullOrWhiteSpace(fieldMeta.Alias))
+                        {
+                            databaseColumnName = fieldMeta.Alias;
+                        }
+                    }
 
                     return IsIntrospectionField(databaseColumnName);
                 }
