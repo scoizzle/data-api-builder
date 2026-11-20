@@ -246,12 +246,12 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
-        /// Cache eligibility accounts for every data source, not just the default one: a secondary
-        /// Oracle source with set-session-context enabled disables caching even when the default
-        /// source does not enable it.
+        /// Cache eligibility is decided per data source: a secondary Oracle source with
+        /// set-session-context enabled is not cacheable, and it does not change the answer for the
+        /// default source.
         /// </summary>
         [TestMethod]
-        public void CanUseCache_AnySourceWithSessionContext_IsDisabled()
+        public void CanUseCache_SecondaryOracleSourceWithSessionContext_IsDisabledForThatSource()
         {
             DataSource defaultSource = new(DatabaseType.MSSQL, "Server=localhost;Database=TestDb;", new());
             DataSource oracleWithSessionContext = new(
@@ -263,8 +263,14 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 "Data Source=localhost:1521/x",
                 new Dictionary<string, object?> { ["command-timeout"] = 30 });
 
-            Assert.IsFalse(CreateCacheTestConfig(defaultSource, oracleWithSessionContext).CanUseCache());
-            Assert.IsTrue(CreateCacheTestConfig(defaultSource, oracleWithoutSessionContext).CanUseCache());
+            RuntimeConfig withSessionContext = CreateCacheTestConfig(defaultSource, oracleWithSessionContext);
+            Assert.IsFalse(withSessionContext.CanUseCache("secondary-source"));
+            Assert.IsTrue(withSessionContext.CanUseCache("default-source"));
+            Assert.IsTrue(withSessionContext.CanUseCache());
+
+            RuntimeConfig withoutSessionContext = CreateCacheTestConfig(defaultSource, oracleWithoutSessionContext);
+            Assert.IsTrue(withoutSessionContext.CanUseCache("secondary-source"));
+            Assert.IsTrue(withoutSessionContext.CanUseCache());
         }
 
         private static RuntimeConfig CreateCacheTestConfig(DataSource defaultSource, DataSource secondarySource)
