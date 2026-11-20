@@ -366,6 +366,69 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         }
 
         /// <summary>
+        /// The schema allows an @env/@akv reference for managed-identity. A load without variable
+        /// replacement (dab configure, dab add, ...) must keep the reference as written instead of
+        /// rejecting it as an invalid boolean, and must write it back unchanged. #67
+        /// </summary>
+        [DataTestMethod]
+        [DataRow("@env('DAB_ORACLE_MI')")]
+        [DataRow("@akv('dab-oracle-mi')")]
+        public void OracleOptions_ManagedIdentity_UnresolvedReferenceLoadsAndRoundTripsWithoutReplacement(string reference)
+        {
+            string json = OracleConfigJsonWithManagedIdentity("\"" + reference + "\"");
+
+            bool parsed = RuntimeConfigLoader.TryParseConfig(
+                json,
+                out RuntimeConfig? config,
+                out string? parseError,
+                replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: false, doReplaceAkvVar: false));
+
+            Assert.IsTrue(parsed, $"Config load failed: {parseError}");
+            Assert.AreEqual(reference, config!.DataSource.Options![OracleOptions.MANAGED_IDENTITY_OPTION]);
+            StringAssert.Contains(config.ToJson(), "\"managed-identity\": \"" + reference + "\"");
+        }
+
+        [DataTestMethod]
+        [DataRow("true", true)]
+        [DataRow("0", false)]
+        public void OracleOptions_ManagedIdentity_EnvReferenceResolvesWithReplacement(string envValue, bool expected)
+        {
+            const string variable = "DAB_ORACLE_MI_67";
+            Environment.SetEnvironmentVariable(variable, envValue);
+            try
+            {
+                string json = OracleConfigJsonWithManagedIdentity("\"@env('" + variable + "')\"");
+
+                Assert.IsTrue(RuntimeConfigLoader.TryParseConfig(
+                    json,
+                    out RuntimeConfig? config,
+                    replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: true)));
+                Assert.AreEqual(expected, config!.DataSource.GetTypedOptions<OracleOptions>()!.ManagedIdentity);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, null);
+            }
+        }
+
+        [TestMethod]
+        public void OracleOptions_ManagedIdentity_InvalidLiteralRejectedWithoutReplacement()
+        {
+            string json = OracleConfigJsonWithManagedIdentity("\"maybe\"");
+
+            Assert.IsFalse(RuntimeConfigLoader.TryParseConfig(
+                json,
+                out _,
+                replacementSettings: new DeserializationVariableReplacementSettings(doReplaceEnvVar: false, doReplaceAkvVar: false)));
+        }
+
+        private static string OracleConfigJsonWithManagedIdentity(string managedIdentityJson) =>
+            "{\"$schema\":\"dab.draft.schema.json\"," +
+            "\"data-source\":{\"database-type\":\"oracle\",\"connection-string\":\"User Id=app;Data Source=localhost:1521/svc\"," +
+            "\"options\":{\"managed-identity\":" + managedIdentityJson + "}}," +
+            "\"entities\":{}}";
+
+        /// <summary>
         /// The schema's option description and the documented behavior must stay in step with the
         /// implemented precedence and value forms.
         /// </summary>
