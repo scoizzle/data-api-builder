@@ -36,6 +36,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
         }
 
         /// <summary>
+        /// Subprogram argument and RETURN types DAB cannot bind, rejected at startup (#60).
+        /// INTERVAL YEAR TO MONTH has no CLR equivalent (a year-month span is not a
+        /// <see cref="TimeSpan"/>). PL/SQL-only types (PL/SQL BOOLEAN, PLS_INTEGER,
+        /// BINARY_INTEGER, records and index-by tables) cannot be bound from a SQL client.
+        /// </summary>
+        public static bool IsUnsupportedSubprogramType(string? sqlType)
+        {
+            string normalized = Normalize(sqlType);
+            return normalized is "INTERVAL YEAR TO MONTH" or "BINARY_INTEGER" or "PLS_INTEGER"
+                || normalized.StartsWith("PL/SQL ", StringComparison.Ordinal);
+        }
+
+        /// <summary>
         /// Maps a catalog type name to the CLR type DAB exposes. Unknown names stay <see cref="object"/>.
         /// </summary>
         public static Type ToClrType(string? sqlType)

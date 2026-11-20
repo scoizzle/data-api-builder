@@ -8,6 +8,7 @@ using System.Data.Common;
 using System.IO;
 using System.IO.Abstractions.TestingHelpers;
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Security.Claims;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -216,6 +217,41 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             Assert.AreEqual(1, executor.CommandTexts.Count);
             Assert.IsFalse(executor.Enlisted[0]);
+            Assert.AreEqual(0, executor.Transactions.Count);
+        }
+
+        /// <summary>
+        /// Regression guard for #20: inside a local mutation transaction the session-context block
+        /// must run on that transaction, or ODP.NET rejects the command (the connection already
+        /// has a transaction) and claims would not be visible to the mutation's statements.
+        /// </summary>
+        [TestMethod]
+        public void ApplySessionContext_OracleTransaction_EnlistsCommand()
+        {
+            RecordingOracleQueryExecutor executor = CreateRecordingExecutor(sessionContext: true);
+            using OracleConnection connection = ClosedConnection();
+            // OracleTransaction has no public constructor; only its identity matters here.
+            OracleTransaction transaction = (OracleTransaction)RuntimeHelpers.GetUninitializedObject(typeof(OracleTransaction));
+
+            executor.Apply(connection, httpContext: null, dataSourceName: string.Empty, transaction);
+
+            Assert.AreEqual(1, executor.CommandTexts.Count);
+            Assert.AreEqual(1, executor.Transactions.Count);
+            Assert.AreSame(transaction, executor.Transactions[0]);
+        }
+
+        [TestMethod]
+        public async Task ApplySessionContextAsync_OracleTransaction_EnlistsCommand()
+        {
+            RecordingOracleQueryExecutor executor = CreateRecordingExecutor(sessionContext: true);
+            using OracleConnection connection = ClosedConnection();
+            OracleTransaction transaction = (OracleTransaction)RuntimeHelpers.GetUninitializedObject(typeof(OracleTransaction));
+
+            await executor.ApplyAsync(connection, httpContext: null, dataSourceName: string.Empty, transaction, CancellationToken.None);
+
+            Assert.AreEqual(1, executor.CommandTexts.Count);
+            Assert.AreEqual(1, executor.Transactions.Count);
+            Assert.AreSame(transaction, executor.Transactions[0]);
         }
 
         [TestMethod]
@@ -533,6 +569,11 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
 
             public List<bool> Enlisted { get; } = new();
 
+            /// <summary>
+            /// Transactions the session-context command was enlisted in, in call order.
+            /// </summary>
+            public List<OracleTransaction> Transactions { get; } = new();
+
             public List<CancellationToken> AsyncTokens { get; } = new();
 
             public int ParameterCount => ParameterValues.Count;
@@ -563,6 +604,12 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
                 CancellationToken cancellationToken)
             {
                 return ApplySessionContextAsync(connection, httpContext, dataSourceName, transaction, cancellationToken);
+            }
+
+            protected override void EnlistSessionContextCommand(OracleCommand command, OracleTransaction transaction)
+            {
+                Transactions.Add(transaction);
+                base.EnlistSessionContextCommand(command, transaction);
             }
 
             protected override void ExecuteSessionContextCommand(OracleCommand command)

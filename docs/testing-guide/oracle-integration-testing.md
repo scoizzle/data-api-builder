@@ -26,7 +26,7 @@ The default job runs with `TestCategory!=Oracle`, so a pure unit test tagged `Or
    docker exec oracle-db bash -c "printf 'ALTER SYSTEM SET open_cursors=1500 SCOPE=BOTH;\nexit;\n' | sqlplus -s system/awesome@//localhost:1521/test"
    ```
 
-3. Run the live tests; the connection string in `src/Service.Tests/dab-config.Oracle.json` already matches the container above:
+3. In `src/Service.Tests/dab-config.Oracle.json`, replace `Password=REPLACEME` with the `ORACLE_PASSWORD` from step 1 (`awesome` above). The checked-in placeholder matches the other engines' configs; do not commit the local password. Then run the live tests:
 
    ```bash
    dotnet test src/Service.Tests/Azure.DataApiBuilder.Service.Tests.csproj --filter "TestCategory=Oracle"

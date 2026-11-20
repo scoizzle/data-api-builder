@@ -30,21 +30,16 @@ namespace Azure.DataApiBuilder.Service.Tests.SqlTests.RestApiTests.Delete
         };
 
         /// <summary>
-        /// Oracle permits DELETE on books_publishers_view_composite. The key-preserved
-        /// books row is deleted and the response is 204. Other engines reject this
-        /// multi-table view delete.
+        /// Oracle itself would delete the key-preserved books row through
+        /// books_publishers_view_composite. DAB rejects a DELETE through a multi-table view with
+        /// 400, like the other engines (#74). The view name is the catalog spelling.
         /// </summary>
         [TestMethod]
         public async Task DeleteOneInViewBadRequestTest()
         {
-            await SetupAndRunRestApiTest(
-                primaryKeyRoute: "id/1/pub_id/1234",
-                queryString: null,
-                entityNameOrPath: _composite_subset_bookPub,
-                sqlQuery: string.Empty,
-                operationType: EntityActionOperation.Delete,
-                expectedStatusCode: HttpStatusCode.NoContent
-            );
+            await DeleteOneInViewBadRequestTest(
+                expectedErrorMessage: "Cannot delete from view",
+                isExpectedErrorMsgSubstr: true);
         }
 
         [TestMethod]
