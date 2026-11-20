@@ -34,6 +34,10 @@ The default job runs with `TestCategory!=Oracle`, so a pure unit test tagged `Or
 
 Pure unit tests need no database: `dotnet test --filter "TestCategory!=Oracle&FullyQualifiedName~Oracle"`.
 
+## Test configuration
+
+`src/Service.Tests/dab-config.Oracle.json` is generated, like the other engines' test configs. Change `config-generators/oracle-commands.txt`, build the CLI (`dotnet build src/Cli/Cli.csproj`), and regenerate with `bash config-generators/config-generator.sh oracle` (or `config-generator.ps1 oracle` on Windows); commit both files. The Oracle pipeline regenerates the file during its build and fails if it differs from the committed copy.
+
 ## CI
 
 `.pipelines/oracle-pipelines.yml` starts the same image (pinned by digest) with a generated password, waits for the PDB to accept SQL (retrying the container once and dumping its log on failure), sets and asserts `open_cursors=1500`, writes the connection string into the built `dab-config.Oracle.json` with `FileTransform`, and runs `TestCategory=Oracle`.
