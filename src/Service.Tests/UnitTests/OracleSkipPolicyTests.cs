@@ -29,8 +29,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         /// Ceiling after issue #27. Lower this when an ignore is removed. Do not raise it.
         /// #70 raised it from 21 to 27 once: six Assert.Inconclusive-only stubs were already
         /// skipped but invisible to the gate, and are now counted as ignores.
+        /// #74 raised it to 33 once: six shared mutation scenarios that never ran on Oracle
+        /// (no wrapper at all) are now present as ignores.
         /// </summary>
-        private const int MaxIgnored = 27;
+        private const int MaxIgnored = 33;
 
         [TestMethod]
         public void OracleIgnores_MatchTheBaseline()
