@@ -17,7 +17,10 @@ namespace Azure.DataApiBuilder.Service.Tests.UnitTests
         [TestMethod]
         public void TypeTable_UsesTimeZoneRawAndBlobSeeds()
         {
-            string schema = File.ReadAllText(FindRepoFile(Path.Combine("src", "Service.Tests", "DatabaseSchema-Oracle.sql")));
+            // A CRLF checkout (core.autocrlf on Windows) must not change the result of the
+            // multi-line assertion below.
+            string schema = File.ReadAllText(FindRepoFile(Path.Combine("src", "Service.Tests", "DatabaseSchema-Oracle.sql")))
+                .ReplaceLineEndings("\n");
 
             StringAssert.Contains(schema, "datetimeoffset_types TIMESTAMP(6) WITH TIME ZONE");
             StringAssert.Contains(schema, "bytearray_types RAW(2000)");
