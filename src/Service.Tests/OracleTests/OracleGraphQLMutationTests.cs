@@ -385,6 +385,82 @@ namespace Azure.DataApiBuilder.Service.Tests.OracleTests
 
         #endregion
 
+        #region Shared scenarios not yet run on Oracle (#74)
+
+        // GraphQLMutationTestBase helpers only run when an engine wraps them. These wrappers were
+        // added offline (no live Oracle) so the skip baseline counts them; remove an [Ignore] once
+        // the scenario passes against Oracle.
+
+        [TestMethod]
+        [Ignore("Added without a live Oracle run; verify ORA-00001 on book_website_placements.book_id. #74")]
+        public async Task TestViolatingOneToOneRelationship()
+        {
+            await TestViolatingOneToOneRelationship("ORA-00001");
+        }
+
+        [TestMethod]
+        [Ignore("Added without a live Oracle run; verify the invalid-identifier error. #74")]
+        public override async Task UpdateWithInvalidIdentifier()
+        {
+            await base.UpdateWithInvalidIdentifier();
+        }
+
+        [TestMethod]
+        [Ignore("Added without a live Oracle run; verify the no-new-values error. #74")]
+        public override async Task UpdateWithNoNewValues()
+        {
+            await base.UpdateWithNoNewValues();
+        }
+
+        [TestMethod]
+        [Ignore("Added without a live Oracle run; verify stored-procedure __typename selection. #74")]
+        public override async Task ExecuteMutationWithOnlyTypenameInSelectionSet()
+        {
+            await base.ExecuteMutationWithOnlyTypenameInSelectionSet();
+        }
+
+        [TestMethod]
+        [Ignore("Added without a live Oracle run; verify NUMBER(18,2) round-trips under each culture. #74")]
+        [DataRow("en-US")]
+        [DataRow("en-DE")]
+        public async Task CanCreateItemWithCultureInvariant(string cultureInfo)
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'item_name' VALUE item_name,
+                    'subtotal' VALUE subtotal, 'tax' VALUE tax
+                ) AS data
+                FROM (
+                    SELECT id, item_name, subtotal, tax FROM sales
+                    WHERE item_name = 'test_name'
+                    ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
+                )";
+            await CanCreateItemWithCultureInvariant(cultureInfo, oracleQuery);
+        }
+
+        [TestMethod]
+        [Ignore("The base asserts SQL Server defaults: Oracle's random_number has no default and default_string_with_parenthesis is '() '. Not run live. #74")]
+        public async Task InsertMutationWithDefaultBuiltInFunctions()
+        {
+            string oracleQuery = @"
+                SELECT JSON_OBJECT(
+                    'id' VALUE id, 'user_value' VALUE user_value,
+                    'current_date' VALUE current_date, 'current_timestamp' VALUE current_timestamp,
+                    'random_number' VALUE random_number, 'next_date' VALUE next_date,
+                    'default_string_with_parenthesis' VALUE default_string_with_parenthesis,
+                    'default_function_string_with_parenthesis' VALUE default_function_string_with_parenthesis,
+                    'default_integer' VALUE default_integer, 'default_date_string' VALUE default_date_string
+                ) AS data
+                FROM (
+                    SELECT * FROM default_with_function_table
+                    WHERE id = 5001 AND user_value = 1234
+                    ORDER BY id ASC FETCH FIRST 1 ROWS ONLY
+                )";
+            await InsertMutationWithDefaultBuiltInFunctions(oracleQuery);
+        }
+
+        #endregion
+
         #region Negative Tests
 
         [TestMethod]
