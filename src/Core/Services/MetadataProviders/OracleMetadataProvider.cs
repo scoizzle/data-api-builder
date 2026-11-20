@@ -886,6 +886,7 @@ namespace Azure.DataApiBuilder.Core.Services
             }
 
             await LoadTriggerIdentityAsync(conn, owner, table, cancellationToken);
+            await LoadViewDeleteRejectionAsync(conn, owner, table, cancellationToken);
             return columns;
         }
 
