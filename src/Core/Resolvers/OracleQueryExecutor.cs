@@ -338,10 +338,19 @@ namespace Azure.DataApiBuilder.Core.Resolvers
                 dataSourceName);
             if (transaction is OracleTransaction oracleTransaction)
             {
-                contextCommand.Transaction = oracleTransaction;
+                EnlistSessionContextCommand(contextCommand, oracleTransaction);
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Enlists the session-context block in the mutation's local transaction. Tests override
+        /// this to observe enlistment: ODP.NET does not report a transaction that has no open connection.
+        /// </summary>
+        protected virtual void EnlistSessionContextCommand(OracleCommand command, OracleTransaction transaction)
+        {
+            command.Transaction = transaction;
         }
 
         /// <summary>
